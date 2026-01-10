@@ -21,7 +21,7 @@ export async function main(ns) {
 
     if (ns.hasRootAccess(server)) {
 
-      ns.scp(script, server, "home")
+     /* ns.scp(script, server, "home") */
       if (script === "share.js") {
         const thread_count = num_threads(ns, "share.js", server)
         if (thread_count != 0) {
