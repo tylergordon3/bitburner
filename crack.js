@@ -11,7 +11,7 @@ export async function crack(ns, server) {
 
     if (required <= openers) {
       openAllPorts(ns, server);
-      nuke_check = ns.nuke(server);
+      let nuke_check = ns.nuke(server);
       if (nuke_check) {
         return true
       } else {

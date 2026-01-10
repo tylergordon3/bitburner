@@ -1,5 +1,5 @@
-import { ACTIONS } from "/lib/actions.js";
-import { SERVERS } from "/lib/servers.js";
+import { ACTIONS } from "lib/actions.js";
+import { SERVERS } from "lib/server-names.js";
 
 /** 
  * @param {NS} ns 

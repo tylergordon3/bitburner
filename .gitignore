@@ -1,5 +1,5 @@
 .vscode
 BitburnerGoFilesync.exe
-config.json
+jsconfig.json
 global.d.ts
 NetscriptDefinitions.d.ts
