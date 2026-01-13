@@ -1,5 +1,15 @@
-/**
- * Used for navigating the server network.
- */
+import { BotNet, rankedTargets } from "lib/botnet.js";
+import { hgwAction, prepServer } from "hgw.js";
+import { ACTIONS } from "lib/actions.js";
 
-import { Server } from "./lib/server";
+/** @param {NS} ns */
+export async function main(ns) {
+    const botnet = new BotNet(ns, "home");
+    let target = rankedTargets(botnet)[0];
+    while (true) {
+        await prepServer(ns, botnet, target.hostname());
+        await hgwAction(ns, target.hostname(), botnet, ACTIONS.hack)
+        target = rankedTargets(botnet)[0];
+    }
+}
+

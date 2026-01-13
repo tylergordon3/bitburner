@@ -85,6 +85,17 @@ export async function prepServer(ns, botnet, host) {
     }
 }
 
+
+/**
+ * @param {NS} ns 
+ * @param {number[]} pid 
+ */
+export async function is_action_done(ns, pid) {
+    const is_done = (i) => !ns.isRunning(i);
+    return pid.every(is_done);
+}
+
+
 /**
  * Source: https://github.com/quacksouls/bitwalk/blob/main/src/lib/hgw.js#L101
  * @param {NS} ns 
@@ -102,9 +113,20 @@ export async function hgwAction(ns, host, botnet, action) {
         return ns.exec(script, serv, option, host);
     }
 
+    const pids = [];
+   
     for (const serv of botnet.rooted_servers.values()) {
         serv.refresh();
-        if (hasRamForScript(serv)) { runScript(serv) }
+        
+        if (!hasRamForScript(serv)) continue;
+        
+        const pid = runScript(serv);
+        if (pid != 0) {
+            pids.push(pid)
+        }
     }
-    
+
+    while (!(await is_action_done(ns, pids))) {
+        await ns.sleep(100);
+    }
 }
