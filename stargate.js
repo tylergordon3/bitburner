@@ -11,6 +11,7 @@ export async function main(ns) {
     while (true) {
         await prepServer(ns, botnet, target.hostname());
         await hgwAction(ns, target.hostname(), botnet, "hack")
+        botnet.server_walk("home")
         target = rankedTargets(botnet)[0];
         await ns.sleep(1);
     }
