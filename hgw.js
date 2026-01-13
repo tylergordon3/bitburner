@@ -69,14 +69,14 @@ export function hgwScript(action) {
  */
 export async function prepServer(ns, botnet, host) {
     const script = [ACTIONS.grow, ACTIONS.hack, ACTIONS.weaken];
-    const scp = (serv) => ns.scp(script, serv, SERVERS.home);
+    const scp = (serv) => ns.scp(script, serv.hostname(), SERVERS.home);
     for (;;) {
         botnet.rooted_servers.forEach(scp);
         if (!atMinSecurity(ns, host)) {
-            await hgwAction(ns, host, botnet, ACTIONS.weaken);
+            await hgwAction(ns, host, botnet, "weaken");
         }
         if (!atMaxMoney(ns, host)) {
-            await hgwAction(ns, host, botnet, ACTIONS.grow);
+            await hgwAction(ns, host, botnet, "grow");
         }
         if (donePrep(ns, host)) {
             return;
@@ -106,11 +106,11 @@ export async function is_action_done(ns, pid) {
 export async function hgwAction(ns, host, botnet, action) {
     const time = hgwTiming(ns, host, action);
     const script = hgwScript(action);
-    const hasRamForScript = (serv) => checkScript(ns, script, serv);
-    const nthread = (serv) => threadCount(ns, script, serv);
+    const hasRamForScript = (serv) => checkScript(ns, script, serv.hostname());
+    const nthread = (serv) => threadCount(ns, script, serv.hostname());
     const runScript = (serv) => {
         const option = { preventDuplicates: true, threads: nthread(serv) };
-        return ns.exec(script, serv, option, host);
+        return ns.exec(script, serv.hostname(), option, host);
     }
 
     const pids = [];
