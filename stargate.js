@@ -10,8 +10,9 @@ export async function main(ns) {
     let target = rankedTargets(botnet)[0];
     while (true) {
         await prepServer(ns, botnet, target.hostname());
-        await hgwAction(ns, target.hostname(), botnet, ACTIONS.hack)
+        await hgwAction(ns, target.hostname(), botnet, "hack")
         target = rankedTargets(botnet)[0];
+        await ns.sleep(1);
     }
 }
 
