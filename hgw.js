@@ -116,7 +116,7 @@ export async function hgwAction(ns, host, botnet, action) {
     }
 
     const pids = [];
-   
+    botnet.server_walk("home")
     for (const serv of botnet.rooted_servers.values()) {
         serv.refresh();
         
