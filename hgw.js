@@ -68,6 +68,7 @@ export function hgwScript(action) {
  * @param {string} host 
  */
 export async function prepServer(ns, botnet, host) {
+    ns.print(`INFO Running prepServer on botner for: ${host}`)
     const script = [ACTIONS.grow, ACTIONS.hack, ACTIONS.weaken];
     const scp = (serv) => ns.scp(script, serv.hostname(), SERVERS.home);
     for (;;) {
@@ -104,6 +105,7 @@ export async function is_action_done(ns, pid) {
  * @param {string} action 
  */
 export async function hgwAction(ns, host, botnet, action) {
+    ns.print(`INFO Running ${action} on ${host} with botnet.`)
     const time = hgwTiming(ns, host, action);
     const script = hgwScript(action);
     const hasRamForScript = (serv) => checkScript(ns, script, serv.hostname());

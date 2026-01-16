@@ -5,13 +5,15 @@ import { ACTIONS } from "lib/actions.js";
 
 /** @param {NS} ns */
 export async function main(ns) {
-    ns.disableLog("sleep");
+    ns.disableLog("ALL");
+    ns.ui.openTail();
     const botnet = new BotNet(ns, "home");
     let target = rankedTargets(botnet)[0];
     while (true) {
         await prepServer(ns, botnet, target.hostname());
         await hgwAction(ns, target.hostname(), botnet, "hack")
         botnet.server_walk("home")
+
         target = rankedTargets(botnet)[0];
         await ns.sleep(1);
     }
