@@ -86,5 +86,5 @@ export async function main(ns) {
 
     await study_and_create(ns);
 
-    // exec(ns, MONEY)
+    exec(ns, 'singularity/study.js')
 }
