@@ -1,0 +1,16 @@
+{
+  "compilerOptions": {
+    "checkJs": true,
+    "target": "ES2022",
+    "module": "ESNext",
+    "lib": ["ES2022", "DOM"],
+    "strict": false,
+    "skipLibCheck": true,
+    "noEmit": true
+  },
+  "files": [
+    "types/NetscriptDefinitions.d.ts",
+    "types/global.d.ts"
+  ],
+  "include": ["**/*.js", "types/global.d.ts"]
+}
