@@ -21,4 +21,5 @@ export async function earlyCrime(ns) {
     stronk(ns);
 
     ns.singularity.commitCrime("Mug", true);
+    return true
 }
