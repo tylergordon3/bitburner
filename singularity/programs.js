@@ -1,19 +1,32 @@
+import { darkweb } from "../lib/constants/tor";
+import { has_program } from "../lib/util";
 
 /**
  * 
  * @param {NS} ns 
- * @param {number} torCost 
  */
-async function buyTOR(ns, torCost) {
+export async function buyTOR(ns) {
     if (ns.singularity.purchaseTor()) {
         return true;
     }
 
-    ns.tprint("Cannot buy TOR. Launching stargate and working.");
     if (!ns.scriptRunning("stargate.js", "home")) {
         ns.run("stargate.js", 1);
-        ns.tprint("Launched stargate.js");
+        ns.tprint("Cannot buy TOR. Launched stargate.js");
+    } else {
+        ns.tprint("Cannot buy TOR. Stargate is already running.");
     }
 
-    await startCompanyWork(ns);
+    return false
+}
+
+/**
+ * 
+ * @param {NS} ns 
+ */
+export async function buyPrograms(ns) {
+    Object.values(darkweb.program).forEach(value => {
+        if (!has_program(ns, value.NAME)) {
+            ns.singularity.purchaseProgram(value.NAME); 
+    }})
 }

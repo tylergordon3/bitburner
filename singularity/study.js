@@ -5,7 +5,7 @@
  * @param {NS} ns 
  * @param {number} target 
  */
-async function studyToResetTarget(ns, target) {
+export async function studyToResetTarget(ns, target) {
 
     if (ns.getPlayer().skills.hacking >= target) return;
 
