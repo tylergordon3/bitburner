@@ -25,9 +25,12 @@ export async function main(ns) {
     
     ns.singularity.stopAction();
 
+    ns.tprint("Criming like a boss while waiting to upgrade RAM.")
+    await earlyCrime(ns);
     while (ns.singularity.getUpgradeHomeRamCost() > ns.getPlayer().money) {
-        ns.sleep(loop);
+        await ns.sleep(loop);
     }
     ns.singularity.upgradeHomeRam();
     ns.singularity.stopAction()
+   
 }
