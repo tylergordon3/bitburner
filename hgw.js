@@ -68,7 +68,7 @@ export function hgwScript(action) {
  * @param {string} host 
  */
 export async function prepServer(ns, botnet, host) {
-    ns.print(`INFO Running prepServer on botner for: ${host}`)
+    ns.print(`INFO Running prepServer on botnet for: ${host}`)
     const script = [ACTIONS.grow, ACTIONS.hack, ACTIONS.weaken];
     const scp = (serv) => ns.scp(script, serv.hostname(), SERVERS.home);
     for (;;) {
