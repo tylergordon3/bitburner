@@ -24,6 +24,11 @@ export async function earlyCrime(ns) {
     ns.exec('./stargate.js', "home", 1);
     await stronk(ns);
     // tjos
-    ns.singularity.commitCrime("Mug", true);
+    while(ns.singularity.getCrimeChance("Homicide") < 80) {
+        ns.singularity.commitCrime("Mug", true);
+        ns.sleep(loop);
+    }
+    ns.singularity.commitCrime("Homicide", true);
+    
     return true
 }
