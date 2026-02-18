@@ -26,7 +26,7 @@ export async function earlyCrime(ns) {
     // tjos
     while(ns.singularity.getCrimeChance("Homicide") < 80) {
         ns.singularity.commitCrime("Mug", true);
-        ns.sleep(loop);
+        await ns.sleep(loop);
     }
     ns.singularity.commitCrime("Homicide", true);
     

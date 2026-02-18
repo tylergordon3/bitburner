@@ -1,6 +1,6 @@
 import { applyAndWork } from "./singularity/workforce";
 import { studyToResetTarget } from "./singularity/study";
-import { buyTOR } from "./singularity/programs";
+import { buyPrograms, buyTOR } from "./singularity/programs";
 import { loop } from "./lib/constants/time";
 import { earlyCrime } from "./singularity/crime";
 
@@ -28,6 +28,7 @@ export async function main(ns) {
     ns.tprint("Criming like a boss while waiting to upgrade RAM.")
     await earlyCrime(ns);
     while (ns.singularity.getUpgradeHomeRamCost() > ns.getPlayer().money) {
+        await buyPrograms(ns);
         await ns.sleep(loop);
     }
     ns.singularity.upgradeHomeRam();
