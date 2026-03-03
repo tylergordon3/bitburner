@@ -21,10 +21,8 @@ export async function stronk(ns) {
  * @param {NS} ns
  */
 export async function earlyCrime(ns) {
-    ns.exec('./stargate.js', "home", 1);
     await stronk(ns);
-    // tjos
-    while(ns.singularity.getCrimeChance("Homicide") < 80) {
+    while(ns.singularity.getCrimeChance("Homicide") < 0.8) {
         ns.singularity.commitCrime("Mug", true);
         await ns.sleep(loop);
     }

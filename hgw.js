@@ -72,6 +72,7 @@ export async function prepServer(ns, botnet, host) {
     const script = [ACTIONS.grow, ACTIONS.hack, ACTIONS.weaken];
     const scp = (serv) => ns.scp(script, serv.hostname(), SERVERS.home);
     for (;;) {
+        botnet.walk();
         botnet.rooted_servers.forEach(scp);
         if (!atMinSecurity(ns, host)) {
             await hgwAction(ns, host, botnet, "weaken");
