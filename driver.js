@@ -11,7 +11,8 @@ export async function main(ns) {
     const TARGET_HACK = 100;
 
     ns.disableLog("ALL");
-
+    ns.run("hacknet-manager.js", 1);
+    ns.run("purchase-server8gb.js", 1);
     // Study! 
     await studyToResetTarget(ns, TARGET_HACK);
 
