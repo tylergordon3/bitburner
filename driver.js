@@ -11,7 +11,7 @@ export async function main(ns) {
     const TARGET_HACK = 100;
 
     ns.disableLog("ALL");
-    ns.run("hacknet-manager.js", 1);
+    // ns.run("hacknet-manager.js", 1);
     ns.run("purchase-server8gb.js", 1);
     // Study! 
     await studyToResetTarget(ns, TARGET_HACK);
@@ -28,11 +28,11 @@ export async function main(ns) {
 
     ns.tprint("Criming like a boss while waiting to upgrade RAM.")
     await earlyCrime(ns);
-    while (ns.singularity.getUpgradeHomeRamCost() > ns.getPlayer().money) {
+    while (true) {
         await buyPrograms(ns);
         await ns.sleep(loop);
     }
-    ns.singularity.upgradeHomeRam();
-    ns.singularity.stopAction()
+    // ns.singularity.upgradeHomeRam();
+    // ns.singularity.stopAction()
    
 }
