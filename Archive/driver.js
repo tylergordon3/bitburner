@@ -1,8 +1,8 @@
-import { applyAndWork } from "./singularity/workforce";
-import { studyToResetTarget } from "./singularity/study";
-import { buyPrograms, buyTOR } from "./singularity/programs";
+import { applyAndWork } from "../singularity/workforce";
+import { studyToResetTarget } from "../singularity/study";
+import { buyPrograms, buyTOR } from "../singularity/programs";
 import { loop } from "./lib/constants/time";
-import { earlyCrime } from "./singularity/crime";
+import { earlyCrime } from "../singularity/crime";
 
 /** 
  * @param {NS} ns

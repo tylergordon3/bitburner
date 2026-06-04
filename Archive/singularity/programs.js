@@ -1,5 +1,5 @@
-import { darkweb } from "../lib/constants/tor";
-import { has_program } from "../lib/util";
+import { darkweb } from "../Archive/lib/constants/tor";
+import { has_program } from "../Archive/lib/util";
 
 /**
  * 

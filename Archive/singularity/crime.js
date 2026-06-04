@@ -1,4 +1,4 @@
-import { loop } from "../lib/constants/time";
+import { loop } from "../Archive/lib/constants/time";
 
 /**
  * @param {NS} ns
