@@ -17,13 +17,13 @@ const BACKDOOR_PRIORITY = [
   "w0r1d_d43m0n",
 ];
 
-const FACTION_PRIORITY = [
+const FACTION_PRIORITY = /** @type {string[]} */ ([
   "CyberSec",
   "NiteSec",
   "The Black Hand",
   "BitRunners",
   "Daedalus",
-];
+]);
 
 function playerMoney(ns) {
   return ns.getPlayer().money ?? 0;
@@ -62,13 +62,14 @@ function rootEverything(ns) {
 /** @param {NS} ns */
 async function acceptInvites(ns) {
   for (const faction of ns.singularity.checkFactionInvitations()) {
-    ns.singularity.joinFaction(faction);
+    ns.singularity.joinFaction(/** @type {any} */ (faction));
   }
 }
 
 /** @param {NS} ns */
 async function backdoorTargets(ns) {
   for (const server of BACKDOOR_PRIORITY) {
+    if (!ns.serverExists(server)) continue;
     const info = ns.getServer(server);
     if (info.backdoorInstalled) continue;
     if (!ns.hasRootAccess(server)) continue;
@@ -91,7 +92,9 @@ function chooseFactionWork(ns) {
   const joined = ns.getPlayer().factions ?? [];
 
   for (const faction of FACTION_PRIORITY) {
-    if (joined.includes(faction)) return faction;
+    if (joined.includes(/** @type {any} */ (faction))) {
+      return faction;
+  }
   }
 
   return joined[0] ?? null;
@@ -105,7 +108,11 @@ function workForRep(ns) {
   const cur = ns.singularity.getCurrentWork();
   if (cur?.type === "FACTION" && cur?.factionName === faction) return;
 
-  ns.singularity.workForFaction(faction, "hacking", false);
+  ns.singularity.workForFaction(
+  /** @type {any} */ (faction),
+      "hacking",
+      false
+    );
 }
 
 /** @param {NS} ns */
@@ -185,9 +192,13 @@ async function maybeFinishBN(ns) {
 /** @param {NS} ns */
 export async function main(ns) {
   ns.disableLog("ALL");
-  ns.tail();
+  ns.ui.openTail();
 
   while (true) {
+    if (!ns.scriptRunning("/hacking/manager.js", "home")) {
+      ns.run("/hacking/manager.js", 1);
+    }
+
     await acceptInvites(ns);
     await buyDarkweb(ns);
     rootEverything(ns);
@@ -197,7 +208,9 @@ export async function main(ns) {
     maybeInstall(ns);
     await maybeFinishBN(ns);
 
-    ns.print(`Money: ${ns.formatNumber(playerMoney(ns))} | Hack: ${hackingLevel(ns)}`);
+    ns.print(
+      `Money: ${ns.format.number(playerMoney(ns))} | Hack: ${hackingLevel(ns)}`
+    );
     await ns.sleep(30_000);
   }
 }

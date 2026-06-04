@@ -1,1 +1,0 @@
-export const loop = 1e4;
