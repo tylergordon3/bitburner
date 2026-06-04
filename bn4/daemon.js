@@ -44,8 +44,8 @@ async function buyDarkweb(ns) {
 
   for (const p of PROGRAMS) {
     if (!ns.fileExists(p, "home")) {
-      const cost = s.getDarkwebProgramCost(p);
-      if (cost > 0 && playerMoney(ns) >= cost) s.purchaseProgram(p);
+      const cost = s.getDarkwebProgramCost(/** @type {any} */ (p));
+      if (cost > 0 && playerMoney(ns) >= cost) s.purchaseProgram(/** @type {any} */ (p));
     }
   }
 }
@@ -124,7 +124,7 @@ function canBuyAug(ns, faction, aug, owned) {
   if (!prereqs.every(a => owned.has(a))) return false;
 
   return (
-    s.getFactionRep(faction) >= s.getAugmentationRepReq(aug) &&
+    s.getFactionRep(/** @type {any} */ (faction)) >= s.getAugmentationRepReq(aug) &&
     playerMoney(ns) >= s.getAugmentationPrice(aug)
   );
 }
@@ -138,7 +138,7 @@ function buyAugs(ns) {
   const candidates = [];
 
   for (const faction of joined) {
-    for (const aug of s.getAugmentationsFromFaction(faction)) {
+    for (const aug of s.getAugmentationsFromFaction(/** @type {any} */ (faction))) {
       if (canBuyAug(ns, faction, aug, owned)) {
         candidates.push({
           faction,
@@ -154,7 +154,7 @@ function buyAugs(ns) {
 
   for (const c of candidates) {
     if (canBuyAug(ns, c.faction, c.aug, owned)) {
-      if (s.purchaseAugmentation(c.faction, c.aug)) {
+      if (s.purchaseAugmentation(/** @type {any} */ (c.faction), c.aug)) {
         ns.tprint(`Bought ${c.aug} from ${c.faction}`);
         owned.add(c.aug);
       }
