@@ -89,15 +89,46 @@ async function backdoorTargets(ns) {
 
 /** @param {NS} ns */
 function chooseFactionWork(ns) {
+  const s = ns.singularity;
   const joined = ns.getPlayer().factions ?? [];
+  const owned = new Set(s.getOwnedAugmentations(true));
 
-  for (const faction of FACTION_PRIORITY) {
-    if (joined.includes(/** @type {any} */ (faction))) {
-      return faction;
-  }
+  const options = [];
+
+  for (const faction of joined) {
+    for (const aug of s.getAugmentationsFromFaction(/** @type {any} */ (faction))) {
+      if (owned.has(aug)) continue;
+
+      const prereqs = s.getAugmentationPrereq(aug);
+      if (!prereqs.every(a => owned.has(a))) continue;
+
+      const repNeeded = s.getAugmentationRepReq(aug);
+      const curRep = s.getFactionRep(/** @type {any} */ (faction));
+
+      if (curRep >= repNeeded) continue;
+
+      options.push({
+        faction,
+        aug,
+        repMissing: repNeeded - curRep,
+        repNeeded,
+        price: s.getAugmentationPrice(aug),
+      });
+    }
   }
 
-  return joined[0] ?? null;
+  options.sort((a, b) => {
+    const aPriority = FACTION_PRIORITY.indexOf(a.faction);
+    const bPriority = FACTION_PRIORITY.indexOf(b.faction);
+
+    const ap = aPriority === -1 ? 999 : aPriority;
+    const bp = bPriority === -1 ? 999 : bPriority;
+
+    if (ap !== bp) return ap - bp;
+    return a.repMissing - b.repMissing;
+  });
+
+  return options[0]?.faction ?? joined[0] ?? null;
 }
 
 /** @param {NS} ns */
