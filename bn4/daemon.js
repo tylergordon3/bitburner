@@ -268,6 +268,10 @@ export async function main(ns) {
       ns.run("/hacking/manager.js", 1);
     }
 
+    if (!ns.scriptRunning("/ui/dashboard.js", "home")) {
+      ns.run("/ui/dashboard.js", 1);
+    }
+
     await acceptInvites(ns);
     await buyDarkweb(ns);
     rootEverything(ns);
