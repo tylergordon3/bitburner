@@ -1,4 +1,7 @@
 import { allServers, pathTo, root } from "../lib/net.js";
+import { managePurchasedServers } from "../lib/pserv.js";
+import { trainCombatIfNeeded, commitHomicideIfUseful } from "../lib/player-actions.js";
+import { getNextAugTarget, FACTION_REQUIREMENTS } from "../lib/aug-targets.js";
 
 const PROGRAMS = [
   "BruteSSH.exe",
@@ -221,6 +224,41 @@ async function maybeFinishBN(ns) {
 }
 
 /** @param {NS} ns */
+async function decideNextPriority(ns) {
+  const target = getNextAugTarget(ns);
+
+  await managePurchasedServers(ns, 10e6);
+
+  if (!target) {
+    await commitHomicideIfUseful(ns, "money / karma");
+    return;
+  }
+
+  ns.print(
+    `Target: ${target.faction} -> ${target.aug} | Rep missing: ${ns.format.number(target.repMissing)} | Money missing: ${ns.format.number(target.moneyMissing)}`
+  );
+
+  const statTargets = FACTION_REQUIREMENTS[target.faction] ?? {};
+  if (await trainCombatIfNeeded(ns, statTargets)) return;
+
+  if (target.repMissing > 0) {
+    ns.singularity.workForFaction(
+      /** @type {any} */ (target.faction),
+      "hacking",
+      false
+    );
+    return;
+  }
+
+  if (target.moneyMissing > 0) {
+    if (await commitHomicideIfUseful(ns, "augmentation money")) return;
+    return;
+  }
+
+  ns.print(`Ready to buy ${target.aug} from ${target.faction}`);
+}
+
+/** @param {NS} ns */
 export async function main(ns) {
   ns.disableLog("ALL");
   ns.ui.openTail();
@@ -234,7 +272,9 @@ export async function main(ns) {
     await buyDarkweb(ns);
     rootEverything(ns);
     await backdoorTargets(ns);
-    workForRep(ns);
+
+    await decideNextPriority(ns);
+
     buyAugs(ns);
     maybeInstall(ns);
     await maybeFinishBN(ns);
