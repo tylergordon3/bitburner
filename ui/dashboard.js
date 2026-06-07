@@ -6,17 +6,26 @@ let lastHackLevel = 0;
 let lastHackTime = Date.now();
 let hackLevelsPerHour = 0;
 
+let lastFactionRep = 0;
+let lastFactionTime = Date.now();
+let factionRepPerHour = 0;
+
+let lastMoney = 0;
+let lastMoneyTime = Date.now();
+let moneyPerHour = 0;
+
+let lastRamTotal = 0;
+let lastRamTime = Date.now();
+let ramPerHour = 0;
+
 /** @param {NS} ns */
 export async function main(ns) {
   ns.disableLog("ALL");
 
   ns.ui.openTail();
-  ns.ui.resizeTail(550, 780);
   ns.ui.moveTail(20, 40);
 
   while (true) {
-    ns.clearLog();
-
     const player = ns.getPlayer();
     const money = player.money;
     const hack = player.skills.hacking;
@@ -29,54 +38,132 @@ export async function main(ns) {
 
     const state = globalThis.gordState ?? {};
     const target = state.target ?? {};
+    const goal = getGoalEstimate(ns, target);
 
-    ns.print("+--------------------------------------------------+");
-    ns.print("|                  GORDNET DASHBOARD               |");
-    ns.print("+--------------------------------------------------+");
-    ns.print("");
+    const moneyRate = updateMoneyTrend(ns);
+    const ramRate = updateRamTrend(ns, ram.max);
+    const augQueue = getAugQueueInfo(ns);
 
-    ns.print("-- Player -----------------------------------------");
-    ns.print(`Money:       $${ns.format.number(money)}`);
-    ns.print(`Income/hr:   $${ns.format.number(incomeHour)}`);
-    ns.print(`Hack Level:  ${hack}`);
-    ns.print(`Karma:       ${ns.format.number(player.karma)}`);
-    ns.print(`Kills:       ${player.numPeopleKilled}`);
-    ns.print("");
+    const moneyEta = etaFromRate(target.moneyMissing ?? 0, moneyRate);
 
-    ns.print("-- Current Goal -----------------------------------");
-    ns.print(`Action:      ${state.action ?? "Unknown"}`);
-    ns.print(`Detail:      ${state.detail ?? "-"}`);
+    const missingHack = Number(final.missing) || 0;
 
-    if (target.aug) {
-      ns.print(`Faction:     ${target.faction}`);
-      ns.print(`Augment:     ${target.aug}`);
-      ns.print(`Need Rep:    ${ns.format.number(target.repMissing ?? 0)}`);
-      ns.print(`Need Money:  $${ns.format.number(target.moneyMissing ?? 0)}`);
-    }
+    const bitNodeEta =
+      missingHack <= 0
+        ? "hack ready"
+        : etaFromRate(missingHack, final.rate ?? 0);
 
-    ns.print("");
-    ns.print("-- Current Work -----------------------------------");
-    ns.print(formatWork(currentWork));
-    ns.print("");
+    const data = {
+      player,
+      money,
+      hack,
+      incomeHour,
+      currentWork,
+      ram,
+      cloud,
+      final,
+      state,
+      target,
+      goal,
+      moneyRate,
+      moneyEta,
+      ramRate,
+      augQueue,
+      bitNodeEta,
+    };
 
-    ns.print("-- Infrastructure ---------------------------------");
-    ns.print(`RAM Used:    ${ns.format.ram(ram.used)} / ${ns.format.ram(ram.max)}`);
-    ns.print(`RAM Free:    ${ns.format.ram(ram.free)}`);
-    ns.print(`RAM Usage:   ${ns.format.percent(ram.used / Math.max(1, ram.max))}`);
-    ns.print(`Cloud:       ${cloud.count} / ${cloud.limit}`);
-    ns.print(`Cloud RAM:   ${ns.format.ram(cloud.ram)}`);
-    ns.print("");
-
-    ns.print("-- Final BitNode Target ---------------------------");
-    ns.print(`Target:      ${FINAL_HOST}`);
-    ns.print(`Req Hack:    ${final.required}`);
-    ns.print(`Current:     ${hack}`);
-    ns.print(`Remaining:   ${final.missing}`);
-    ns.print(`Hack Rate:   ${ns.format.number(final.rate ?? 0)} lvls/hr`);
-    ns.print(`ETA:         ${final.eta}`);
+    renderDashboardHtml(ns, data);
 
     await ns.sleep(5_000);
   }
+}
+
+/** @param {NS} ns */
+function renderDashboardHtml(ns, data) {
+  ns.clearLog();
+  try {
+    ns.printRaw(
+      el(
+        "div",
+        {
+          style: {
+            fontFamily: "monospace",
+            padding: "12px 18px 12px 12px",
+            boxSizing: "border-box",
+            width: "100%",
+            overflow: "hidden",
+          },
+        },
+        el(
+          "div",
+          {
+            style: {
+              fontSize: "20px",
+              fontWeight: "bold",
+              marginBottom: "10px",
+            },
+          },
+          "GORDNET DASHBOARD"
+        ),
+
+        card("Player", [
+          row(
+            "Money / Income",
+            `$${ns.format.number(data.money)} | $${ns.format.number(data.incomeHour)}/hr`
+          ),
+
+          row(
+            "Hack / Karma",
+            `${data.hack} | ${ns.format.number(data.player.karma)}`
+          ),
+
+          row(
+            "Kills",
+            data.player.numPeopleKilled
+          ),
+        ]),
+
+        card("Current Goal", [
+          row("Action", data.state.action ?? "Unknown"),
+          row("Detail", data.state.detail ?? "-"),
+          row("Need Rep", ns.format.number(data.target.repMissing ?? 0)),
+          row("Need Money", `$${ns.format.number(data.target.moneyMissing ?? 0)}`),
+          row("Rep Rate / ETA", `${ns.format.number(data.goal.rate)} / hr | ${data.goal.eta}`),
+          row("Money ETA", data.moneyEta),
+        ]),
+
+        card("Infrastructure", [
+        row(
+          "RAM",
+          `${ns.format.ram(data.ram.used)} used / ${ns.format.ram(data.ram.free)} free / ${ns.format.percent(data.ram.used / Math.max(1, data.ram.max))}`
+        ),
+        row(
+          "Cloud",
+          `${data.cloud.count}/${data.cloud.limit} | ${ns.format.ram(data.cloud.ram)}`
+        ),
+        row("RAM Trend", `${ns.format.ram(data.ramRate)} / hr`),
+      ]),
+
+        card("Augmentation Queue", [
+          row("Queued", data.augQueue.queued),
+          row("Install", data.augQueue.recommendation),
+        ]),
+
+        card("Final BitNode Target", [
+        row("Target", FINAL_HOST),
+        row("Hack", `${data.hack} / ${data.final.required}`),
+        row("Remaining", data.final.missing),
+        row("Rate / ETA", `${ns.format.number(data.final.rate ?? 0)} lvls/hr | ${data.final.eta}`),
+      ]),
+      )
+    );
+  } catch (e) {
+    ns.print("Dashboard render error:");
+    ns.print(String(e));
+    ns.print(e?.stack ?? "");
+  }
+
+  ns.ui.resizeTail(720, 900);
 }
 
 /** @param {NS} ns */
@@ -174,6 +261,54 @@ function getHackTargetEstimate(ns, host) {
   };
 }
 
+/** @param {NS} ns */
+function getGoalEstimate(ns, target) {
+  if (!target?.faction) {
+    return {
+      rate: 0,
+      eta: "unknown",
+    };
+  }
+
+  const currentRep = ns.singularity.getFactionRep(
+    /** @type {any} */ (target.faction)
+  );
+
+  const now = Date.now();
+
+  if (lastFactionRep > 0 && now > lastFactionTime) {
+    const gained = currentRep - lastFactionRep;
+    const hours = (now - lastFactionTime) / 3_600_000;
+
+    if (gained > 0 && hours > 0) {
+      const instantRate = gained / hours;
+
+      factionRepPerHour =
+        factionRepPerHour === 0
+          ? instantRate
+          : factionRepPerHour * 0.8 + instantRate * 0.2;
+    }
+  }
+
+  lastFactionRep = currentRep;
+  lastFactionTime = now;
+
+  let eta = "waiting for rep data";
+
+  if (target.repMissing <= 0) {
+    eta = "complete";
+  } else if (factionRepPerHour > 0) {
+    eta = formatDuration(
+      (target.repMissing / factionRepPerHour) * 3_600_000
+    );
+  }
+
+  return {
+    rate: factionRepPerHour,
+    eta,
+  };
+}
+
 function formatDuration(ms) {
   if (!Number.isFinite(ms) || ms < 0) return "unknown";
 
@@ -212,4 +347,149 @@ function formatWork(work) {
   }
 
   return JSON.stringify(work);
+}
+
+/** @param {NS} ns */
+function updateMoneyTrend(ns) {
+  const money = ns.getPlayer().money;
+  const now = Date.now();
+
+  if (lastMoney > 0 && now > lastMoneyTime) {
+    const gained = money - lastMoney;
+    const hours = (now - lastMoneyTime) / 3_600_000;
+
+    if (gained > 0 && hours > 0) {
+      const instant = gained / hours;
+      moneyPerHour = moneyPerHour === 0 ? instant : moneyPerHour * 0.8 + instant * 0.2;
+    }
+  }
+
+  lastMoney = money;
+  lastMoneyTime = now;
+
+  return moneyPerHour;
+}
+
+/** @param {NS} ns */
+function updateRamTrend(ns, totalRam) {
+  const now = Date.now();
+
+  if (lastRamTotal > 0 && now > lastRamTime) {
+    const gained = totalRam - lastRamTotal;
+    const hours = (now - lastRamTime) / 3_600_000;
+
+    if (gained > 0 && hours > 0) {
+      const instant = gained / hours;
+      ramPerHour = ramPerHour === 0 ? instant : ramPerHour * 0.8 + instant * 0.2;
+    }
+  }
+
+  lastRamTotal = totalRam;
+  lastRamTime = now;
+
+  return ramPerHour;
+}
+
+/** @param {NS} ns */
+function getAugQueueInfo(ns) {
+  const ownedWithPurchased = ns.singularity.getOwnedAugmentations(true);
+  const ownedInstalled = ns.singularity.getOwnedAugmentations(false);
+  const queued = ownedWithPurchased.length - ownedInstalled.length;
+
+  let recommendation = "Keep grinding";
+
+  const hasRedPillQueued =
+  ownedWithPurchased.includes("The Red Pill") &&
+  !ownedInstalled.includes("The Red Pill");
+
+  if (hasRedPillQueued) {
+    recommendation = "Install now: Red Pill queued";
+  } else if (queued >= 5) {
+    recommendation = "Install soon: queue threshold met";
+  }
+
+  return { queued, recommendation };
+}
+
+function etaFromRate(remaining, ratePerHour) {
+  if (remaining <= 0) return "complete";
+  if (!ratePerHour || ratePerHour <= 0) return "waiting for trend data";
+  return formatDuration((remaining / ratePerHour) * 3_600_000);
+}
+
+function el(type, props = {}, ...children) {
+  const React = globalThis.React;
+
+  if (!React?.createElement) {
+    throw new Error("React.createElement is not available in this Bitburner environment.");
+  }
+
+  return React.createElement(type, props, ...children);
+}
+
+function card(title, children) {
+  return el(
+    "div",
+    {
+      style: {
+        border: "1px solid #555",
+        borderRadius: "8px",
+        padding: "10px",
+        marginBottom: "10px",
+        background: "rgba(255,255,255,0.04)",
+      },
+    },
+    el(
+      "div",
+      {
+        style: {
+          fontWeight: "bold",
+          marginBottom: "8px",
+          fontSize: "15px",
+        },
+      },
+      title
+    ),
+    ...children
+  );
+}
+
+function row(label, value) {
+  return el(
+    "div",
+    {
+      style: {
+        display: "grid",
+        gridTemplateColumns: "130px minmax(0, 1fr)",
+        columnGap: "12px",
+        padding: "2px 0",
+        width: "100%",
+        boxSizing: "border-box",
+      },
+    },
+    el(
+      "span",
+      {
+        style: {
+          opacity: 0.75,
+          whiteSpace: "nowrap",
+        },
+      },
+      label
+    ),
+    el(
+      "span",
+      {
+        style: {
+          textAlign: "right",
+          fontWeight: "bold",
+          minWidth: 0,
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+        },
+      },
+      String(value)
+    )
+  );
 }
