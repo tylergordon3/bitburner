@@ -156,9 +156,14 @@ async function prep(ns, target) {
     }
 
     const wait = needsWeaken ? ns.getWeakenTime(target) : ns.getGrowTime(target);
-    ns.print(
-        `Prepping ${target}: money ${ns.format.percent(money / maxMoney)}, sec ${sec.toFixed(2)}/${minSec.toFixed(2)}`
-    );
+    globalThis.gordHackState = {
+      ...(globalThis.gordHackState ?? {}),
+      mode: "Prepping",
+      target,
+      moneyPercent: money / maxMoney,
+      security: sec,
+      minSecurity: minSec,
+    };
     await ns.sleep(wait + 1_000);
   }
 }
@@ -199,11 +204,19 @@ function launchBatch(ns, batch, batchId) {
     launch(ns, host, WEAKEN, weaken2Threads, target, weaken2Delay, tag);
 
   if (ok) {
-    ns.print(
-      `Batch ${batchId} -> ${target} on ${host} | H:${hackThreads} G:${growThreads} W1:${weaken1Threads} W2:${weaken2Threads}`,
-    );
+    globalThis.gordHackState = {
+      ...(globalThis.gordHackState ?? {}),
+      mode: "Batching",
+      target,
+      host,
+      batchId,
+      hackThreads,
+      growThreads,
+      weaken1Threads,
+      weaken2Threads,
+      ram: totalRam,
+    };
   }
-
   return ok;
 }
 
@@ -221,7 +234,7 @@ function killOldHackScripts(ns) {
 /** @param {NS} ns */
 export async function main(ns) {
   ns.disableLog("ALL");
-  ns.ui.openTail();
+  // ns.ui.openTail();
 
   const reset = ns.args.includes("--reset");
   if (reset) killOldHackScripts(ns);
@@ -241,10 +254,14 @@ export async function main(ns) {
     const target = bestTarget(ns);
 
     if (target !== currentTarget) {
-      currentTarget = target;
-      ns.print(`New target: ${target}`);
-    }
+    currentTarget = target;
 
+    globalThis.gordHackState = {
+        ...(globalThis.gordHackState ?? {}),
+        mode: "Target Changed",
+        target,
+      };
+   }
     await prep(ns, target);
 
     const batch = calcBatch(ns, target);
@@ -252,7 +269,12 @@ export async function main(ns) {
     const launched = launchBatch(ns, batch, batchId++);
 
     if (!launched) {
-      ns.print(`Not enough RAM for full batch. Need ${ns.format.ram(batch.ram)}.`);
+      globalThis.gordHackState = {
+        ...(globalThis.gordHackState ?? {}),
+        mode: "Waiting for RAM",
+        target,
+        ramNeeded: batch.ram,
+      };
       await ns.sleep(2_000);
       continue;
     }

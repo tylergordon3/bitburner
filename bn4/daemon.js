@@ -170,6 +170,7 @@ function buyAugs(ns) {
   const joined = ns.getPlayer().factions ?? [];
 
   const candidates = [];
+  const purchases = [];
 
   for (const faction of joined) {
     for (const aug of s.getAugmentationsFromFaction(/** @type {any} */ (faction))) {
@@ -189,11 +190,13 @@ function buyAugs(ns) {
   for (const c of candidates) {
     if (canBuyAug(ns, c.faction, c.aug, owned)) {
       if (s.purchaseAugmentation(/** @type {any} */ (c.faction), c.aug)) {
-        ns.tprint(`Bought ${c.aug} from ${c.faction}`);
+        purchases.push(`${c.aug} from ${c.faction}`);
         owned.add(c.aug);
       }
     }
   }
+
+  return purchases;
 }
 
 /** @param {NS} ns */
@@ -225,43 +228,70 @@ async function maybeFinishBN(ns) {
 
 /** @param {NS} ns */
 async function decideNextPriority(ns) {
+  const infra = await managePurchasedServers(ns, 10e6);
   const target = getNextAugTarget(ns);
 
-  await managePurchasedServers(ns, 10e6);
-
   if (!target) {
-    await commitHomicideIfUseful(ns, "money / karma");
-    return;
+    const crime = await commitHomicideIfUseful(
+      ns,
+      "no augmentation target / karma"
+    );
+
+    return {
+      action: crime ? "Crime" : "Idle",
+      detail: crime ? "Homicide for karma" : "No augmentation target",
+      target: null,
+      infra,
+    };
   }
 
-  ns.print(
-    `Target: ${target.faction} -> ${target.aug} | Rep missing: ${ns.format.number(target.repMissing)} | Money missing: ${ns.format.number(target.moneyMissing)}`
-  );
-
   const statTargets = FACTION_REQUIREMENTS[target.faction] ?? {};
-  if (await trainCombatIfNeeded(ns, statTargets)) return;
+  const training = await trainCombatIfNeeded(ns, statTargets);
+
+  if (training) {
+    return {
+      ...training,
+      target,
+      infra,
+    };
+  }
 
   if (target.repMissing > 0) {
     ns.singularity.workForFaction(
       /** @type {any} */ (target.faction),
-      "hacking",
+      /** @type {any} */ ("hacking"),
       false
     );
-    return;
+
+    return {
+      action: "Faction Rep",
+      detail: `${target.faction} -> ${target.aug}`,
+      target,
+      infra,
+    };
   }
 
   if (target.moneyMissing > 0) {
-    if (await commitHomicideIfUseful(ns, "augmentation money")) return;
-    return;
+    return {
+      action: "Waiting for Money",
+      detail: `${target.aug}`,
+      target,
+      infra,
+    };
   }
 
-  ns.print(`Ready to buy ${target.aug} from ${target.faction}`);
+  return {
+    action: "Ready to Purchase",
+    detail: `${target.faction} -> ${target.aug}`,
+    target,
+    infra,
+  };
 }
 
 /** @param {NS} ns */
 export async function main(ns) {
   ns.disableLog("ALL");
-  ns.ui.openTail();
+  // ns.ui.openTail();
 
   while (true) {
     if (!ns.scriptRunning("/hacking/manager.js", "home")) {
@@ -277,9 +307,13 @@ export async function main(ns) {
     rootEverything(ns);
     await backdoorTargets(ns);
 
-    await decideNextPriority(ns);
+    globalThis.gordState = await decideNextPriority(ns);
 
-    buyAugs(ns);
+    const bought = buyAugs(ns);
+    if (bought?.length) {
+      globalThis.gordState.purchases = bought;
+    }
+
     maybeInstall(ns);
     await maybeFinishBN(ns);
 
