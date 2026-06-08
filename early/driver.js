@@ -1,16 +1,22 @@
 // early/driver.js
-/** @import { FactionName, GymType } from "../types/NetscriptDefinitions" */
 
 /** @param {NS} ns */
 export async function main(ns) {
   const daemon = "/bn4/daemon.js";
   const worker = "/early/worker.js";
 
+  const TARGET = "joesguns";
+  const HOME_RESERVE = 8;
+
   while (true) {
     // Start daemon when possible
-    if (ns.getServerMaxRam("home") >= ns.getScriptRam(daemon) + 8) {
+    if (ns.getServerMaxRam("home") >= ns.getScriptRam(daemon) + HOME_RESERVE) {
       ns.scriptKill(worker, "home");
+      ns.scriptKill("/startup.js", "home");
+
       ns.run(daemon);
+
+      ns.tprint(`Started ${daemon}`);
       return;
     }
 
@@ -19,46 +25,69 @@ export async function main(ns) {
       while (ns.singularity.upgradeHomeRam()) {}
     } catch {}
 
-    // Join factions
+    // Join faction invites
     try {
-      for (const f of ns.singularity.checkFactionInvitations()) {
+      for (const faction of ns.singularity.checkFactionInvitations()) {
         ns.singularity.joinFaction(
-          /** @type {any} */ (f)
+          /** @type {any} */ (faction)
         );
       }
     } catch {}
 
-    // Work faction rep if possible
     try {
-      if (ns.getPlayer().factions.includes("CyberSec")) {
+      const player = ns.getPlayer();
+      const factions = player.factions;
+      const money = ns.getServerMoneyAvailable("home");
+
+      // Focused faction rep early
+      if (factions.includes("CyberSec")) {
         ns.singularity.workForFaction(
           /** @type {any} */ ("CyberSec"),
           "hacking",
-          false
+          true
         );
       }
-    } catch {}
 
-    // Crime fallback for money
-    try {
-      if (ns.getServerMoneyAvailable("home") < 5e6) {
-        if (ns.singularity.getCrimeChance("Homicide") > 0.8) {
-          ns.singularity.commitCrime("Homicide", false);
+      else if (factions.includes("NiteSec")) {
+        ns.singularity.workForFaction(
+          /** @type {any} */ ("NiteSec"),
+          "hacking",
+          true
+        );
+      }
+
+      // Study hacking early if low
+      else if (player.skills.hacking < 150) {
+        ns.singularity.universityCourse(
+          "Rothman University",
+          "Algorithms",
+          true
+        );
+      }
+
+      // Crime only if poor
+      else if (money < 5e6) {
+        if (ns.singularity.getCrimeChance("Homicide") >= 0.8) {
+          ns.singularity.commitCrime("Homicide", true);
         } else {
-          ns.singularity.commitCrime("Mug", false);
+          ns.singularity.commitCrime("Mug", true);
         }
       }
+
     } catch {}
 
-    // Launch worker if not running
+    // Launch hacking worker if not already running
     if (!ns.isRunning(worker, "home")) {
+      const freeRam =
+        ns.getServerMaxRam("home") -
+        HOME_RESERVE;
+
       const threads = Math.floor(
-        (ns.getServerMaxRam("home") - 8) /
-        ns.getScriptRam(worker)
+        freeRam / ns.getScriptRam(worker)
       );
 
       if (threads > 0) {
-        ns.run(worker, threads, "n00dles");
+        ns.run(worker, threads, TARGET);
       }
     }
 

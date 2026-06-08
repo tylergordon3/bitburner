@@ -1,6 +1,6 @@
 import { allServers, pathTo, root } from "../lib/net.js";
 import { managePurchasedServers } from "../lib/pserv.js";
-import { trainCombatIfNeeded, commitHomicideIfUseful } from "../lib/player-actions.js";
+import { trainCombatIfNeeded, commitHomicideIfUseful, shouldFocus } from "../lib/player-actions.js";
 import { getNextAugTarget, FACTION_REQUIREMENTS } from "../lib/aug-targets.js";
 
 const PROGRAMS = [
@@ -260,7 +260,7 @@ async function decideNextPriority(ns) {
     ns.singularity.workForFaction(
       /** @type {any} */ (target.faction),
       /** @type {any} */ ("hacking"),
-      false
+      shouldFocus(ns)
     );
 
     return {
