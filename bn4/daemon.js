@@ -272,9 +272,27 @@ async function decideNextPriority(ns) {
   }
 
   if (target.moneyMissing > 0) {
+    const crime = await commitHomicideIfUseful(
+      ns,
+      `money for ${target.aug}`
+    );
+
+    if (crime) {
+      return {
+        ...crime,
+        target,
+        infra,
+      };
+    }
+
+    ns.singularity.commitCrime(
+      /** @type {any} */ ("Mug"),
+      shouldFocus(ns)
+    );
+
     return {
-      action: "Waiting for Money",
-      detail: `${target.aug}`,
+      action: "Crime",
+      detail: `Mug for money: ${target.aug}`,
       target,
       infra,
     };

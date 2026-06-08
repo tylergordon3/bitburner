@@ -9,8 +9,8 @@ const SECURITY_PER_GROW = 0.004;
 const WEAKEN_AMOUNT = 0.05;
 
 const BATCH_SPACING = 200;
-const MONEY_FRACTION = 0.10;
-const RESERVE_HOME_RAM = 64;
+const MONEY_FRACTION = 0.1;
+const RESERVE_HOME_RAM = 8;
 
 /** @param {NS} ns */
 function usableRam(ns, server) {
@@ -68,13 +68,10 @@ async function copyScripts(ns) {
   }
 }
 
-/** @param {NS} ns */
-function calcBatch(ns, target) {
-  const maxMoney = ns.getServerMaxMoney(target);
-  const hackAmount = maxMoney * MONEY_FRACTION;
-
+/** @param {NS} ns @param {string} target @param {number} moneyFraction */
+function calcBatch(ns, target, moneyFraction) {
   const hackAnalyze = ns.hackAnalyze(target);
-  const hackThreads = Math.max(1, Math.floor(MONEY_FRACTION / hackAnalyze));
+  const hackThreads = Math.max(1, Math.floor(moneyFraction / hackAnalyze));
 
   const hackedFraction = Math.min(0.9, hackThreads * hackAnalyze);
   const growMultiplier = 1 / Math.max(0.01, 1 - hackedFraction);
@@ -94,7 +91,7 @@ function calcBatch(ns, target) {
 
   return {
     target,
-    hackAmount,
+    moneyFraction,
     hackThreads,
     growThreads,
     weaken1Threads,
@@ -104,6 +101,30 @@ function calcBatch(ns, target) {
     growTime: ns.getGrowTime(target),
     weakenTime: ns.getWeakenTime(target),
   };
+}
+
+/** @param {NS} ns @param {string} target */
+function calcBestFitBatch(ns, target) {
+  const bestFreeRam = Math.max(
+    ...rootedWorkers(ns).map(s => usableRam(ns, s))
+  );
+
+  const fractions = [
+    0.10,
+    0.05,
+    0.025,
+    0.01,
+    0.005,
+    0.0025,
+    0.001,
+  ];
+
+  for (const fraction of fractions) {
+    const batch = calcBatch(ns, target, fraction);
+    if (batch.ram <= bestFreeRam) return batch;
+  }
+
+  return calcBatch(ns, target, 0.001);
 }
 
 /** @param {NS} ns */
@@ -264,7 +285,7 @@ export async function main(ns) {
    }
     await prep(ns, target);
 
-    const batch = calcBatch(ns, target);
+    const batch = calcBestFitBatch(ns, target);
 
     const launched = launchBatch(ns, batch, batchId++);
 
