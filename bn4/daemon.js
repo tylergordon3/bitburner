@@ -228,8 +228,8 @@ async function maybeFinishBN(ns) {
 
 /** @param {NS} ns */
 async function decideNextPriority(ns) {
-  const infra = await managePurchasedServers(ns, 10e6);
   const target = getNextAugTarget(ns);
+  const infra = await maybeBuyInfra(ns, target);
 
   if (!target) {
     const crime = await commitHomicideIfUseful(
@@ -340,4 +340,38 @@ export async function main(ns) {
     );
     await ns.sleep(30_000);
   }
+}
+
+/** @param {NS} ns @param {any} target */
+async function maybeBuyInfra(ns, target) {
+  const money = playerMoney(ns);
+
+  // No aug target: infrastructure is useful.
+  if (!target) {
+    return await managePurchasedServers(ns, 10e6);
+  }
+
+  // If rep is done and money is close, save for aug.
+  if (target.repMissing <= 0) {
+    const missing = target.moneyMissing ?? 0;
+
+    // Close = within 30 minutes of reasonable hacking income OR within 25% of price.
+    const closeByCash = money >= target.price * 0.75;
+    const smallMissing = missing <= 25e6;
+
+    if (closeByCash || smallMissing) {
+      return {
+        action: "Saving for Aug",
+        detail: `${target.aug}: need $${ns.format.number(missing)}`,
+      };
+    }
+  }
+
+  // If still farming rep, allow small cloud buys only.
+  if (target.repMissing > 0) {
+    return await managePurchasedServers(ns, 50e6, 0.10);
+  }
+
+  // If money missing is large, allow moderate infra.
+  return await managePurchasedServers(ns, 25e6, 0.15);
 }
