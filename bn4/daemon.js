@@ -1,6 +1,11 @@
 import { allServers, pathTo, root } from "../lib/net.js";
 import { managePurchasedServers } from "../lib/pserv.js";
-import { trainCombatIfNeeded, commitHomicideIfUseful, shouldFocus } from "../lib/player-actions.js";
+import {
+  trainCombatIfNeeded,
+  commitHomicideIfUseful,
+  shouldFocus,
+  doEarlyBootstrapIfNeeded,
+} from "../lib/player-actions.js";
 import { getNextAugTarget, FACTION_REQUIREMENTS } from "../lib/aug-targets.js";
 
 const PROGRAMS = [
@@ -228,6 +233,16 @@ async function maybeFinishBN(ns) {
 
 /** @param {NS} ns */
 async function decideNextPriority(ns) {
+  const bootstrap = await doEarlyBootstrapIfNeeded(ns);
+
+  if (bootstrap) {
+    return {
+      ...bootstrap,
+      target: null,
+      infra: null,
+    };
+  }
+  
   const target = getNextAugTarget(ns);
   const infra = await maybeBuyInfra(ns, target);
 
