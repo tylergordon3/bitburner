@@ -105,9 +105,8 @@ function calcBatch(ns, target, moneyFraction) {
 
 /** @param {NS} ns @param {string} target */
 function calcBestFitBatch(ns, target) {
-  const bestFreeRam = Math.max(
-    ...rootedWorkers(ns).map(s => usableRam(ns, s))
-  );
+  const bestFreeRam = rootedWorkers(ns)
+    .reduce((sum, s) => sum + usableRam(ns, s), 0);
 
   const fractions = [
     0.10,
@@ -128,28 +127,35 @@ function calcBestFitBatch(ns, target) {
 }
 
 /** @param {NS} ns */
-function findHost(ns, ramNeeded) {
+function launchOnWorkers(ns, script, threads, target, delay, tag) {
+  if (threads <= 0) return true; // nothing to do
+
+  const ram = ns.getScriptRam(script);
+  let remaining = threads;
+
   const workers = rootedWorkers(ns)
     .sort((a, b) => usableRam(ns, b) - usableRam(ns, a));
 
-  return workers.find(s => usableRam(ns, s) >= ramNeeded) ?? null;
-}
+  for (const host of workers) {
+    if (remaining <= 0) break;
+    const slots = Math.floor(usableRam(ns, host) / ram);
+    const use = Math.min(slots, remaining);
+    if (use <= 0) continue;
 
-/** @param {NS} ns */
-function launch(ns, host, script, threads, target, delay, tag) {
-  if (threads <= 0) return false;
+    const pid = ns.exec(
+      script,
+      host,
+      use,
+      target,
+      Math.max(0, Math.floor(delay)),
+      tag,
+      performance.now(),
+    );
 
-  const pid = ns.exec(
-    script,
-    host,
-    threads,
-    target,
-    Math.max(0, Math.floor(delay)),
-    tag,
-    performance.now(),
-  );
+    if (pid !== 0) remaining -= use;
+  }
 
-  return pid !== 0;
+  return remaining === 0;
 }
 
 /** @param {NS} ns */
@@ -165,14 +171,26 @@ async function prep(ns, target) {
 
     if (!needsWeaken && !needsGrow) return;
 
+    // AFTER:
     const workers = rootedWorkers(ns);
-    const script = needsWeaken ? WEAKEN : GROW;
-    const ram = ns.getScriptRam(script);
+    const weakenRam = ns.getScriptRam(WEAKEN);
+    const growRam = ns.getScriptRam(GROW);
 
     for (const host of workers) {
-      const threads = Math.floor(usableRam(ns, host) / ram);
-      if (threads > 0) {
-        ns.exec(script, host, threads, target, 0, "prep", performance.now());
+      const free = usableRam(ns, host);
+      if (needsWeaken && needsGrow) {
+        // Split: 30% of threads for weaken, 70% for grow (weaken is faster per thread)
+        const totalThreads = Math.floor(free / weakenRam); // weaken and grow have same RAM cost
+        const weakenThreads = Math.max(1, Math.floor(totalThreads * 0.3));
+        const growThreads = Math.max(0, totalThreads - weakenThreads);
+        if (weakenThreads > 0) ns.exec(WEAKEN, host, weakenThreads, target, 0, "prep", performance.now());
+        if (growThreads > 0) ns.exec(GROW, host, growThreads, target, 0, "prep", performance.now());
+      } else if (needsWeaken) {
+        const threads = Math.floor(free / weakenRam);
+        if (threads > 0) ns.exec(WEAKEN, host, threads, target, 0, "prep", performance.now());
+      } else {
+        const threads = Math.floor(free / growRam);
+        if (threads > 0) ns.exec(GROW, host, threads, target, 0, "prep", performance.now());
       }
     }
 
@@ -202,40 +220,34 @@ function launchBatch(ns, batch, batchId) {
     weakenTime,
   } = batch;
 
-  const totalRam = batch.ram;
-  const host = findHost(ns, totalRam);
-  if (!host) return false;
+  // Check total available RAM across all workers before committing
+  const totalFreeRam = rootedWorkers(ns).reduce((sum, s) => sum + usableRam(ns, s), 0);
+  if (totalFreeRam < batch.ram) return false;
 
-  const finishHack = weakenTime - BATCH_SPACING * 3;
-  const finishWeaken1 = weakenTime - BATCH_SPACING * 2;
-  const finishGrow = weakenTime - BATCH_SPACING;
-  const finishWeaken2 = weakenTime;
-
-  const hackDelay = finishHack - hackTime;
-  const weaken1Delay = finishWeaken1 - weakenTime;
-  const growDelay = finishGrow - growTime;
-  const weaken2Delay = finishWeaken2 - weakenTime;
+  const hackDelay    = Math.max(0, weakenTime - hackTime   - BATCH_SPACING * 3);
+  const weaken1Delay = 0;
+  const growDelay    = Math.max(0, weakenTime - growTime   - BATCH_SPACING * 1);
+  const weaken2Delay = BATCH_SPACING * 2;
 
   const tag = `batch-${batchId}`;
 
   const ok =
-    launch(ns, host, HACK, hackThreads, target, hackDelay, tag) &&
-    launch(ns, host, WEAKEN, weaken1Threads, target, weaken1Delay, tag) &&
-    launch(ns, host, GROW, growThreads, target, growDelay, tag) &&
-    launch(ns, host, WEAKEN, weaken2Threads, target, weaken2Delay, tag);
+    launchOnWorkers(ns, HACK,   hackThreads,    target, hackDelay,    tag) &&
+    launchOnWorkers(ns, WEAKEN, weaken1Threads, target, weaken1Delay, tag) &&
+    launchOnWorkers(ns, GROW,   growThreads,    target, growDelay,    tag) &&
+    launchOnWorkers(ns, WEAKEN, weaken2Threads, target, weaken2Delay, tag);
 
   if (ok) {
     globalThis.gordHackState = {
       ...(globalThis.gordHackState ?? {}),
       mode: "Batching",
       target,
-      host,
       batchId,
       hackThreads,
       growThreads,
       weaken1Threads,
       weaken2Threads,
-      ram: totalRam,
+      ram: batch.ram,
     };
   }
   return ok;

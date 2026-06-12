@@ -25,14 +25,6 @@ const BACKDOOR_PRIORITY = [
   "w0r1d_d43m0n",
 ];
 
-const FACTION_PRIORITY = /** @type {string[]} */ ([
-  "CyberSec",
-  "NiteSec",
-  "The Black Hand",
-  "BitRunners",
-  "Daedalus",
-]);
-
 function playerMoney(ns) {
   return ns.getPlayer().money ?? 0;
 }
@@ -96,65 +88,6 @@ async function backdoorTargets(ns) {
 }
 
 /** @param {NS} ns */
-function chooseFactionWork(ns) {
-  const s = ns.singularity;
-  const joined = ns.getPlayer().factions ?? [];
-  const owned = new Set(s.getOwnedAugmentations(true));
-
-  const options = [];
-
-  for (const faction of joined) {
-    for (const aug of s.getAugmentationsFromFaction(/** @type {any} */ (faction))) {
-      if (owned.has(aug)) continue;
-
-      const prereqs = s.getAugmentationPrereq(aug);
-      if (!prereqs.every(a => owned.has(a))) continue;
-
-      const repNeeded = s.getAugmentationRepReq(aug);
-      const curRep = s.getFactionRep(/** @type {any} */ (faction));
-
-      if (curRep >= repNeeded) continue;
-
-      options.push({
-        faction,
-        aug,
-        repMissing: repNeeded - curRep,
-        repNeeded,
-        price: s.getAugmentationPrice(aug),
-      });
-    }
-  }
-
-  options.sort((a, b) => {
-    const aPriority = FACTION_PRIORITY.indexOf(a.faction);
-    const bPriority = FACTION_PRIORITY.indexOf(b.faction);
-
-    const ap = aPriority === -1 ? 999 : aPriority;
-    const bp = bPriority === -1 ? 999 : bPriority;
-
-    if (ap !== bp) return ap - bp;
-    return a.repMissing - b.repMissing;
-  });
-
-  return options[0]?.faction ?? joined[0] ?? null;
-}
-
-/** @param {NS} ns */
-function workForRep(ns) {
-  const faction = chooseFactionWork(ns);
-  if (!faction) return;
-
-  const cur = ns.singularity.getCurrentWork();
-  if (cur?.type === "FACTION" && cur?.factionName === faction) return;
-
-  ns.singularity.workForFaction(
-  /** @type {any} */ (faction),
-      "hacking",
-      false
-    );
-}
-
-/** @param {NS} ns */
 function canBuyAug(ns, faction, aug, owned) {
   const s = ns.singularity;
   if (owned.has(aug)) return false;
@@ -190,7 +123,14 @@ function buyAugs(ns) {
     }
   }
 
-  candidates.sort((a, b) => a.price - b.price);
+  // AFTER:
+  candidates.sort((a, b) => {
+    // Always buy NeuroFlux Governor last — it inflates prices of everything else
+    const aNFG = a.aug === "NeuroFlux Governor" ? 1 : 0;
+    const bNFG = b.aug === "NeuroFlux Governor" ? 1 : 0;
+    if (aNFG !== bNFG) return aNFG - bNFG;
+    return a.price - b.price;
+  });
 
   for (const c of candidates) {
     if (canBuyAug(ns, c.faction, c.aug, owned)) {
@@ -204,13 +144,27 @@ function buyAugs(ns) {
   return purchases;
 }
 
+// Augs that give hacking multipliers significant enough to justify an early install.
+const INSTALL_PRIORITY_AUGS = [
+  "BitWire",
+  "Neuralstimulator",
+  "Neural-Retention Enhancement",
+  "CashRoot Starter Kit",
+  "Hacknet Node CPU Architecture Neural-Upload",
+];
+
 /** @param {NS} ns */
 function maybeInstall(ns) {
   const ownedWithPurchased = ns.singularity.getOwnedAugmentations(true);
   const ownedInstalled = ns.singularity.getOwnedAugmentations(false);
   const queued = ownedWithPurchased.length - ownedInstalled.length;
 
-  if (queued >= 5 || ownedWithPurchased.includes("The Red Pill")) {
+  const hasRedPill = ownedWithPurchased.includes("The Red Pill");
+  const hasPriorityAug = INSTALL_PRIORITY_AUGS.some(
+    a => ownedWithPurchased.includes(a) && !ownedInstalled.includes(a)
+  );
+
+  if (hasRedPill || queued >= 5 || (queued >= 2 && hasPriorityAug)) {
     ns.singularity.installAugmentations("/bn4/daemon.js");
   }
 }

@@ -323,32 +323,6 @@ function formatDuration(ms) {
   return `${sec}s`;
 }
 
-function formatWork(work) {
-  if (!work) return "Idle";
-
-  if (work.type === "FACTION") {
-    return `Faction work: ${work.factionName} / ${work.factionWorkType}`;
-  }
-
-  if (work.type === "CLASS") {
-    return `Training/studying: ${work.classType} at ${work.location}`;
-  }
-
-  if (work.type === "CRIME") {
-    return `Crime: ${work.crimeType}`;
-  }
-
-  if (work.type === "COMPANY") {
-    return `Company work: ${work.companyName}`;
-  }
-
-  if (work.type === "CREATE_PROGRAM") {
-    return `Creating program: ${work.programName}`;
-  }
-
-  return JSON.stringify(work);
-}
-
 /** @param {NS} ns */
 function updateMoneyTrend(ns) {
   const money = ns.getPlayer().money;
