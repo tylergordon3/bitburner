@@ -123,7 +123,6 @@ function buyAugs(ns) {
     }
   }
 
-  // AFTER:
   candidates.sort((a, b) => {
     // Always buy NeuroFlux Governor last — it inflates prices of everything else
     const aNFG = a.aug === "NeuroFlux Governor" ? 1 : 0;
