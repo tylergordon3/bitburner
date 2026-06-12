@@ -153,6 +153,27 @@ const INSTALL_PRIORITY_AUGS = [
 ];
 
 /** @param {NS} ns */
+function startBestFactionWork(ns, faction) {
+  const types = [
+    "hacking",
+    "field",
+    "security",
+  ];
+
+  for (const type of types) {
+    const ok = ns.singularity.workForFaction(
+      /** @type {any} */ (faction),
+      /** @type {any} */ (type),
+      shouldFocus(ns)
+    );
+
+    if (ok) return type;
+  }
+
+  return null;
+}
+
+/** @param {NS} ns */
 function maybeInstall(ns) {
   const ownedWithPurchased = ns.singularity.getOwnedAugmentations(true);
   const ownedInstalled = ns.singularity.getOwnedAugmentations(false);
@@ -225,15 +246,11 @@ async function decideNextPriority(ns) {
   }
 
   if (target.repMissing > 0) {
-    ns.singularity.workForFaction(
-      /** @type {any} */ (target.faction),
-      /** @type {any} */ ("hacking"),
-      shouldFocus(ns)
-    );
+    const workType = startBestFactionWork(ns, target.faction);
 
     return {
       action: "Faction Rep",
-      detail: `${target.faction} -> ${target.aug}`,
+      detail: `${target.faction} (${workType ?? "none"}) -> ${target.aug}`,
       target,
       infra,
     };
