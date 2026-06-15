@@ -82,7 +82,7 @@ async function backdoorTargets(ns) {
     for (const hop of path.slice(1)) ns.singularity.connect(hop);
 
     ns.tprint(`Installing backdoor on ${server}...`);
-    await ns.singularity.installBackdoor(); // async Promise API
+    await ns.singularity.installBackdoor();
     ns.singularity.connect("home");
   }
 }
@@ -123,8 +123,8 @@ function buyAugs(ns) {
     }
   }
 
+  // Buy cheapest first; NeuroFlux Governor always last (it inflates all prices).
   candidates.sort((a, b) => {
-    // Always buy NeuroFlux Governor last — it inflates prices of everything else
     const aNFG = a.aug === "NeuroFlux Governor" ? 1 : 0;
     const bNFG = b.aug === "NeuroFlux Governor" ? 1 : 0;
     if (aNFG !== bNFG) return aNFG - bNFG;
@@ -154,11 +154,7 @@ const INSTALL_PRIORITY_AUGS = [
 
 /** @param {NS} ns */
 function startBestFactionWork(ns, faction) {
-  const types = [
-    "hacking",
-    "field",
-    "security",
-  ];
+  const types = ["hacking", "field", "security"];
 
   for (const type of types) {
     const ok = ns.singularity.workForFaction(
@@ -166,7 +162,6 @@ function startBestFactionWork(ns, faction) {
       /** @type {any} */ (type),
       shouldFocus(ns)
     );
-
     if (ok) return type;
   }
 
@@ -205,6 +200,40 @@ async function maybeFinishBN(ns) {
   ns.singularity.destroyW0r1dD43m0n(nextBN, "/bn4/daemon.js");
 }
 
+/** @param {NS} ns @param {any} target */
+async function maybeBuyInfra(ns, target) {
+  const money = playerMoney(ns);
+
+  // No aug target at all: spend freely (reserve a small emergency fund).
+  if (!target) {
+    return await managePurchasedServers(ns, 10e6, 0.25);
+  }
+
+  const { price, moneyMissing = 0, repMissing = 0 } = target;
+
+  // Rep still needed: the hacking loop is our income engine, so infra is
+  // worth buying — but never put the aug purchase at risk.
+  // Allow up to 10% of spendable cash, capped so we always keep `price`
+  // in reserve once we already have it.
+  if (repMissing > 0) {
+    // If we already have the full aug price saved, protect it entirely.
+    const hardCap = money > price ? money - price : money * 0.05;
+    return await managePurchasedServers(ns, 50e6, 0.10, hardCap);
+  }
+
+  // Rep done, money still needed: save aggressively.
+  // Allow only very small opportunistic buys (never more than 5% of missing).
+  const tinyBudget = moneyMissing * 0.05;
+  if (tinyBudget < 1e6) {
+    // So close — just save.
+    return {
+      action: "Saving for Aug",
+      detail: `${target.aug}: need $${ns.format.number(moneyMissing)}`,
+    };
+  }
+  return await managePurchasedServers(ns, price, 0.05, tinyBudget);
+}
+
 /** @param {NS} ns */
 async function decideNextPriority(ns) {
   const bootstrap = await doEarlyBootstrapIfNeeded(ns);
@@ -216,16 +245,14 @@ async function decideNextPriority(ns) {
       infra: null,
     };
   }
-  
+
   const target = getNextAugTarget(ns);
+
+  // Buy infra AFTER we know the target so we can protect the aug budget.
   const infra = await maybeBuyInfra(ns, target);
 
   if (!target) {
-    const crime = await commitHomicideIfUseful(
-      ns,
-      "no augmentation target / karma"
-    );
-
+    const crime = await commitHomicideIfUseful(ns, "no augmentation target / karma");
     return {
       action: crime ? "Crime" : "Idle",
       detail: crime ? "Homicide for karma" : "No augmentation target",
@@ -236,18 +263,12 @@ async function decideNextPriority(ns) {
 
   const statTargets = FACTION_REQUIREMENTS[target.faction] ?? {};
   const training = await trainCombatIfNeeded(ns, statTargets);
-
   if (training) {
-    return {
-      ...training,
-      target,
-      infra,
-    };
+    return { ...training, target, infra };
   }
 
   if (target.repMissing > 0) {
     const workType = startBestFactionWork(ns, target.faction);
-
     return {
       action: "Faction Rep",
       detail: `${target.faction} (${workType ?? "none"}) -> ${target.aug}`,
@@ -257,27 +278,42 @@ async function decideNextPriority(ns) {
   }
 
   if (target.moneyMissing > 0) {
-    const crime = await commitHomicideIfUseful(
-      ns,
-      `money for ${target.aug}`
-    );
+    // Rep is done; we just need cash. Best strategies in order:
+    //
+    // 1. Homicide (if chance >= 80%) — high yield crime.
+    // 2. Faction work — earns rep we may want later AND lets the
+    //    hacking loop run freely in the background (no focus conflict).
+    // 3. Study Algorithms — grows hack level → bigger hacking income.
+    //    Only fall here if there's no faction to work for.
+    //
+    // We deliberately never Mug: Mug earns ~$35k/crime and requires
+    // focus, which blocks the hacking loop. Hacking earns far more.
 
-    if (crime) {
+    const homicide = await commitHomicideIfUseful(ns, `money for ${target.aug}`);
+    if (homicide) {
+      return { ...homicide, target, infra };
+    }
+
+    // Try to keep working for any joined faction to bank extra rep.
+    const workType = startBestFactionWork(ns, target.faction);
+    if (workType) {
       return {
-        ...crime,
+        action: "Faction Work (saving)",
+        detail: `${target.faction} (${workType}) | saving $${ns.format.number(target.moneyMissing)} for ${target.aug}`,
         target,
         infra,
       };
     }
 
-    ns.singularity.commitCrime(
-      /** @type {any} */ ("Mug"),
+    // No faction work available — study to grow hack income.
+    ns.singularity.universityCourse(
+      "Rothman University",
+      /** @type {any} */ ("Algorithms"),
       shouldFocus(ns)
     );
-
     return {
-      action: "Crime",
-      detail: `Mug for money: ${target.aug}`,
+      action: "Studying",
+      detail: `Growing income for ${target.aug} ($${ns.format.number(target.moneyMissing)} needed)`,
       target,
       infra,
     };
@@ -325,38 +361,4 @@ export async function main(ns) {
     );
     await ns.sleep(30_000);
   }
-}
-
-/** @param {NS} ns @param {any} target */
-async function maybeBuyInfra(ns, target) {
-  const money = playerMoney(ns);
-
-  // No aug target: infrastructure is useful.
-  if (!target) {
-    return await managePurchasedServers(ns, 10e6);
-  }
-
-  // If rep is done and money is close, save for aug.
-  if (target.repMissing <= 0) {
-    const missing = target.moneyMissing ?? 0;
-
-    // Close = within 30 minutes of reasonable hacking income OR within 25% of price.
-    const closeByCash = money >= target.price * 0.75;
-    const smallMissing = missing <= 25e6;
-
-    if (closeByCash || smallMissing) {
-      return {
-        action: "Saving for Aug",
-        detail: `${target.aug}: need $${ns.format.number(missing)}`,
-      };
-    }
-  }
-
-  // If still farming rep, allow small cloud buys only.
-  if (target.repMissing > 0) {
-    return await managePurchasedServers(ns, 50e6, 0.10);
-  }
-
-  // If money missing is large, allow moderate infra.
-  return await managePurchasedServers(ns, 25e6, 0.15);
 }
