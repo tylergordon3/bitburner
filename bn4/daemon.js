@@ -5,6 +5,7 @@ import {
   commitHomicideIfUseful,
   shouldFocus,
   doEarlyBootstrapIfNeeded,
+  maybeCreatePrograms,
 } from "../lib/player-actions.js";
 import { getNextAugTarget, FACTION_REQUIREMENTS } from "../lib/aug-targets.js";
 
@@ -24,6 +25,12 @@ const BACKDOOR_PRIORITY = [
   "The-Cave",
   "w0r1d_d43m0n",
 ];
+
+// Dynamic reset: install if this much wall-clock time has passed AND we have
+// at least one queued augmentation. Give the run enough time to actually
+// earn augs before forcing a reset.
+const RESET_FILE = "/data/last-reset.txt";
+const RESET_AFTER_MS = 16 * 60 * 60 * 1_000; // 16 hours
 
 function playerMoney(ns) {
   return ns.getPlayer().money ?? 0;
@@ -169,6 +176,22 @@ function startBestFactionWork(ns, faction) {
 }
 
 /** @param {NS} ns */
+function readLastResetTime(ns) {
+  try {
+    const raw = ns.read(RESET_FILE);
+    const t = Number(raw);
+    return isNaN(t) ? 0 : t;
+  } catch {
+    return 0;
+  }
+}
+
+/** @param {NS} ns */
+function writeResetTime(ns) {
+  ns.write(RESET_FILE, String(Date.now()), "w");
+}
+
+/** @param {NS} ns */
 function maybeInstall(ns) {
   const ownedWithPurchased = ns.singularity.getOwnedAugmentations(true);
   const ownedInstalled = ns.singularity.getOwnedAugmentations(false);
@@ -179,7 +202,18 @@ function maybeInstall(ns) {
     a => ownedWithPurchased.includes(a) && !ownedInstalled.includes(a)
   );
 
-  if (hasRedPill || queued >= 5 || (queued >= 2 && hasPriorityAug)) {
+  // Time-based reset: if the run has been going long enough and we have
+  // something to show for it, don't keep grinding — install and restart.
+  const lastReset = readLastResetTime(ns);
+  const elapsed = Date.now() - lastReset;
+  const timeTriggered = queued >= 1 && elapsed >= RESET_AFTER_MS;
+
+  if (hasRedPill || queued >= 5 || (queued >= 2 && hasPriorityAug) || timeTriggered) {
+    if (timeTriggered) {
+      const hours = (elapsed / 3_600_000).toFixed(1);
+      ns.tprint(`Time-triggered install after ${hours}h with ${queued} aug(s) queued.`);
+    }
+    writeResetTime(ns);
     ns.singularity.installAugmentations("/bn4/daemon.js");
   }
 }
@@ -246,6 +280,19 @@ async function decideNextPriority(ns) {
     };
   }
 
+  // If income is too slow to buy darkweb programs, train hacking and create
+  // BruteSSH / FTPCrack manually — more port openers = more servers = more $.
+  // This check runs BEFORE the aug target loop so it can pre-empt faction work.
+  const programWork = await maybeCreatePrograms(ns);
+  if (programWork) {
+    const target = getNextAugTarget(ns);
+    return {
+      ...programWork,
+      target,
+      infra: null,
+    };
+  }
+
   const target = getNextAugTarget(ns);
 
   // Buy infra AFTER we know the target so we can protect the aug budget.
@@ -281,39 +328,58 @@ async function decideNextPriority(ns) {
     // Rep is done; we just need cash. Best strategies in order:
     //
     // 1. Homicide (if chance >= 80%) — high yield crime.
-    // 2. Faction work — earns rep we may want later AND lets the
-    //    hacking loop run freely in the background (no focus conflict).
-    // 3. Study Algorithms — grows hack level → bigger hacking income.
-    //    Only fall here if there's no faction to work for.
+    // 2. Faction work WITHOUT focus — only viable if the player has
+    //    Neuroreceptor Management Implant (shouldFocus returns false),
+    //    meaning hacking runs freely in the background at full speed.
+    //    If focus WOULD be required, faction work blocks the hacking loop
+    //    which is our main income engine, so we skip it entirely.
+    // 3. Idle (hacking loop earns money in background; no action needed).
     //
-    // We deliberately never Mug: Mug earns ~$35k/crime and requires
-    // focus, which blocks the hacking loop. Hacking earns far more.
+    // We deliberately never Mug or study here: Mug earns ~$35k/crime and
+    // requires focus. Studying grows hack level but hacking is already
+    // running and growing naturally. The hacking loop earns far more than
+    // either alternative.
 
     const homicide = await commitHomicideIfUseful(ns, `money for ${target.aug}`);
     if (homicide) {
       return { ...homicide, target, infra };
     }
 
-    // Try to keep working for any joined faction to bank extra rep.
-    const workType = startBestFactionWork(ns, target.faction);
-    if (workType) {
-      return {
-        action: "Faction Work (saving)",
-        detail: `${target.faction} (${workType}) | saving $${ns.format.number(target.moneyMissing)} for ${target.aug}`,
-        target,
-        infra,
-      };
+    // Only do faction work if (a) it won't steal focus from hacking AND
+    // (b) there's actually another aug from this faction that still needs
+    //     more rep — otherwise we're earning rep we'll never use.
+    const focusNeeded = shouldFocus(ns);
+    if (!focusNeeded) {
+      const factionHasMoreRepWork = (() => {
+        const s = ns.singularity;
+        const owned = new Set(s.getOwnedAugmentations(true));
+        const currentRep = s.getFactionRep(/** @type {any} */ (target.faction));
+        return s.getAugmentationsFromFaction(/** @type {any} */ (target.faction)).some(aug => {
+          if (aug === "NeuroFlux Governor") return false;
+          if (owned.has(aug)) return false;
+          if (aug === target.aug) return false;
+          return s.getAugmentationRepReq(aug) > currentRep;
+        });
+      })();
+
+      if (factionHasMoreRepWork) {
+        const workType = startBestFactionWork(ns, target.faction);
+        if (workType) {
+          return {
+            action: "Faction Work (banking rep)",
+            detail: `${target.faction} (${workType}, no focus) | saving $${ns.format.number(target.moneyMissing)} for ${target.aug}`,
+            target,
+            infra,
+          };
+        }
+      }
     }
 
-    // No faction work available — study to grow hack income.
-    ns.singularity.universityCourse(
-      "Rothman University",
-      /** @type {any} */ ("Algorithms"),
-      shouldFocus(ns)
-    );
+    // Focus would be required (or no faction available) — let hacking loop
+    // earn the money freely. Just report what we're waiting on.
     return {
-      action: "Studying",
-      detail: `Growing income for ${target.aug} ($${ns.format.number(target.moneyMissing)} needed)`,
+      action: "Saving",
+      detail: `Hacking for $${ns.format.number(target.moneyMissing)} -> ${target.aug}`,
       target,
       infra,
     };
@@ -331,6 +397,11 @@ async function decideNextPriority(ns) {
 export async function main(ns) {
   ns.disableLog("ALL");
   // ns.ui.openTail();
+
+  // Stamp the start of this run if we don't already have a timestamp.
+  // This means the 16-hour clock begins when daemon first starts, not at
+  // some arbitrary epoch.
+  if (readLastResetTime(ns) === 0) writeResetTime(ns);
 
   while (true) {
     if (!ns.scriptRunning("/hacking/manager.js", "home")) {

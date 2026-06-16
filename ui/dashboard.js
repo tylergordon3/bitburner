@@ -63,12 +63,13 @@ export async function main(ns) {
     const augQueue    = getAugQueueInfo(ns);
     const moneyEta    = etaFromRate(target.moneyMissing ?? 0, moneyRate);
     const network     = getNetworkStatus(ns);
+    const runDuration = getRunDuration(ns);
 
     renderDashboard(ns, {
       player, money, hack, incomeHour,
       ram, cloud, final, state, target,
       goal, moneyRate, moneyEta, ramRate,
-      augQueue, network,
+      augQueue, network, runDuration,
     });
 
     await ns.sleep(5_000);
@@ -137,8 +138,13 @@ function renderDashboard(ns, data) {
           el("span", { style: { fontSize: "17px", fontWeight: "bold", letterSpacing: "2px", color: C.green } },
             "[ GORDNET ]"
           ),
-          el("span", { style: { fontSize: "13px", color: C.dim } },
-            new Date().toLocaleTimeString()
+          el("div", { style: { display: "flex", gap: "14px", alignItems: "baseline" } },
+            el("span", { style: { fontSize: "13px", color: C.yellow } },
+              `run ${data.runDuration}`
+            ),
+            el("span", { style: { fontSize: "13px", color: C.dim } },
+              new Date().toLocaleTimeString()
+            ),
           ),
         ),
 
@@ -300,6 +306,18 @@ function getIncomePerHour(ns) {
   const total   = sources.sinceInstall.total;
   const seconds = Math.max(1, (Date.now() - reset.lastAugReset) / 1000);
   return (total / seconds) * 3600;
+}
+
+/** @param {NS} ns */
+function getRunDuration(ns) {
+  try {
+    const n = /** @type {any} */ (ns);
+    if (!n.getResetInfo) return "?";
+    const reset = n.getResetInfo();
+    return formatDuration(Date.now() - reset.lastAugReset);
+  } catch {
+    return "?";
+  }
 }
 
 /** @param {NS} ns */
