@@ -6,8 +6,16 @@ import {
   shouldFocus,
   doEarlyBootstrapIfNeeded,
   maybeCreatePrograms,
+  maybePursueNextFaction,
+  estimateIncomeRate,
+  updateRepRate,
 } from "../lib/player-actions.js";
-import { getNextAugTarget, FACTION_REQUIREMENTS } from "../lib/aug-targets.js";
+import {
+  getNextAugTarget,
+  getAllAugCandidates,
+  getUnjoinedFactionOpportunities,
+  FACTION_REQUIREMENTS,
+} from "../lib/aug-targets.js";
 
 const PROGRAMS = [
   "BruteSSH.exe",
@@ -26,9 +34,6 @@ const BACKDOOR_PRIORITY = [
   "w0r1d_d43m0n",
 ];
 
-// Dynamic reset: install if this much wall-clock time has passed AND we have
-// at least one queued augmentation. Give the run enough time to actually
-// earn augs before forcing a reset.
 const RESET_FILE = "/data/last-reset.txt";
 const RESET_AFTER_MS = 16 * 60 * 60 * 1_000; // 16 hours
 
@@ -130,7 +135,7 @@ function buyAugs(ns) {
     }
   }
 
-  // Buy cheapest first; NeuroFlux Governor always last (it inflates all prices).
+  // Buy cheapest first; NeuroFlux Governor always last.
   candidates.sort((a, b) => {
     const aNFG = a.aug === "NeuroFlux Governor" ? 1 : 0;
     const bNFG = b.aug === "NeuroFlux Governor" ? 1 : 0;
@@ -150,7 +155,6 @@ function buyAugs(ns) {
   return purchases;
 }
 
-// Augs that give hacking multipliers significant enough to justify an early install.
 const INSTALL_PRIORITY_AUGS = [
   "BitWire",
   "Neuralstimulator",
@@ -202,8 +206,6 @@ function maybeInstall(ns) {
     a => ownedWithPurchased.includes(a) && !ownedInstalled.includes(a)
   );
 
-  // Time-based reset: if the run has been going long enough and we have
-  // something to show for it, don't keep grinding — install and restart.
   const lastReset = readLastResetTime(ns);
   const elapsed = Date.now() - lastReset;
   const timeTriggered = queued >= 1 && elapsed >= RESET_AFTER_MS;
@@ -238,28 +240,19 @@ async function maybeFinishBN(ns) {
 async function maybeBuyInfra(ns, target) {
   const money = playerMoney(ns);
 
-  // No aug target at all: spend freely (reserve a small emergency fund).
   if (!target) {
     return await managePurchasedServers(ns, 10e6, 0.25);
   }
 
   const { price, moneyMissing = 0, repMissing = 0 } = target;
 
-  // Rep still needed: the hacking loop is our income engine, so infra is
-  // worth buying — but never put the aug purchase at risk.
-  // Allow up to 10% of spendable cash, capped so we always keep `price`
-  // in reserve once we already have it.
   if (repMissing > 0) {
-    // If we already have the full aug price saved, protect it entirely.
     const hardCap = money > price ? money - price : money * 0.05;
     return await managePurchasedServers(ns, 50e6, 0.10, hardCap);
   }
 
-  // Rep done, money still needed: save aggressively.
-  // Allow only very small opportunistic buys (never more than 5% of missing).
   const tinyBudget = moneyMissing * 0.05;
   if (tinyBudget < 1e6) {
-    // So close — just save.
     return {
       action: "Saving for Aug",
       detail: `${target.aug}: need $${ns.format.number(moneyMissing)}`,
@@ -268,52 +261,97 @@ async function maybeBuyInfra(ns, target) {
   return await managePurchasedServers(ns, price, 0.05, tinyBudget);
 }
 
-/** @param {NS} ns */
-async function decideNextPriority(ns) {
-  const bootstrap = await doEarlyBootstrapIfNeeded(ns);
+/**
+ * When our primary goal doesn't need player focus, optionally bank rep with a
+ * secondary faction that has augs we'll want later.
+ * Returns a detail string if we started secondary work, null otherwise.
+ * @param {NS} ns
+ * @param {string} primaryFaction  - skip this faction (already working it)
+ */
+function maybeDoSecondaryFactionWork(ns, primaryFaction) {
+  if (shouldFocus(ns)) return null; // can't background work
 
-  if (bootstrap) {
-    return {
-      ...bootstrap,
-      target: null,
-      infra: null,
-    };
+  const s = ns.singularity;
+  const owned = new Set(s.getOwnedAugmentations(true));
+  const joined = ns.getPlayer().factions ?? [];
+
+  // Find a joined faction (other than primary) that still has augs we want,
+  // and where we're missing rep. Prefer higher-priority factions.
+  for (const factionName of joined) {
+    if (factionName === primaryFaction) continue;
+
+    const augs = s.getAugmentationsFromFaction(/** @type {any} */ (factionName));
+    const currentRep = s.getFactionRep(/** @type {any} */ (factionName));
+
+    const hasUsefulWork = augs.some(aug => {
+      if (aug === "NeuroFlux Governor") return false;
+      if (owned.has(aug)) return false;
+      const prereqs = s.getAugmentationPrereq(aug);
+      if (!prereqs.every(a => owned.has(a))) return false;
+      return s.getAugmentationRepReq(aug) > currentRep;
+    });
+
+    if (!hasUsefulWork) continue;
+
+    const workType = startBestFactionWork(ns, factionName);
+    if (workType) return `Secondary: ${factionName} (${workType})`;
   }
 
-  // If income is too slow to buy darkweb programs, train hacking and create
-  // BruteSSH / FTPCrack manually — more port openers = more servers = more $.
-  // This check runs BEFORE the aug target loop so it can pre-empt faction work.
+  return null;
+}
+
+/** @param {NS} ns */
+async function decideNextPriority(ns) {
+  // ── Update rolling rate snapshots ────────────────────────────────────────
+  estimateIncomeRate(ns);
+  const currentTarget = globalThis.gordState?.target;
+  if (currentTarget?.faction) updateRepRate(ns, currentTarget.faction);
+
+  // ── Faction opportunities (used both in main logic and for dashboard) ────
+  const opportunities = getUnjoinedFactionOpportunities(ns);
+  globalThis.gordFactionPipeline = opportunities;
+
+  // ── Early bootstrap ──────────────────────────────────────────────────────
+  const bootstrap = await doEarlyBootstrapIfNeeded(ns);
+  if (bootstrap) {
+    return { ...bootstrap, target: null, infra: null };
+  }
+
+  // ── Program creation ─────────────────────────────────────────────────────
   const programWork = await maybeCreatePrograms(ns);
   if (programWork) {
     const target = getNextAugTarget(ns);
-    return {
-      ...programWork,
-      target,
-      infra: null,
-    };
+    return { ...programWork, target, infra: null };
   }
 
   const target = getNextAugTarget(ns);
+  const infra  = await maybeBuyInfra(ns, target);
 
-  // Buy infra AFTER we know the target so we can protect the aug budget.
-  const infra = await maybeBuyInfra(ns, target);
-
+  // ── No aug target ────────────────────────────────────────────────────────
   if (!target) {
-    const crime = await commitHomicideIfUseful(ns, "no augmentation target / karma");
+    // Nothing to buy — try to work toward next factions rather than idling.
+    const factionPursuit = await maybePursueNextFaction(ns, opportunities, true);
+    if (factionPursuit) {
+      return { ...factionPursuit, target: null, infra };
+    }
+
+    const crime = await commitHomicideIfUseful(ns, "karma / no aug target");
     return {
       action: crime ? "Crime" : "Idle",
-      detail: crime ? "Homicide for karma" : "No augmentation target",
+      detail: crime ? "Homicide for karma" : "No augmentation target — check factions",
       target: null,
       infra,
     };
   }
 
+  // ── Combat-stat requirements for current faction ─────────────────────────
   const statTargets = FACTION_REQUIREMENTS[target.faction] ?? {};
   const training = await trainCombatIfNeeded(ns, statTargets);
   if (training) {
     return { ...training, target, infra };
   }
 
+  // ── Rep still needed ─────────────────────────────────────────────────────
   if (target.repMissing > 0) {
     const workType = startBestFactionWork(ns, target.faction);
     return {
@@ -324,32 +362,17 @@ async function decideNextPriority(ns) {
     };
   }
 
+  // ── Rep done, money still needed ─────────────────────────────────────────
   if (target.moneyMissing > 0) {
-    // Rep is done; we just need cash. Best strategies in order:
-    //
-    // 1. Homicide (if chance >= 80%) — high yield crime.
-    // 2. Faction work WITHOUT focus — only viable if the player has
-    //    Neuroreceptor Management Implant (shouldFocus returns false),
-    //    meaning hacking runs freely in the background at full speed.
-    //    If focus WOULD be required, faction work blocks the hacking loop
-    //    which is our main income engine, so we skip it entirely.
-    // 3. Idle (hacking loop earns money in background; no action needed).
-    //
-    // We deliberately never Mug or study here: Mug earns ~$35k/crime and
-    // requires focus. Studying grows hack level but hacking is already
-    // running and growing naturally. The hacking loop earns far more than
-    // either alternative.
-
     const homicide = await commitHomicideIfUseful(ns, `money for ${target.aug}`);
     if (homicide) {
       return { ...homicide, target, infra };
     }
 
-    // Only do faction work if (a) it won't steal focus from hacking AND
-    // (b) there's actually another aug from this faction that still needs
-    //     more rep — otherwise we're earning rep we'll never use.
-    const focusNeeded = shouldFocus(ns);
-    if (!focusNeeded) {
+    // No focus needed: do secondary faction work while hacking earns money.
+    const secondary = maybeDoSecondaryFactionWork(ns, target.faction);
+
+    if (!shouldFocus(ns)) {
       const factionHasMoreRepWork = (() => {
         const s = ns.singularity;
         const owned = new Set(s.getOwnedAugmentations(true));
@@ -367,16 +390,35 @@ async function decideNextPriority(ns) {
         if (workType) {
           return {
             action: "Faction Work (banking rep)",
-            detail: `${target.faction} (${workType}, no focus) | saving $${ns.format.number(target.moneyMissing)} for ${target.aug}`,
+            detail: `${target.faction} (${workType}, no focus) | saving $${ns.format.number(target.moneyMissing)} for ${target.aug}${secondary ? ` | ${secondary}` : ""}`,
             target,
             infra,
           };
         }
       }
+
+      // Primary faction rep is banked — try secondary faction work.
+      if (secondary) {
+        return {
+          action: "Faction Work (secondary)",
+          detail: `${secondary} | saving $${ns.format.number(target.moneyMissing)} for ${target.aug}`,
+          target,
+          infra,
+        };
+      }
+
+      // Nothing faction-related — try advancing to next factions.
+      const factionPursuit = await maybePursueNextFaction(ns, opportunities, false);
+      if (factionPursuit) {
+        return {
+          ...factionPursuit,
+          detail: `${factionPursuit.detail} | saving $${ns.format.number(target.moneyMissing)} for ${target.aug}`,
+          target,
+          infra,
+        };
+      }
     }
 
-    // Focus would be required (or no faction available) — let hacking loop
-    // earn the money freely. Just report what we're waiting on.
     return {
       action: "Saving",
       detail: `Hacking for $${ns.format.number(target.moneyMissing)} -> ${target.aug}`,
@@ -385,6 +427,7 @@ async function decideNextPriority(ns) {
     };
   }
 
+  // ── Ready to buy ─────────────────────────────────────────────────────────
   return {
     action: "Ready to Purchase",
     detail: `${target.faction} -> ${target.aug}`,
@@ -396,11 +439,7 @@ async function decideNextPriority(ns) {
 /** @param {NS} ns */
 export async function main(ns) {
   ns.disableLog("ALL");
-  // ns.ui.openTail();
 
-  // Stamp the start of this run if we don't already have a timestamp.
-  // This means the 16-hour clock begins when daemon first starts, not at
-  // some arbitrary epoch.
   if (readLastResetTime(ns) === 0) writeResetTime(ns);
 
   while (true) {
@@ -423,6 +462,9 @@ export async function main(ns) {
     if (bought?.length) {
       globalThis.gordState.purchases = bought;
     }
+
+    // Expose the full sorted candidate list for the dashboard's "pipeline" view.
+    globalThis.gordAugPipeline = getAllAugCandidates(ns).slice(0, 10);
 
     maybeInstall(ns);
     await maybeFinishBN(ns);

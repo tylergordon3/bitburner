@@ -266,6 +266,69 @@ function renderDashboard(ns, data) {
           ),
         ]),
 
+        // ── Aug Pipeline ─────────────────────────────────────────────────────
+        card(C, "AUG PIPELINE", [
+          el("div", { style: { fontSize: "12px", color: C.dim, marginBottom: "6px" } },
+            "Next augmentations by estimated time-to-purchase"
+          ),
+          ...(globalThis.gordAugPipeline ?? []).slice(0, 6).map((a, i) => {
+            const done      = a.canBuy;
+            const repDone   = a.repMissing <= 0;
+            const color     = done ? C.green : repDone ? C.yellow : C.dim;
+            const etaStr    = done ? "READY"
+                            : isFinite(a.estimatedMs) ? formatDuration(a.estimatedMs)
+                            : repDone ? `$${ns.format.number(a.moneyMissing)}`
+                            : `${ns.format.number(a.repMissing)} rep`;
+            return el("div", {
+              key: i,
+              style: {
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                fontSize: "12px",
+                padding: "2px 0",
+                borderBottom: i < 5 ? `1px solid ${C.border}` : "none",
+              },
+            },
+              el("span", { style: { color: i === 0 ? C.green : C.dim, fontWeight: i === 0 ? "bold" : "normal" } },
+                `${i === 0 ? "> " : "  "}${a.aug}`
+              ),
+              el("div", { style: { display: "flex", gap: "10px", alignItems: "center" } },
+                el("span", { style: { color: C.dim, fontSize: "11px" } }, a.faction),
+                el("span", { style: { color, fontWeight: "bold", minWidth: "60px", textAlign: "right" } }, etaStr),
+              ),
+            );
+          }),
+        ]),
+
+        // ── Faction Pipeline ─────────────────────────────────────────────────
+        card(C, "FACTION PIPELINE", [
+          el("div", { style: { fontSize: "12px", color: C.dim, marginBottom: "6px" } },
+            "Unjoined factions & what's blocking them"
+          ),
+          ...(globalThis.gordFactionPipeline ?? []).slice(0, 6).map((op, i) => {
+            const urgencyColor = op.urgency === "high"   ? C.red
+                               : op.urgency === "medium" ? C.yellow
+                               : C.dim;
+            const label = op.faction;
+            const sub   = op.reason ?? "";
+            return el("div", {
+              key: i,
+              style: {
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                fontSize: "12px",
+                padding: "2px 0",
+                borderBottom: i < 5 ? `1px solid ${C.border}` : "none",
+              },
+            },
+              el("span", { style: { color: "#e2e8f0" } }, label),
+              el("span", { style: { color: urgencyColor, fontSize: "11px", maxWidth: "200px", textAlign: "right", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, sub),
+            );
+          }),
+        ]),
+
       )
     );
   } catch (e) {
@@ -273,7 +336,7 @@ function renderDashboard(ns, data) {
     ns.print(e?.stack ?? "");
   }
 
-  ns.ui.resizeTail(780, 960);
+  ns.ui.resizeTail(780, 1200);
 }
 
 // ── Data helpers ─────────────────────────────────────────────────────────────
