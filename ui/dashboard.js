@@ -8,7 +8,7 @@ const BACKDOOR_CHECKLIST = [
   { server: "avmnite-02h",   label: "NiteSec"     },
   { server: "I.I.I.I",      label: "The Black Hand" },
   { server: "run4theh111z",  label: "BitRunners"  },
-  { server: "The-Cave",      label: "Shadows of Anarchy" },
+  { server: "The-Cave",      label: "The Cave" },
   { server: "w0r1d_d43m0n", label: "World Daemon" },
 ];
 
