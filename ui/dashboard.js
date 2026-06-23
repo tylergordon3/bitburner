@@ -45,7 +45,7 @@ let ramPerHour   = 0;
 export async function main(ns) {
   ns.disableLog("ALL");
   ns.ui.openTail();
-  ns.ui.moveTail(20, 40);
+  ns.ui.moveTail(20, 0);
 
   while (true) {
     const player      = ns.getPlayer();
@@ -118,7 +118,7 @@ function renderDashboard(ns, data) {
         style: {
           fontFamily: "'Courier New', monospace",
           fontSize: "14px",
-          padding: "10px 14px",
+          padding: "2px 10px 6px",
           boxSizing: "border-box",
           width: "100%",
           color: "#e2e8f0",
@@ -131,9 +131,9 @@ function renderDashboard(ns, data) {
             display: "flex",
             justifyContent: "space-between",
             alignItems: "baseline",
-            marginBottom: "10px",
+            marginBottom: "6px",
             borderBottom: `1px solid ${C.border}`,
-            paddingBottom: "6px",
+            paddingBottom: "4px",
           },
         },
           el("span", { style: { fontSize: "17px", fontWeight: "bold", letterSpacing: "2px", color: C.green } },
@@ -247,89 +247,133 @@ function renderDashboard(ns, data) {
 
         // ── Network Checklist ────────────────────────────────────────────────
         card(C, "NETWORK", [
+          el("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "4px 16px" } },
+
+            // Backdoors — compact badge row
+            el("div", {},
+              el("div", { style: { fontSize: "11px", color: C.dim, letterSpacing: "1px", marginBottom: "4px" } }, "BACKDOORS"),
+              el("div", { style: { display: "flex", flexWrap: "wrap", gap: "4px" } },
+                ...network.backdoors.map(b => {
+                  const color = b.done ? C.green : !b.exists ? "rgba(255,255,255,0.2)" : !b.rooted ? C.red : C.yellow;
+                  return el("span", {
+                    key: b.server,
+                    style: {
+                      fontSize: "11px",
+                      padding: "1px 6px",
+                      borderRadius: "3px",
+                      border: `1px solid ${color}55`,
+                      color,
+                      background: color + "11",
+                    },
+                  }, b.label);
+                }),
+              ),
+            ),
+
+            // Factions — compact badge row
+            el("div", {},
+              el("div", { style: { fontSize: "11px", color: C.dim, letterSpacing: "1px", marginBottom: "4px" } }, "FACTIONS"),
+              el("div", { style: { display: "flex", flexWrap: "wrap", gap: "4px" } },
+                ...network.factions.map(f => {
+                  const color = f.joined ? C.green : C.dim;
+                  return el("span", {
+                    key: f.name,
+                    style: {
+                      fontSize: "11px",
+                      padding: "1px 6px",
+                      borderRadius: "3px",
+                      border: `1px solid ${color}55`,
+                      color,
+                      background: color + "11",
+                    },
+                  }, f.name);
+                }),
+              ),
+            ),
+          ),
+
+          // Programs — full-width badge row below the grid
+          el("div", { style: { marginTop: "8px", borderTop: `1px solid ${C.border}`, paddingTop: "6px" } },
+            el("div", { style: { fontSize: "11px", color: C.dim, letterSpacing: "1px", marginBottom: "4px" } }, "PROGRAMS"),
+            el("div", { style: { display: "flex", flexWrap: "wrap", gap: "4px" } },
+              ...network.programs.map(p => {
+                const color = p.owned ? C.green : C.dim;
+                return el("span", {
+                  key: p.name,
+                  style: {
+                    fontSize: "11px",
+                    padding: "1px 6px",
+                    borderRadius: "3px",
+                    border: `1px solid ${color}55`,
+                    color,
+                    background: color + "11",
+                  },
+                }, p.label);
+              }),
+            ),
+          ),
+        ]),
+
+        // ── Aug Pipeline + Faction Pipeline (merged) ─────────────────────────
+        card(C, "PIPELINE", [
           el("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 16px" } },
 
-            // Backdoors column
+            // Left: aug pipeline
             el("div", {},
-              el("div", { style: { fontSize: "12px", color: C.dim, letterSpacing: "1px", marginBottom: "4px" } }, "BACKDOORS"),
-              ...network.backdoors.map(b =>
-                checkRow(C, b.label, b.done,
-                  b.done ? "installed" : (!b.exists ? "undiscovered" : !b.rooted ? "no root" : "pending")
-                )
-              ),
+              el("div", { style: { fontSize: "11px", color: C.dim, letterSpacing: "1px", marginBottom: "6px" } }, "AUGS"),
+              ...(globalThis.gordAugPipeline ?? []).slice(0, 10).map((a, i) => {
+                const done    = a.canBuy;
+                const repDone = a.repMissing <= 0;
+                const color   = done ? C.green : repDone ? C.yellow : C.dim;
+                const etaStr  = done ? "READY"
+                              : isFinite(a.estimatedMs) ? formatDuration(a.estimatedMs)
+                              : repDone ? `$${ns.format.number(a.moneyMissing)}`
+                              : `${ns.format.number(a.repMissing)} rep`;
+                return el("div", {
+                  key: i,
+                  style: {
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                    fontSize: "11px",
+                    padding: "2px 0",
+                    borderBottom: i < 9 ? `1px solid ${C.border}` : "none",
+                    minWidth: 0,
+                  },
+                },
+                  el("span", { style: { color: i === 0 ? "#e2e8f0" : C.dim, fontWeight: i === 0 ? "bold" : "normal", flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } },
+                    `${i === 0 ? "> " : "  "}${a.aug}`
+                  ),
+                  el("span", { style: { color, fontWeight: "bold", flexShrink: 0, marginLeft: "8px", whiteSpace: "nowrap" } }, etaStr),
+                );
+              }),
             ),
 
-            // Factions column
+            // Right: faction pipeline
             el("div", {},
-              el("div", { style: { fontSize: "12px", color: C.dim, letterSpacing: "1px", marginBottom: "4px" } }, "FACTIONS"),
-              ...network.factions.map(f =>
-                checkRow(C, f.name, f.joined, f.joined ? "joined" : "pending")
-              ),
+              el("div", { style: { fontSize: "11px", color: C.dim, letterSpacing: "1px", marginBottom: "6px" } }, "FACTIONS"),
+              ...(globalThis.gordFactionPipeline ?? []).slice(0, 10).map((op, i) => {
+                const urgencyColor = op.urgency === "high"   ? C.red
+                                   : op.urgency === "medium" ? C.yellow
+                                   : C.dim;
+                return el("div", {
+                  key: i,
+                  style: {
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                    fontSize: "11px",
+                    padding: "2px 0",
+                    borderBottom: i < 9 ? `1px solid ${C.border}` : "none",
+                    minWidth: 0,
+                  },
+                },
+                  el("span", { style: { color: "#e2e8f0", flex: "0 0 auto", whiteSpace: "nowrap", marginRight: "8px" } }, op.faction),
+                  el("span", { style: { color: urgencyColor, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", textAlign: "right" } }, op.reason ?? ""),
+                );
+              }),
             ),
           ),
-        ]),
-
-        // ── Aug Pipeline ─────────────────────────────────────────────────────
-        card(C, "AUG PIPELINE", [
-          el("div", { style: { fontSize: "12px", color: C.dim, marginBottom: "6px" } },
-            "Next augmentations by estimated time-to-purchase"
-          ),
-          ...(globalThis.gordAugPipeline ?? []).slice(0, 6).map((a, i) => {
-            const done      = a.canBuy;
-            const repDone   = a.repMissing <= 0;
-            const color     = done ? C.green : repDone ? C.yellow : C.dim;
-            const etaStr    = done ? "READY"
-                            : isFinite(a.estimatedMs) ? formatDuration(a.estimatedMs)
-                            : repDone ? `$${ns.format.number(a.moneyMissing)}`
-                            : `${ns.format.number(a.repMissing)} rep`;
-            return el("div", {
-              key: i,
-              style: {
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "center",
-                fontSize: "12px",
-                padding: "2px 0",
-                borderBottom: i < 5 ? `1px solid ${C.border}` : "none",
-              },
-            },
-              el("span", { style: { color: i === 0 ? C.green : C.dim, fontWeight: i === 0 ? "bold" : "normal" } },
-                `${i === 0 ? "> " : "  "}${a.aug}`
-              ),
-              el("div", { style: { display: "flex", gap: "10px", alignItems: "center" } },
-                el("span", { style: { color: C.dim, fontSize: "11px" } }, a.faction),
-                el("span", { style: { color, fontWeight: "bold", minWidth: "60px", textAlign: "right" } }, etaStr),
-              ),
-            );
-          }),
-        ]),
-
-        // ── Faction Pipeline ─────────────────────────────────────────────────
-        card(C, "FACTION PIPELINE", [
-          el("div", { style: { fontSize: "12px", color: C.dim, marginBottom: "6px" } },
-            "Unjoined factions & what's blocking them"
-          ),
-          ...(globalThis.gordFactionPipeline ?? []).slice(0, 6).map((op, i) => {
-            const urgencyColor = op.urgency === "high"   ? C.red
-                               : op.urgency === "medium" ? C.yellow
-                               : C.dim;
-            const label = op.faction;
-            const sub   = op.reason ?? "";
-            return el("div", {
-              key: i,
-              style: {
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "center",
-                fontSize: "12px",
-                padding: "2px 0",
-                borderBottom: i < 5 ? `1px solid ${C.border}` : "none",
-              },
-            },
-              el("span", { style: { color: "#e2e8f0" } }, label),
-              el("span", { style: { color: urgencyColor, fontSize: "11px", maxWidth: "200px", textAlign: "right", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, sub),
-            );
-          }),
         ]),
 
         // ── Stocks ───────────────────────────────────────────────────────────
@@ -393,8 +437,8 @@ function renderDashboard(ns, data) {
                 })
             ),
 
-            // Recent trade log (last 3 lines)
-            ...((globalThis.gordStockLog ?? []).slice(-3).map((line, i) =>
+            // Recent trade log (last 2 lines)
+            ...((globalThis.gordStockLog ?? []).slice(-2).map((line, i) =>
               el("div", { key: `log-${i}`, style: { color: C.dim, fontSize: "11px", marginTop: i === 0 ? "6px" : "1px", fontFamily: "monospace" } }, line)
             )),
           ]);
@@ -407,10 +451,18 @@ function renderDashboard(ns, data) {
     ns.print(e?.stack ?? "");
   }
 
-  ns.ui.resizeTail(780, 1400);
+  ns.ui.resizeTail(900, 820);
 }
 
 // ── Data helpers ─────────────────────────────────────────────────────────────
+
+const ROOTING_PROGRAMS = [
+  { name: "BruteSSH.exe",  label: "BruteSSH"  },
+  { name: "FTPCrack.exe",  label: "FTPCrack"  },
+  { name: "relaySMTP.exe", label: "relaySMTP" },
+  { name: "HTTPWorm.exe",  label: "HTTPWorm"  },
+  { name: "SQLInject.exe", label: "SQLInject" },
+];
 
 /** @param {NS} ns */
 function getNetworkStatus(ns) {
@@ -428,7 +480,13 @@ function getNetworkStatus(ns) {
     joined: joinedSet.has(name),
   }));
 
-  return { backdoors, factions };
+  const programs = ROOTING_PROGRAMS.map(({ name, label }) => ({
+    name,
+    label,
+    owned: ns.fileExists(name, "home"),
+  }));
+
+  return { backdoors, factions, programs };
 }
 
 /** @param {NS} ns */
@@ -614,8 +672,8 @@ function card(C, title, children) {
     style: {
       border: `1px solid ${C.border}`,
       borderRadius: "6px",
-      padding: "10px 12px",
-      marginBottom: "8px",
+      padding: "7px 10px",
+      marginBottom: "5px",
       background: C.cardBg,
     },
   },
@@ -681,22 +739,5 @@ function stat(C, label_, value) {
   return el("div", { style: { fontSize: "13px" } },
     el("span", { style: { color: C.dim } }, `${label_} `),
     el("span", { style: { fontWeight: "bold" } }, String(value)),
-  );
-}
-
-function checkRow(C, label_, done, subtext) {
-  const color = done ? C.green : C.dim;
-  return el("div", {
-    style: {
-      display: "flex",
-      alignItems: "center",
-      gap: "5px",
-      padding: "2px 0",
-      fontSize: "13px",
-    },
-  },
-    el("span", { style: { color, fontWeight: "bold", width: "12px", flexShrink: 0 } }, done ? "[+]" : "[ ]"),
-    el("span", { style: { color: done ? "#e2e8f0" : C.dim, flexGrow: 1 } }, label_),
-    el("span", { style: { color: done ? C.green : "rgba(255,255,255,0.25)", fontSize: "12px" } }, subtext),
   );
 }

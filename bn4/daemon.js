@@ -9,6 +9,7 @@ import {
   maybePursueNextFaction,
   estimateIncomeRate,
   updateRepRate,
+  doIdleWork,
 } from "../lib/player-actions.js";
 import {
   getNextAugTarget,
@@ -284,35 +285,43 @@ function maybeSpendOnHacknet(ns) {
   if (hackingLevel(ns) > 200) return;
 
   const hn = ns.hacknet;
-  const budget = playerMoney(ns) * 0.20; // never spend more than 20% in one pass
-  if (budget < 1_000) return;
+  const totalBudget = playerMoney(ns) * 0.20;
+  if (totalBudget < 1_000) return;
 
-  const nodeCount = hn.numNodes();
+  let spent = 0;
 
-  // Buy a new node if we have fewer than 8 and can afford it
-  if (nodeCount < 8) {
-    const cost = hn.getPurchaseNodeCost();
-    if (cost > 0 && cost <= budget) {
-      hn.purchaseNode();
-      return;
+  // Loop until we've exhausted the budget or nothing is affordable
+  while (true) {
+    const remaining = totalBudget - spent;
+    if (remaining < 1_000) break;
+
+    const nodeCount = hn.numNodes();
+    let bestCost = Infinity;
+    let bestAction = null;
+
+    // Buy a new node if under cap
+    if (nodeCount < 8) {
+      const cost = hn.getPurchaseNodeCost();
+      if (cost > 0 && cost < bestCost && cost <= remaining) {
+        bestCost = cost;
+        bestAction = () => { hn.purchaseNode(); return cost; };
+      }
     }
+
+    // Check all upgrades across existing nodes
+    for (let i = 0; i < nodeCount; i++) {
+      const lvlCost  = hn.getLevelUpgradeCost(i, 1);
+      const ramCost  = hn.getRamUpgradeCost(i, 1);
+      const coreCost = hn.getCoreUpgradeCost(i, 1);
+
+      if (lvlCost  > 0 && lvlCost  < bestCost && lvlCost  <= remaining) { bestCost = lvlCost;  bestAction = () => { hn.upgradeLevel(i, 1); return lvlCost; }; }
+      if (ramCost  > 0 && ramCost  < bestCost && ramCost  <= remaining) { bestCost = ramCost;  bestAction = () => { hn.upgradeRam(i, 1);   return ramCost; }; }
+      if (coreCost > 0 && coreCost < bestCost && coreCost <= remaining) { bestCost = coreCost; bestAction = () => { hn.upgradeCore(i, 1);  return coreCost; }; }
+    }
+
+    if (!bestAction) break;
+    spent += bestAction();
   }
-
-  // Upgrade the cheapest available level/ram/core across all nodes
-  let bestCost = Infinity;
-  let bestAction = null;
-
-  for (let i = 0; i < nodeCount; i++) {
-    const lvlCost  = hn.getLevelUpgradeCost(i, 1);
-    const ramCost  = hn.getRamUpgradeCost(i, 1);
-    const coreCost = hn.getCoreUpgradeCost(i, 1);
-
-    if (lvlCost  > 0 && lvlCost  < bestCost && lvlCost  <= budget) { bestCost = lvlCost;  bestAction = () => hn.upgradeLevel(i, 1); }
-    if (ramCost  > 0 && ramCost  < bestCost && ramCost  <= budget) { bestCost = ramCost;  bestAction = () => hn.upgradeRam(i, 1); }
-    if (coreCost > 0 && coreCost < bestCost && coreCost <= budget) { bestCost = coreCost; bestAction = () => hn.upgradeCore(i, 1); }
-  }
-
-  if (bestAction) bestAction();
 }
 
 /** @param {NS} ns @param {any} target */
@@ -400,6 +409,8 @@ async function decideNextPriority(ns) {
   }
 
   // ── Program creation ─────────────────────────────────────────────────────
+  // Covers all 5 port openers (BruteSSH, FTPCrack, relaySMTP, HTTPWorm, SQLInject).
+  // More open ports → more rootable servers → more worker RAM.
   const programWork = await maybeCreatePrograms(ns);
   if (programWork) {
     const target = getNextAugTarget(ns);
@@ -411,19 +422,15 @@ async function decideNextPriority(ns) {
 
   // ── No aug target ────────────────────────────────────────────────────────
   if (!target) {
-    // Nothing to buy — try to work toward next factions rather than idling.
+    // Try to unlock new factions first
     const factionPursuit = await maybePursueNextFaction(ns, opportunities, true);
     if (factionPursuit) {
       return { ...factionPursuit, target: null, infra };
     }
 
-    const crime = await commitHomicideIfUseful(ns, "karma / no aug target");
-    return {
-      action: crime ? "Crime" : "Idle",
-      detail: crime ? "Homicide for karma" : "No augmentation target — check factions",
-      target: null,
-      infra,
-    };
+    // Nothing to unlock — do productive idle work (crime → study → faction rep)
+    const idle = await doIdleWork(ns);
+    return { ...idle, target: null, infra };
   }
 
   // ── Combat-stat requirements for current faction ─────────────────────────

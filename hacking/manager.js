@@ -12,6 +12,11 @@ const BATCH_SPACING = 200;
 const MONEY_FRACTION = 0.1;
 const RESERVE_HOME_RAM = 8;
 
+// Cached once at startup — avoids repeated getScriptRam() calls in the sizing hot path
+let _hackRam   = 1.7;
+let _growRam   = 1.7;
+let _weakenRam = 1.75;
+
 /** @param {NS} ns */
 function usableRam(ns, server) {
   const max = ns.getServerMaxRam(server);
@@ -84,10 +89,10 @@ function calcBatch(ns, target, moneyFraction) {
   const weaken2Threads = Math.max(1, Math.ceil(growSec / WEAKEN_AMOUNT));
 
   const ram =
-    hackThreads * ns.getScriptRam(HACK) +
-    growThreads * ns.getScriptRam(GROW) +
-    weaken1Threads * ns.getScriptRam(WEAKEN) +
-    weaken2Threads * ns.getScriptRam(WEAKEN);
+    hackThreads * _hackRam +
+    growThreads * _growRam +
+    weaken1Threads * _weakenRam +
+    weaken2Threads * _weakenRam;
 
   return {
     target,
@@ -171,15 +176,12 @@ async function prep(ns, target) {
 
     if (!needsWeaken && !needsGrow) return;
 
-    // AFTER:
     const workers = rootedWorkers(ns);
-    const weakenRam = ns.getScriptRam(WEAKEN);
-    const growRam = ns.getScriptRam(GROW);
 
     // Calculate exactly how many weaken threads are needed to fix security,
     // then give all remaining threads to grow.
     const totalFreeRam = workers.reduce((sum, h) => sum + usableRam(ns, h), 0);
-    const totalThreads = Math.floor(totalFreeRam / weakenRam); // same RAM cost for both
+    const totalThreads = Math.floor(totalFreeRam / _weakenRam); // same RAM cost for both
     const exactWeakenNeeded = needsWeaken
       ? Math.ceil((sec - minSec) / WEAKEN_AMOUNT)
       : 0;
@@ -191,7 +193,7 @@ async function prep(ns, target) {
 
     for (const host of workers) {
       const free = usableRam(ns, host);
-      const slots = Math.floor(free / weakenRam);
+      const slots = Math.floor(free / _weakenRam);
       if (slots <= 0) continue;
 
       const wThreads = Math.min(weakenRemaining, slots);
@@ -283,6 +285,10 @@ export async function main(ns) {
   ns.disableLog("ALL");
   // ns.ui.openTail();
 
+  _hackRam   = ns.getScriptRam(HACK);
+  _growRam   = ns.getScriptRam(GROW);
+  _weakenRam = ns.getScriptRam(WEAKEN);
+
   const reset = ns.args.includes("--reset");
   if (reset) killOldHackScripts(ns);
 
@@ -298,7 +304,9 @@ export async function main(ns) {
 
     await copyScripts(ns);
 
-    const target = bestTarget(ns);
+    const sortedTargets = validTargets(ns);
+    sortedTargets.sort((a, b) => targetScore(ns, b) - targetScore(ns, a));
+    const target = sortedTargets[0] ?? "n00dles";
 
     if (target !== currentTarget) {
       currentTarget = target;
@@ -325,10 +333,8 @@ export async function main(ns) {
       continue;
     }
 
-    // ── Fix #2: fill leftover RAM with a second-best target ─────────────────
-    const allTargets = validTargets(ns);
-    allTargets.sort((a, b) => targetScore(ns, b) - targetScore(ns, a));
-    const secondTarget = allTargets.find(t => t !== target);
+    // fill leftover RAM with a second-best target
+    const secondTarget = sortedTargets.find(t => t !== target);
 
     if (secondTarget) {
       const secondBatch = calcBestFitBatch(ns, secondTarget);
