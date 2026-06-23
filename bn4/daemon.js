@@ -91,7 +91,18 @@ async function backdoorTargets(ns) {
     if (!path.length) continue;
 
     ns.singularity.connect("home");
-    for (const hop of path.slice(1)) ns.singularity.connect(hop);
+    let connected = true;
+    for (const hop of path.slice(1)) {
+      if (!ns.singularity.connect(hop)) {
+        connected = false;
+        break;
+      }
+    }
+
+    if (!connected) {
+      ns.singularity.connect("home");
+      continue;
+    }
 
     ns.tprint(`Installing backdoor on ${server}...`);
     await ns.singularity.installBackdoor();
@@ -152,6 +163,24 @@ function buyAugs(ns) {
     }
   }
 
+  // ── Fix #4: Buy as many NeuroFlux Governor levels as we can afford ────────
+  // NFG stacks multiplicatively with every stat, so buying it right before
+  // an install is always correct. Find any faction we have NFG rep for.
+  const nfgFaction = /** @type {string | null} */ (
+    (ns.getPlayer().factions ?? []).find(f =>
+      s.getFactionRep(/** @type {any} */ (f)) >= s.getAugmentationRepReq("NeuroFlux Governor")
+    ) ?? null
+  );
+  if (nfgFaction) {
+    let nfgBought = true;
+    while (nfgBought) {
+      const nfgPrice = s.getAugmentationPrice("NeuroFlux Governor");
+      if (playerMoney(ns) < nfgPrice) break;
+      nfgBought = s.purchaseAugmentation(/** @type {any} */ (nfgFaction), "NeuroFlux Governor");
+      if (nfgBought) purchases.push(`NeuroFlux Governor from ${nfgFaction}`);
+    }
+  }
+
   return purchases;
 }
 
@@ -206,14 +235,24 @@ function maybeInstall(ns) {
     a => ownedWithPurchased.includes(a) && !ownedInstalled.includes(a)
   );
 
+  // All priority augs already installed — any single new aug is worth a reset
+  // (price multiplier resets, so next aug is cheaper to sequence from scratch).
+  const allPriorityDone = INSTALL_PRIORITY_AUGS.every(a => ownedInstalled.includes(a));
+  const aggressiveInstall = allPriorityDone && queued >= 1;
+
   const lastReset = readLastResetTime(ns);
   const elapsed = Date.now() - lastReset;
-  const timeTriggered = queued >= 1 && elapsed >= RESET_AFTER_MS;
+  // Reduced from 16h → 8h: late-game aug prices compound fast, sooner resets win
+  const TIME_TRIGGER_MS = 8 * 60 * 60 * 1_000;
+  const timeTriggered = queued >= 1 && elapsed >= TIME_TRIGGER_MS;
 
-  if (hasRedPill || queued >= 5 || (queued >= 2 && hasPriorityAug) || timeTriggered) {
+  if (hasRedPill || queued >= 5 || (queued >= 2 && hasPriorityAug) || aggressiveInstall || timeTriggered) {
     if (timeTriggered) {
       const hours = (elapsed / 3_600_000).toFixed(1);
       ns.tprint(`Time-triggered install after ${hours}h with ${queued} aug(s) queued.`);
+    }
+    if (aggressiveInstall) {
+      ns.tprint(`Aggressive install: all priority augs done, resetting with ${queued} queued.`);
     }
     writeResetTime(ns);
     ns.singularity.installAugmentations("/bn4/daemon.js");
@@ -236,9 +275,52 @@ async function maybeFinishBN(ns) {
   ns.singularity.destroyW0r1dD43m0n(nextBN, "/bn4/daemon.js");
 }
 
+/**
+ * Fix #10: Buy/upgrade hacknet nodes cheaply during early game.
+ * Past hacking level 200, purchased servers dominate and this becomes a no-op.
+ * @param {NS} ns
+ */
+function maybeSpendOnHacknet(ns) {
+  if (hackingLevel(ns) > 200) return;
+
+  const hn = ns.hacknet;
+  const budget = playerMoney(ns) * 0.20; // never spend more than 20% in one pass
+  if (budget < 1_000) return;
+
+  const nodeCount = hn.numNodes();
+
+  // Buy a new node if we have fewer than 8 and can afford it
+  if (nodeCount < 8) {
+    const cost = hn.getPurchaseNodeCost();
+    if (cost > 0 && cost <= budget) {
+      hn.purchaseNode();
+      return;
+    }
+  }
+
+  // Upgrade the cheapest available level/ram/core across all nodes
+  let bestCost = Infinity;
+  let bestAction = null;
+
+  for (let i = 0; i < nodeCount; i++) {
+    const lvlCost  = hn.getLevelUpgradeCost(i, 1);
+    const ramCost  = hn.getRamUpgradeCost(i, 1);
+    const coreCost = hn.getCoreUpgradeCost(i, 1);
+
+    if (lvlCost  > 0 && lvlCost  < bestCost && lvlCost  <= budget) { bestCost = lvlCost;  bestAction = () => hn.upgradeLevel(i, 1); }
+    if (ramCost  > 0 && ramCost  < bestCost && ramCost  <= budget) { bestCost = ramCost;  bestAction = () => hn.upgradeRam(i, 1); }
+    if (coreCost > 0 && coreCost < bestCost && coreCost <= budget) { bestCost = coreCost; bestAction = () => hn.upgradeCore(i, 1); }
+  }
+
+  if (bestAction) bestAction();
+}
+
 /** @param {NS} ns @param {any} target */
 async function maybeBuyInfra(ns, target) {
   const money = playerMoney(ns);
+
+  // Fix #10: spend on hacknet while hacking income is minimal
+  maybeSpendOnHacknet(ns);
 
   if (!target) {
     return await managePurchasedServers(ns, 10e6, 0.25);
@@ -451,6 +533,10 @@ export async function main(ns) {
       ns.run("/ui/dashboard.js", 1);
     }
 
+    if (!ns.scriptRunning("/lib/stocks.js", "home")) {
+      ns.run("/lib/stocks.js", 1);
+    }
+
     await acceptInvites(ns);
     await buyDarkweb(ns);
     rootEverything(ns);
@@ -472,6 +558,6 @@ export async function main(ns) {
     ns.print(
       `Money: ${ns.format.number(playerMoney(ns))} | Hack: ${hackingLevel(ns)}`
     );
-    await ns.sleep(30_000);
+    await ns.sleep(15_000);
   }
 }

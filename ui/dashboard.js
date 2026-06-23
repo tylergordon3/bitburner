@@ -64,12 +64,13 @@ export async function main(ns) {
     const moneyEta    = etaFromRate(target.moneyMissing ?? 0, moneyRate);
     const network     = getNetworkStatus(ns);
     const runDuration = getRunDuration(ns);
+    const stocks      = globalThis.gordStockState ?? null;
 
     renderDashboard(ns, {
       player, money, hack, incomeHour,
       ram, cloud, final, state, target,
       goal, moneyRate, moneyEta, ramRate,
-      augQueue, network, runDuration,
+      augQueue, network, runDuration, stocks,
     });
 
     await ns.sleep(5_000);
@@ -83,7 +84,7 @@ function renderDashboard(ns, data) {
   try {
     const { player, money, hack, incomeHour, ram, cloud, final,
             state, target, goal, moneyRate, moneyEta, ramRate,
-            augQueue, network } = data;
+            augQueue, network, stocks } = data;
 
     // Colours
     const C = {
@@ -329,6 +330,74 @@ function renderDashboard(ns, data) {
           }),
         ]),
 
+        // ── Stocks ───────────────────────────────────────────────────────────
+        (() => {
+          if (!stocks) {
+            return card(C, "STOCKS", [
+              el("div", { style: { color: C.dim, fontSize: "13px" } }, "stocks.js not running"),
+            ]);
+          }
+
+          const tierLabel = stocks.tier === 2 ? "4S (forecast)" : stocks.tier === 1 ? "Momentum" : "No TIX access";
+          const tierColor = stocks.tier === 2 ? C.green : stocks.tier === 1 ? C.yellow : C.dim;
+
+          return card(C, "STOCKS", [
+            // Header: tier + total portfolio value
+            el("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" } },
+              el("span", { style: { color: tierColor, fontSize: "12px", fontWeight: "bold" } }, tierLabel),
+              el("span", { style: { color: C.green, fontSize: "13px", fontWeight: "bold" } },
+                stocks.totalValue > 0 ? `Portfolio: $${ns.format.number(stocks.totalValue)}` : "No positions"
+              ),
+            ),
+
+            // Position rows
+            ...(stocks.positions.length === 0
+              ? [el("div", { style: { color: C.dim, fontSize: "12px" } }, "No open positions")]
+              : stocks.positions.slice(0, 6).map((p, i) => {
+                  const isLong   = p.sharesLong  > 0;
+                  const isShort  = p.sharesShort > 0;
+                  const pl       = isLong ? p.longPL : p.shortPL;
+                  const posVal   = isLong ? p.longValue : p.shortValue;
+                  const plColor  = pl >= 0 ? C.green : C.red;
+                  const typeTag  = isShort ? "[S]" : "[L]";
+                  const typeClr  = isShort ? C.purple : C.blue;
+                  const fStr     = p.forecast !== null
+                    ? ` ${(p.forecast * 100).toFixed(0)}%`
+                    : "";
+
+                  return el("div", {
+                    key: i,
+                    style: {
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                      fontSize: "12px",
+                      padding: "2px 0",
+                      borderBottom: i < Math.min(stocks.positions.length, 6) - 1 ? `1px solid ${C.border}` : "none",
+                    },
+                  },
+                    el("div", { style: { display: "flex", gap: "5px", alignItems: "center" } },
+                      el("span", { style: { color: typeClr, fontWeight: "bold", fontSize: "11px" } }, typeTag),
+                      el("span", { style: { color: "#e2e8f0" } }, p.sym),
+                      el("span", { style: { color: C.dim, fontSize: "11px" } }, fStr),
+                    ),
+                    el("div", { style: { display: "flex", gap: "10px", alignItems: "center" } },
+                      el("span", { style: { color: C.dim, fontSize: "11px" } }, `$${ns.format.number(posVal)}`),
+                      el("span", { style: { color: plColor, fontWeight: "bold", fontSize: "11px" } },
+                        `${pl >= 0 ? "+" : ""}$${ns.format.number(pl)}`
+                      ),
+                    ),
+                  );
+                })
+            ),
+
+            // Recent trade log (last 3 lines)
+            ...((globalThis.gordStockLog ?? []).slice(-3).map((line, i) =>
+              el("div", { key: `log-${i}`, style: { color: C.dim, fontSize: "11px", marginTop: i === 0 ? "6px" : "1px", fontFamily: "monospace" } }, line)
+            )),
+          ]);
+        })(),
+
       )
     );
   } catch (e) {
@@ -336,7 +405,7 @@ function renderDashboard(ns, data) {
     ns.print(e?.stack ?? "");
   }
 
-  ns.ui.resizeTail(780, 1200);
+  ns.ui.resizeTail(780, 1400);
 }
 
 // ── Data helpers ─────────────────────────────────────────────────────────────

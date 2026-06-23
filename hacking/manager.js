@@ -176,21 +176,34 @@ async function prep(ns, target) {
     const weakenRam = ns.getScriptRam(WEAKEN);
     const growRam = ns.getScriptRam(GROW);
 
+    // Calculate exactly how many weaken threads are needed to fix security,
+    // then give all remaining threads to grow.
+    const totalFreeRam = workers.reduce((sum, h) => sum + usableRam(ns, h), 0);
+    const totalThreads = Math.floor(totalFreeRam / weakenRam); // same RAM cost for both
+    const exactWeakenNeeded = needsWeaken
+      ? Math.ceil((sec - minSec) / WEAKEN_AMOUNT)
+      : 0;
+    const weakenAlloc = Math.min(exactWeakenNeeded, totalThreads);
+    const growAlloc   = needsGrow ? Math.max(0, totalThreads - weakenAlloc) : 0;
+
+    let weakenRemaining = weakenAlloc;
+    let growRemaining   = growAlloc;
+
     for (const host of workers) {
       const free = usableRam(ns, host);
-      if (needsWeaken && needsGrow) {
-        // Split: 30% of threads for weaken, 70% for grow (weaken is faster per thread)
-        const totalThreads = Math.floor(free / weakenRam); // weaken and grow have same RAM cost
-        const weakenThreads = Math.max(1, Math.floor(totalThreads * 0.3));
-        const growThreads = Math.max(0, totalThreads - weakenThreads);
-        if (weakenThreads > 0) ns.exec(WEAKEN, host, weakenThreads, target, 0, "prep", performance.now());
-        if (growThreads > 0) ns.exec(GROW, host, growThreads, target, 0, "prep", performance.now());
-      } else if (needsWeaken) {
-        const threads = Math.floor(free / weakenRam);
-        if (threads > 0) ns.exec(WEAKEN, host, threads, target, 0, "prep", performance.now());
-      } else {
-        const threads = Math.floor(free / growRam);
-        if (threads > 0) ns.exec(GROW, host, threads, target, 0, "prep", performance.now());
+      const slots = Math.floor(free / weakenRam);
+      if (slots <= 0) continue;
+
+      const wThreads = Math.min(weakenRemaining, slots);
+      const gThreads = Math.min(growRemaining, slots - wThreads);
+
+      if (wThreads > 0) {
+        ns.exec(WEAKEN, host, wThreads, target, 0, "prep", performance.now());
+        weakenRemaining -= wThreads;
+      }
+      if (gThreads > 0) {
+        ns.exec(GROW, host, gThreads, target, 0, "prep", performance.now());
+        growRemaining -= gThreads;
       }
     }
 
@@ -224,10 +237,11 @@ function launchBatch(ns, batch, batchId) {
   const totalFreeRam = rootedWorkers(ns).reduce((sum, s) => sum + usableRam(ns, s), 0);
   if (totalFreeRam < batch.ram) return false;
 
-  const hackDelay    = Math.max(0, weakenTime - hackTime   - BATCH_SPACING * 3);
-  const weaken1Delay = 0;
-  const growDelay    = Math.max(0, weakenTime - growTime   - BATCH_SPACING * 1);
-  const weaken2Delay = BATCH_SPACING * 2;
+  // Target landing order: H, W1, G, W2 at t+0, t+200, t+400, t+600
+  const hackDelay    = Math.max(0, weakenTime - hackTime   - BATCH_SPACING * 2);
+  const weaken1Delay = 0;                                               // lands at weakenTime
+  const growDelay    = Math.max(0, weakenTime - growTime   + BATCH_SPACING * 2);
+  const weaken2Delay = BATCH_SPACING * 3;                               // lands last at weakenTime+600
 
   const tag = `batch-${batchId}`;
 
@@ -287,18 +301,17 @@ export async function main(ns) {
     const target = bestTarget(ns);
 
     if (target !== currentTarget) {
-    currentTarget = target;
-
-    globalThis.gordHackState = {
+      currentTarget = target;
+      globalThis.gordHackState = {
         ...(globalThis.gordHackState ?? {}),
         mode: "Target Changed",
         target,
       };
-   }
+    }
+
     await prep(ns, target);
 
     const batch = calcBestFitBatch(ns, target);
-
     const launched = launchBatch(ns, batch, batchId++);
 
     if (!launched) {
@@ -310,6 +323,27 @@ export async function main(ns) {
       };
       await ns.sleep(2_000);
       continue;
+    }
+
+    // ── Fix #2: fill leftover RAM with a second-best target ─────────────────
+    const allTargets = validTargets(ns);
+    allTargets.sort((a, b) => targetScore(ns, b) - targetScore(ns, a));
+    const secondTarget = allTargets.find(t => t !== target);
+
+    if (secondTarget) {
+      const secondBatch = calcBestFitBatch(ns, secondTarget);
+      const totalFreeRam = rootedWorkers(ns).reduce((sum, s) => sum + usableRam(ns, s), 0);
+      if (totalFreeRam >= secondBatch.ram) {
+        // Prep check: only batch if second target is already in good shape
+        const money2    = ns.getServerMoneyAvailable(secondTarget);
+        const maxMoney2 = ns.getServerMaxMoney(secondTarget);
+        const sec2      = ns.getServerSecurityLevel(secondTarget);
+        const minSec2   = ns.getServerMinSecurityLevel(secondTarget);
+        const ready2    = sec2 <= minSec2 + 5 && money2 >= maxMoney2 * 0.95;
+        if (ready2) {
+          launchBatch(ns, secondBatch, batchId++);
+        }
+      }
     }
 
     await ns.sleep(BATCH_SPACING);
