@@ -198,50 +198,52 @@ function renderDashboard(ns, data) {
           ]),
         ),
 
-        // ── Row 2: Infrastructure + Augmentations side-by-side ──────────────
-        el("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px", marginBottom: "8px" } },
+        // ── Row 2: Infra + Aug Queue in one card ────────────────────────────
+        card(C, "INFRA / AUGS", [
+          el("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 20px" } },
 
-          // Infrastructure card
-          card(C, "INFRA", [
-            label(C, "RAM"),
-            progressBar(ramPct, ramPct > 0.9 ? C.red : ramPct > 0.7 ? C.yellow : C.blue),
-            el("div", { style: { display: "flex", justifyContent: "space-between", fontSize: "13px", color: C.dim, marginBottom: "6px" } },
-              el("span", {}, `${ns.format.ram(ram.used)} / ${ns.format.ram(ram.max)}`),
-              el("span", {}, `+${ns.format.ram(ramRate)}/hr`),
+            // Left: RAM + cloud
+            el("div", {},
+              progressBar(ramPct, ramPct > 0.9 ? C.red : ramPct > 0.7 ? C.yellow : C.blue),
+              el("div", { style: { display: "flex", justifyContent: "space-between", fontSize: "12px", color: C.dim, marginBottom: "5px" } },
+                el("span", {}, `${ns.format.ram(ram.used)} / ${ns.format.ram(ram.max)}`),
+                el("span", {}, `+${ns.format.ram(ramRate)}/hr`),
+              ),
+              el("div", { style: { display: "flex", gap: "10px", fontSize: "12px" } },
+                stat(C, "Cloud", `${cloud.count}/${cloud.limit}`),
+                stat(C, "RAM",   ns.format.ram(cloud.ram)),
+              ),
             ),
-            el("div", { style: { display: "flex", justifyContent: "space-between" } },
-              stat(C, "Cloud", `${cloud.count}/${cloud.limit} servers`),
-              stat(C, "Total", ns.format.ram(cloud.ram)),
-            ),
-          ]),
 
-          // Augmentation Queue card
-          card(C, "AUGS", [
-            el("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" } },
-              el("span", { style: { color: C.dim, fontSize: "13px" } }, "Queued"),
-              el("span", {
+            // Right: aug queue
+            el("div", {},
+              el("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "5px" } },
+                el("span", { style: { color: C.dim, fontSize: "12px" } }, "Queued augs"),
+                el("span", {
+                  style: {
+                    background: augInstall + "22",
+                    border: `1px solid ${augInstall}55`,
+                    color: augInstall,
+                    borderRadius: "4px",
+                    padding: "0 7px",
+                    fontWeight: "bold",
+                    fontSize: "13px",
+                  },
+                }, String(augQueue.queued)),
+              ),
+              el("div", {
                 style: {
-                  background: augInstall + "22",
-                  border: `1px solid ${augInstall}55`,
+                  fontSize: "12px",
                   color: augInstall,
+                  padding: "3px 6px",
+                  background: augInstall + "11",
                   borderRadius: "4px",
-                  padding: "1px 8px",
-                  fontWeight: "bold",
+                  borderLeft: `3px solid ${augInstall}`,
                 },
-              }, String(augQueue.queued)),
+              }, augQueue.recommendation),
             ),
-            el("div", {
-              style: {
-                fontSize: "13px",
-                color: augInstall,
-                padding: "4px 6px",
-                background: augInstall + "11",
-                borderRadius: "4px",
-                borderLeft: `3px solid ${augInstall}`,
-              },
-            }, augQueue.recommendation),
-          ]),
-        ),
+          ),
+        ]),
 
         // ── Network Checklist ────────────────────────────────────────────────
         card(C, "NETWORK", [
