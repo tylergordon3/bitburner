@@ -393,24 +393,24 @@ function maybeDoSecondaryFactionWork(ns, primaryFaction) {
 
 /** @param {NS} ns */
 async function decideNextPriority(ns) {
-  // ── Update rolling rate snapshots ────────────────────────────────────────
+  // Update rolling rate snapshots
   estimateIncomeRate(ns);
   const currentTarget = globalThis.gordState?.target;
   if (currentTarget?.faction) updateRepRate(ns, currentTarget.faction);
 
-  // ── Faction opportunities (used both in main logic and for dashboard) ────
+  // Faction opportunities (used both in main logic and for dashboard)
   const opportunities = getUnjoinedFactionOpportunities(ns);
   globalThis.gordFactionPipeline = opportunities;
 
-  // ── Early bootstrap ──────────────────────────────────────────────────────
+  // Early bootstrap
   const bootstrap = await doEarlyBootstrapIfNeeded(ns);
   if (bootstrap) {
     return { ...bootstrap, target: null, infra: null };
   }
 
-  // ── Program creation ─────────────────────────────────────────────────────
+  // Program creation
   // Covers all 5 port openers (BruteSSH, FTPCrack, relaySMTP, HTTPWorm, SQLInject).
-  // More open ports → more rootable servers → more worker RAM.
+  // More open ports = more rootable servers → more worker RAM.
   const programWork = await maybeCreatePrograms(ns);
   if (programWork) {
     const target = getNextAugTarget(ns);
@@ -420,7 +420,7 @@ async function decideNextPriority(ns) {
   const target = getNextAugTarget(ns);
   const infra  = await maybeBuyInfra(ns, target);
 
-  // ── No aug target ────────────────────────────────────────────────────────
+  // No aug target
   if (!target) {
     // Try to unlock new factions first
     const factionPursuit = await maybePursueNextFaction(ns, opportunities, true);
@@ -428,19 +428,19 @@ async function decideNextPriority(ns) {
       return { ...factionPursuit, target: null, infra };
     }
 
-    // Nothing to unlock — do productive idle work (crime → study → faction rep)
+    // Nothing to unlock - do productive idle work (crime -> study -> faction rep)
     const idle = await doIdleWork(ns);
     return { ...idle, target: null, infra };
   }
 
-  // ── Combat-stat requirements for current faction ─────────────────────────
+  // Combat-stat requirements for current faction
   const statTargets = FACTION_REQUIREMENTS[target.faction] ?? {};
   const training = await trainCombatIfNeeded(ns, statTargets);
   if (training) {
     return { ...training, target, infra };
   }
 
-  // ── Rep still needed ─────────────────────────────────────────────────────
+  // Rep still needed
   if (target.repMissing > 0) {
     const workType = startBestFactionWork(ns, target.faction);
     return {
@@ -451,7 +451,7 @@ async function decideNextPriority(ns) {
     };
   }
 
-  // ── Rep done, money still needed ─────────────────────────────────────────
+  // Rep done, money still needed
   if (target.moneyMissing > 0) {
     const homicide = await commitHomicideIfUseful(ns, `money for ${target.aug}`);
     if (homicide) {
@@ -486,7 +486,7 @@ async function decideNextPriority(ns) {
         }
       }
 
-      // Primary faction rep is banked — try secondary faction work.
+      // Primary faction rep is banked - try secondary faction work.
       if (secondary) {
         return {
           action: "Faction Work (secondary)",
@@ -496,7 +496,7 @@ async function decideNextPriority(ns) {
         };
       }
 
-      // Nothing faction-related — try advancing to next factions.
+      // Nothing faction-related - try advancing to next factions.
       const factionPursuit = await maybePursueNextFaction(ns, opportunities, false);
       if (factionPursuit) {
         return {
@@ -516,7 +516,7 @@ async function decideNextPriority(ns) {
     };
   }
 
-  // ── Ready to buy ─────────────────────────────────────────────────────────
+  // Ready to buy
   return {
     action: "Ready to Purchase",
     detail: `${target.faction} -> ${target.aug}`,
