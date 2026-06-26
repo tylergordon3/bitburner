@@ -164,24 +164,6 @@ function buyAugs(ns) {
     }
   }
 
-  // ── Fix #4: Buy as many NeuroFlux Governor levels as we can afford ────────
-  // NFG stacks multiplicatively with every stat, so buying it right before
-  // an install is always correct. Find any faction we have NFG rep for.
-  const nfgFaction = /** @type {string | null} */ (
-    (ns.getPlayer().factions ?? []).find(f =>
-      s.getFactionRep(/** @type {any} */ (f)) >= s.getAugmentationRepReq("NeuroFlux Governor")
-    ) ?? null
-  );
-  if (nfgFaction) {
-    let nfgBought = true;
-    while (nfgBought) {
-      const nfgPrice = s.getAugmentationPrice("NeuroFlux Governor");
-      if (playerMoney(ns) < nfgPrice) break;
-      nfgBought = s.purchaseAugmentation(/** @type {any} */ (nfgFaction), "NeuroFlux Governor");
-      if (nfgBought) purchases.push(`NeuroFlux Governor from ${nfgFaction}`);
-    }
-  }
-
   return purchases;
 }
 
@@ -255,6 +237,21 @@ function maybeInstall(ns) {
     if (aggressiveInstall) {
       ns.tprint(`Aggressive install: all priority augs done, resetting with ${queued} queued.`);
     }
+
+    // Dump remaining cash into NeuroFlux Governor right before resetting.
+    const s = ns.singularity;
+    const nfgFaction = (ns.getPlayer().factions ?? []).find(f =>
+      s.getFactionRep(/** @type {any} */ (f)) >= s.getAugmentationRepReq("NeuroFlux Governor")
+    ) ?? null;
+    if (nfgFaction) {
+      let bought = true;
+      while (bought) {
+        const price = s.getAugmentationPrice("NeuroFlux Governor");
+        if (playerMoney(ns) < price) break;
+        bought = s.purchaseAugmentation(/** @type {any} */ (nfgFaction), "NeuroFlux Governor");
+      }
+    }
+
     writeResetTime(ns);
     ns.singularity.installAugmentations("/bn4/daemon.js");
   }
@@ -425,7 +422,12 @@ async function decideNextPriority(ns) {
     // Try to unlock new factions first
     const factionPursuit = await maybePursueNextFaction(ns, opportunities, true);
     if (factionPursuit) {
-      return { ...factionPursuit, target: null, infra };
+      // If we're blocked on faction join money, keep earning toward that goal
+      const moneyGoal = factionPursuit.joinMoneyMissing
+        ? playerMoney(ns) + factionPursuit.joinMoneyMissing
+        : 0;
+      const idle = await doIdleWork(ns, moneyGoal);
+      return { ...factionPursuit, ...idle, target: null, infra };
     }
 
     // Nothing to unlock - do productive idle work (crime -> study -> faction rep)
