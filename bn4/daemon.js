@@ -2,7 +2,7 @@ import { allServers, pathTo, root } from "../lib/net.js";
 import { managePurchasedServers } from "../lib/pserv.js";
 import {
   trainCombatIfNeeded,
-  commitHomicideIfUseful,
+  commitBestCrimeIfUseful,
   shouldFocus,
   doEarlyBootstrapIfNeeded,
   maybeCreatePrograms,
@@ -455,15 +455,9 @@ async function decideNextPriority(ns) {
 
   // Rep done, money still needed
   if (target.moneyMissing > 0) {
-    const homicide = await commitHomicideIfUseful(ns, `money for ${target.aug}`);
-    if (homicide) {
-      return { ...homicide, target, infra };
-    }
-
-    // No focus needed: do secondary faction work while hacking earns money.
-    const secondary = maybeDoSecondaryFactionWork(ns, target.faction);
-
     if (!shouldFocus(ns)) {
+      // Background mode: bank more faction rep or secondary rep while hacking earns money.
+      // Crime would steal nothing here since hacking runs freely in the background.
       const factionHasMoreRepWork = (() => {
         const s = ns.singularity;
         const owned = new Set(s.getOwnedAugmentations(true));
@@ -475,6 +469,8 @@ async function decideNextPriority(ns) {
           return s.getAugmentationRepReq(aug) > currentRep;
         });
       })();
+
+      const secondary = maybeDoSecondaryFactionWork(ns, target.faction);
 
       if (factionHasMoreRepWork) {
         const workType = startBestFactionWork(ns, target.faction);
@@ -488,7 +484,6 @@ async function decideNextPriority(ns) {
         }
       }
 
-      // Primary faction rep is banked - try secondary faction work.
       if (secondary) {
         return {
           action: "Faction Work (secondary)",
@@ -498,7 +493,6 @@ async function decideNextPriority(ns) {
         };
       }
 
-      // Nothing faction-related - try advancing to next factions.
       const factionPursuit = await maybePursueNextFaction(ns, opportunities, false);
       if (factionPursuit) {
         return {
@@ -508,8 +502,23 @@ async function decideNextPriority(ns) {
           infra,
         };
       }
+
+      return {
+        action: "Saving",
+        detail: `Hacking for $${ns.format.number(target.moneyMissing)} -> ${target.aug}`,
+        target,
+        infra,
+      };
     }
 
+    // Focus mode: crime is the best use of player attention.
+    // Try homicide first, fall back to mugging if chance is too low.
+    const crime = await commitBestCrimeIfUseful(ns, `$${ns.format.number(target.moneyMissing)} for ${target.aug}`);
+    if (crime) {
+      return { ...crime, target, infra };
+    }
+
+    // Can't crime effectively yet — hacking is the only income source.
     return {
       action: "Saving",
       detail: `Hacking for $${ns.format.number(target.moneyMissing)} -> ${target.aug}`,
