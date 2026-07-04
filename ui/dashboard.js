@@ -397,8 +397,8 @@ function renderDashboard(ns, data) {
                     minWidth: 0,
                   },
                 },
-                  el("span", { style: { color: "#e2e8f0", flex: "0 0 auto", whiteSpace: "nowrap", marginRight: "8px" } },
-                    op.hackingFocus ? `${op.faction} ⚡` : op.faction
+                  el("span", { style: { color: op.hackingFocus ? C.blue : "#e2e8f0", flex: "0 0 auto", whiteSpace: "nowrap", marginRight: "8px" } },
+                    op.faction
                   ),
                   el("span", { style: { color: urgencyColor, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", textAlign: "right" } }, op.reason ?? ""),
                 );

@@ -1,5 +1,7 @@
 // early/driver.js
 
+import { shouldJoinCityFaction } from "../lib/aug-targets.js";
+
 /** @param {NS} ns */
 export async function main(ns) {
   const daemon = "/bn4/daemon.js";
@@ -25,9 +27,12 @@ export async function main(ns) {
       while (ns.singularity.upgradeHomeRam()) {}
     } catch {}
 
-    // Join faction invites
+    // Join faction invites automatically - but skip city factions we should
+    // defer (joining one permanently bans its enemy city factions for the
+    // rest of the run; see shouldJoinCityFaction in lib/aug-targets.js).
     try {
       for (const faction of ns.singularity.checkFactionInvitations()) {
+        if (!shouldJoinCityFaction(ns, faction)) continue;
         ns.singularity.joinFaction(
           /** @type {any} */ (faction)
         );

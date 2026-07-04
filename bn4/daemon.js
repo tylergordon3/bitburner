@@ -7,6 +7,7 @@ import {
   doEarlyBootstrapIfNeeded,
   maybeCreatePrograms,
   maybePursueNextFaction,
+  maybeAutoTravelForReadyFaction,
   estimateIncomeRate,
   updateRepRate,
   doIdleWork,
@@ -406,6 +407,14 @@ async function decideNextPriority(ns) {
   // Faction opportunities (used both in main logic and for dashboard)
   const opportunities = getUnjoinedFactionOpportunities(ns);
   globalThis.gordFactionPipeline = opportunities;
+
+  // Auto-hop to a city and back for any faction that's fully ready to join
+  // (all non-location requirements already met). Cheap, instant, and takes
+  // priority over everything else this tick regardless of focus/idle state.
+  const autoTravel = await maybeAutoTravelForReadyFaction(ns, opportunities);
+  if (autoTravel) {
+    return { ...autoTravel, target: null, infra: null };
+  }
 
   // Early bootstrap
   const bootstrap = await doEarlyBootstrapIfNeeded(ns);
