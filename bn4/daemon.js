@@ -16,6 +16,7 @@ import {
   getAllAugCandidates,
   getUnjoinedFactionOpportunities,
   FACTION_REQUIREMENTS,
+  shouldJoinCityFaction,
 } from "../lib/aug-targets.js";
 
 const PROGRAMS = [
@@ -72,9 +73,16 @@ function rootEverything(ns) {
   }
 }
 
-/** @param {NS} ns */
+/**
+ * Accept all pending faction invites, except city factions we should defer
+ * (see shouldJoinCityFaction) - joining one permanently bans its enemy city
+ * factions for the rest of the run, so we don't want to burn that on a city
+ * whose augs we already have while other city factions still have augs to give.
+ * @param {NS} ns
+ */
 async function acceptInvites(ns) {
   for (const faction of ns.singularity.checkFactionInvitations()) {
+    if (!shouldJoinCityFaction(ns, faction)) continue;
     ns.singularity.joinFaction(/** @type {any} */ (faction));
   }
 }

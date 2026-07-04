@@ -1,6 +1,18 @@
 // ui/dashboard.js
 
+import { FACTION_REQUIREMENTS } from "../lib/aug-targets.js";
+
 const FINAL_HOST = "w0r1d_d43m0n";
+
+// Combat stats and their gate thresholds, derived from every combat-gated
+// faction requirement (Slum Snakes, Tetrads, Speakers for the Dead, etc.) so
+// the player card can show how close we are to full gang/combat eligibility.
+const COMBAT_STAT_DEFS = [
+  { key: "strength",  label: "STR" },
+  { key: "defense",   label: "DEF" },
+  { key: "dexterity", label: "DEX" },
+  { key: "agility",   label: "AGI" },
+];
 
 // Servers that need backdoors for faction access / BN progression
 const BACKDOOR_CHECKLIST = [
@@ -65,12 +77,15 @@ export async function main(ns) {
     const network     = getNetworkStatus(ns);
     const runDuration = getRunDuration(ns);
     const stocks      = globalThis.gordStockState ?? null;
+    const combat      = getCombatStats(ns);
+    const augsOwned   = ns.singularity.getOwnedAugmentations(true).length;
 
     renderDashboard(ns, {
       player, money, hack, incomeHour,
       ram, cloud, final, state, target,
       goal, moneyRate, moneyEta, ramRate,
       augQueue, network, runDuration, stocks,
+      combat, augsOwned,
     });
 
     await ns.sleep(5_000);
@@ -84,7 +99,7 @@ function renderDashboard(ns, data) {
   try {
     const { player, money, hack, incomeHour, ram, cloud, final,
             state, target, goal, moneyRate, moneyEta, ramRate,
-            augQueue, network, stocks } = data;
+            augQueue, network, stocks, combat, augsOwned } = data;
 
     // Colours
     const C = {
@@ -157,9 +172,23 @@ function renderDashboard(ns, data) {
             statRow(C, "$", `${ns.format.number(money)}`, `+${ns.format.number(incomeHour)}/hr`, C.green),
             statRow(C, "~", `Hack ${hack}`, final.missing <= 0 ? "[OK]" : `${final.eta} to BN`, hack >= (Number(final.required) || hack) ? C.green : C.yellow),
             progressBar(hackPct, C.blue),
+
+            // Combat stats — gate for Slum Snakes/Tetrads/Syndicate/etc.
             el("div", { style: { display: "flex", justifyContent: "space-between", marginTop: "6px" } },
+              ...combat.map(s =>
+                stat(C, s.label, s.have, s.met ? C.green : s.close ? C.yellow : C.dim)
+              ),
+            ),
+
+            el("div", { style: { display: "flex", justifyContent: "space-between", marginTop: "6px" } },
+              stat(C, "City",   player.city),
               stat(C, "Karma",  ns.format.number(data.player.karma)),
               stat(C, "Kills",  data.player.numPeopleKilled),
+            ),
+
+            el("div", { style: { display: "flex", justifyContent: "space-between", marginTop: "6px" } },
+              stat(C, "Factions", `${(player.factions ?? []).length} joined`),
+              stat(C, "Augs",     `${augsOwned} owned`),
             ),
           ]),
 
@@ -368,7 +397,9 @@ function renderDashboard(ns, data) {
                     minWidth: 0,
                   },
                 },
-                  el("span", { style: { color: "#e2e8f0", flex: "0 0 auto", whiteSpace: "nowrap", marginRight: "8px" } }, op.faction),
+                  el("span", { style: { color: "#e2e8f0", flex: "0 0 auto", whiteSpace: "nowrap", marginRight: "8px" } },
+                    op.hackingFocus ? `${op.faction} ⚡` : op.faction
+                  ),
                   el("span", { style: { color: urgencyColor, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", textAlign: "right" } }, op.reason ?? ""),
                 );
               }),
@@ -498,6 +529,29 @@ function getIncomePerHour(ns) {
   const total   = sources.sinceInstall.total;
   const seconds = Math.max(1, (Date.now() - reset.lastAugReset) / 1000);
   return (total / seconds) * 3600;
+}
+
+/** @param {NS} ns */
+function getCombatStats(ns) {
+  const skills = ns.getPlayer().skills ?? {};
+
+  // Highest requirement any tracked faction demands for each stat (currently
+  // Speakers for the Dead / The Dark Army at 300) - our "fully gated" bar.
+  const maxReq = {};
+  for (const { key } of COMBAT_STAT_DEFS) {
+    maxReq[key] = Math.max(0, ...Object.values(FACTION_REQUIREMENTS).map(r => r[key] ?? 0));
+  }
+
+  return COMBAT_STAT_DEFS.map(({ key, label }) => {
+    const have = skills[key] ?? 0;
+    const need = maxReq[key];
+    return {
+      label,
+      have,
+      met:   need > 0 && have >= need,
+      close: need > 0 && have < need && need - have <= 50,
+    };
+  });
 }
 
 /** @param {NS} ns */
@@ -735,9 +789,9 @@ function statRow(C, icon, primary, secondary, color) {
   );
 }
 
-function stat(C, label_, value) {
+function stat(C, label_, value, color) {
   return el("div", { style: { fontSize: "13px" } },
     el("span", { style: { color: C.dim } }, `${label_} `),
-    el("span", { style: { fontWeight: "bold" } }, String(value)),
+    el("span", { style: { fontWeight: "bold", color } }, String(value)),
   );
 }
