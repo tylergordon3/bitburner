@@ -227,6 +227,9 @@ function renderDashboard(ns, data) {
           ]),
         ),
 
+        // ── Gang (BN2 / SF2) - only rendered while lib/gang.js publishes ────
+        gangCard(ns, C),
+
         // ── Row 2: Infra + Aug Queue in one card ────────────────────────────
         card(C, "INFRA / AUGS", [
           el("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 20px" } },
@@ -711,6 +714,55 @@ function formatDuration(ms) {
   if (hr  > 0) return `${hr}h ${min % 60}m`;
   if (min > 0) return `${min}m ${sec % 60}s`;
   return `${sec}s`;
+}
+
+// ── Gang card ────────────────────────────────────────────────────────────────
+
+/**
+ * Rendered only when lib/gang.js is running and publishing gordGangState;
+ * returns null otherwise so non-gang bitnodes see no change.
+ * @param {NS} ns
+ */
+function gangCard(ns, C) {
+  const g = globalThis.gordGangState;
+  if (!g) return null;
+
+  if (Date.now() - (g.updatedAt ?? 0) > 30_000) {
+    return card(C, "GANG", [
+      el("div", { style: { color: C.dim, fontSize: "13px" } }, "gang.js not running"),
+    ]);
+  }
+
+  const penaltyColor = g.wantedPenalty >= 0.99 ? C.green
+                     : g.wantedPenalty >= 0.95 ? C.yellow
+                     : C.red;
+  const clashColor   = (g.minClash ?? 0) >= 0.6 ? C.green
+                     : (g.minClash ?? 0) >= 0.5 ? C.yellow
+                     : C.dim;
+
+  const tasks = Object.entries(g.taskCounts ?? {})
+    .sort((a, b) => b[1] - a[1])
+    .map(([task, n]) => `${task} x${n}`)
+    .join("  |  ");
+
+  return card(C, `GANG - ${g.faction}`, [
+    el("div", { style: { display: "flex", justifyContent: "space-between", marginBottom: "6px" } },
+      stat(C, "Members", `${g.members}/${g.maxMembers}`),
+      stat(C, "Respect", ns.format.number(g.respect)),
+      stat(C, "$/s", ns.format.number(g.moneyRate), C.green),
+      stat(C, "Wanted", `${((1 - g.wantedPenalty) * 100).toFixed(1)}% pen`, penaltyColor),
+    ),
+    label(C, `Territory ${(g.territory * 100).toFixed(1)}%`),
+    progressBar(g.territory, C.red),
+    el("div", { style: { display: "flex", justifyContent: "space-between", marginTop: "4px" } },
+      stat(C, "Power", ns.format.number(g.power)),
+      stat(C, "Clash", `${Math.round((g.minClash ?? 0) * 100)}%`, clashColor),
+      stat(C, "Warfare", g.warfare ? "ENGAGED" : "off", g.warfare ? C.red : C.dim),
+    ),
+    el("div", { style: { color: C.dim, fontSize: "11px", marginTop: "6px", wordBreak: "break-word" } },
+      tasks || "-"
+    ),
+  ]);
 }
 
 // ── UI primitives ─────────────────────────────────────────────────────────────
