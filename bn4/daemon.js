@@ -48,6 +48,50 @@ function hackingLevel(ns) {
   return ns.getPlayer().skills?.hacking ?? ns.getHackingLevel();
 }
 
+/** @param {NS} ns @param {string} host */
+function freeRam(ns, host) {
+  return ns.getServerMaxRam(host) - ns.getServerUsedRam(host);
+}
+
+/**
+ * Ensure a persistent helper is running SOMEWHERE with enough RAM - not just on
+ * home. globalThis is shared across every host in Bitburner, so these helpers
+ * work fine on any rooted server; running them off-home keeps scarce home RAM
+ * for the daemon. We prefer the roomiest off-home host and only fall back to
+ * home as a last resort. Warns (doesn't fail silently) when nothing has room,
+ * unless { optional: true } is passed (luxury scripts wait quietly for RAM).
+ * @param {NS} ns @param {string} script @param {{optional?: boolean}} [opts]
+ */
+function ensureHelper(ns, script, opts = {}) {
+  // Already running anywhere (home included)? Leave it be.
+  if (allServers(ns).some(h => ns.hasRootAccess(h) && ns.scriptRunning(script, h))) return;
+
+  const ram = ns.getScriptRam(script, "home");
+  const reserved = globalThis.gordReservedHosts instanceof Set ? globalThis.gordReservedHosts : new Set();
+
+  // Roomiest rooted non-home host first; home last (keep it for the daemon).
+  const offHome = allServers(ns)
+    .filter(s => s !== "home" && ns.hasRootAccess(s) && ns.getServerMaxRam(s) > 0 && !reserved.has(s))
+    .sort((a, b) => freeRam(ns, b) - freeRam(ns, a));
+
+  for (const host of [...offHome, "home"]) {
+    const headroom = host === "home" ? 8 : 0; // leave room for the daemon's own work
+    if (freeRam(ns, host) - headroom < ram) continue;
+    // Copy every source file, not just the entry script: Bitburner resolves a
+    // script's imports from the host it runs on, so the whole module closure has
+    // to be present. Files cost no RAM, so shipping them all is simplest/safest.
+    if (host !== "home") ns.scp(ns.ls("home", ".js"), host, "home");
+    if (ns.exec(script, host, 1)) {
+      ns.print(`Started ${script} on ${host}`);
+      return;
+    }
+  }
+
+  if (!opts.optional) {
+    ns.print(`WARN: no host has ${ns.format.ram(ram)} free for ${script} (home ${ns.format.ram(freeRam(ns, "home"))} free)`);
+  }
+}
+
 /** @param {NS} ns */
 async function buyDarkweb(ns) {
   const s = ns.singularity;
@@ -560,21 +604,18 @@ export async function main(ns) {
   if (readLastResetTime(ns) === 0) writeResetTime(ns);
 
   while (true) {
-    if (!ns.scriptRunning("/hacking/manager.js", "home")) {
-      ns.run("/hacking/manager.js", 1);
-    }
-
-    if (!ns.scriptRunning("/ui/dashboard.js", "home")) {
-      ns.run("/ui/dashboard.js", 1);
-    }
-
-    if (!ns.scriptRunning("/lib/stocks.js", "home")) {
-      ns.run("/lib/stocks.js", 1);
-    }
-
+    // Root the network FIRST so the helpers below have off-home hosts to land
+    // on, and buy port openers when affordable to unlock bigger servers.
     await acceptInvites(ns);
     await buyDarkweb(ns);
     rootEverything(ns);
+
+    // Launch helpers off-home when possible (keeps scarce home RAM for the
+    // daemon). Income manager first, then UI/luxury scripts.
+    ensureHelper(ns, "/hacking/manager.js");
+    ensureHelper(ns, "/ui/dashboard.js");
+    ensureHelper(ns, "/lib/stocks.js", { optional: true });
+
     await backdoorTargets(ns);
 
     globalThis.gordState = await decideNextPriority(ns);

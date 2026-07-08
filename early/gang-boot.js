@@ -37,7 +37,7 @@ export async function main(ns) {
       ns.singularity.commitCrime(/** @type {any} */ (CRIME), true);
     }
 
-    await ns.sleep(2_000);
+    await ns.sleep(15_000);
   }
 
   // Phase 2: recruit the founding members and put them all to work, then exit.

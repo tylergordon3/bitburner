@@ -54,6 +54,13 @@ const GANG_FACTION = "Slum Snakes";
 const GANG_KARMA = -9;
 const GANG_JOIN_MONEY = 1_000_000;
 const GANG_SCRIPT = "/lib/gang.js";
+// Dedicated cloud server for the gang manager, used only when home is too small
+// to host it. Reserved from the botnet (via globalThis.gordReservedHosts,
+// honoured by hacking/manager.js and lib/pserv.js) so its ~36GB stays free.
+const GANG_HOST = "cloud-gang";
+// Home must have at least (gang RAM + this) to host the gang itself, leaving
+// room for the ~63GB daemon, the manager's reserve, and some botnet workers.
+const HOME_GANG_HEADROOM = 80;
 
 function playerMoney(ns) {
   return ns.getPlayer().money ?? 0;
@@ -61,6 +68,54 @@ function playerMoney(ns) {
 
 function hackingLevel(ns) {
   return ns.getPlayer().skills?.hacking ?? ns.getHackingLevel();
+}
+
+/** @param {NS} ns @param {string} host */
+function freeRam(ns, host) {
+  return ns.getServerMaxRam(host) - ns.getServerUsedRam(host);
+}
+
+/**
+ * Ensure a persistent helper is running SOMEWHERE with enough RAM - not just on
+ * home. The BN2 daemon itself is ~63GB and fills home on its own, so home has no
+ * room for the manager/dashboard/stocks. But globalThis is shared across every
+ * host in Bitburner (that's how gang.js, running off-home, feeds the dashboard),
+ * so these helpers work fine on any rooted server. We prefer the roomiest
+ * off-home host and only fall back to home as a last resort. Several 16GB
+ * servers (foodnstuff, joesguns, ...) root with zero port openers, so the
+ * hacking manager can start earning immediately even on a fresh, RAM-tight home.
+ * Pass { optional: true } for luxury scripts (e.g. stocks) so they wait quietly
+ * for RAM instead of warning every tick.
+ * @param {NS} ns @param {string} script @param {{optional?: boolean}} [opts]
+ */
+function ensureHelper(ns, script, opts = {}) {
+  // Already running anywhere (home included)? Leave it be.
+  if (allServers(ns).some(h => ns.hasRootAccess(h) && ns.scriptRunning(script, h))) return;
+
+  const ram = ns.getScriptRam(script, "home");
+  const reserved = globalThis.gordReservedHosts instanceof Set ? globalThis.gordReservedHosts : new Set();
+
+  // Roomiest rooted non-home host first; home last (keep it for the daemon).
+  const offHome = allServers(ns)
+    .filter(s => s !== "home" && ns.hasRootAccess(s) && ns.getServerMaxRam(s) > 0 && !reserved.has(s))
+    .sort((a, b) => freeRam(ns, b) - freeRam(ns, a));
+
+  for (const host of [...offHome, "home"]) {
+    const headroom = host === "home" ? 8 : 0; // leave room for the daemon's own work
+    if (freeRam(ns, host) - headroom < ram) continue;
+    // Copy every source file, not just the entry script: Bitburner resolves a
+    // script's imports from the host it runs on, so the whole module closure has
+    // to be present. Files cost no RAM, so shipping them all is simplest/safest.
+    if (host !== "home") ns.scp(ns.ls("home", ".js"), host, "home");
+    if (ns.exec(script, host, 1)) {
+      ns.print(`Started ${script} on ${host}`);
+      return;
+    }
+  }
+
+  if (!opts.optional) {
+    ns.print(`WARN: no host has ${ns.format.ram(ram)} free for ${script} (home ${ns.format.ram(freeRam(ns, "home"))} free)`);
+  }
 }
 
 /** @param {NS} ns */
@@ -184,29 +239,119 @@ async function maybeSetupGang(ns) {
 }
 
 /**
- * Keep /lib/gang.js running somewhere. It's self-contained but RAM-heavy
- * (~35GB), so fall back to purchased servers when home is too small.
+ * Ensure a dedicated cloud server (GANG_HOST) exists and is big enough to hold
+ * the gang manager. Purchased servers only come in powers of two, so we buy/
+ * upgrade to the smallest power-of-two >= the gang's RAM. Spends conservatively
+ * and never dips below the gang join-money floor. Returns true once GANG_HOST
+ * exists at sufficient size.
+ * @param {NS} ns @param {number} needRam
+ */
+function provisionGangHost(ns, needRam) {
+  const cloud = ns.cloud;
+  if (cloud.getServerLimit() <= 0) return false;
+
+  const maxRam = cloud.getRamLimit();
+  let size = 2;
+  while (size < needRam && size < maxRam) size *= 2;
+  if (size < needRam) return false; // even the largest tier can't hold the gang
+
+  const exists = ns.serverExists(GANG_HOST);
+  if (exists && ns.getServerMaxRam(GANG_HOST) >= needRam) return true;
+
+  // This only runs once we're already in a gang, so don't reserve the gang
+  // join-money here (that floor would keep us from ever buying the host at low
+  // balances). Cap spend at half our cash so we don't drain funds needed for
+  // augs/programs - the host gets bought as soon as it's comfortably affordable.
+  const affordable = playerMoney(ns) * 0.5;
+
+  if (!exists) {
+    // Need a free slot to add a dedicated host.
+    if (cloud.getServerNames().length >= cloud.getServerLimit()) return false;
+    if (cloud.getServerCost(size) > affordable) return false;
+    if (cloud.purchaseServer(GANG_HOST, size)) {
+      ns.tprint(`Provisioned dedicated gang host ${GANG_HOST} (${ns.format.ram(size)}).`);
+      return true;
+    }
+    return false;
+  }
+
+  // Exists but too small - upgrade toward the required size.
+  const cost = cloud.getServerUpgradeCost(GANG_HOST, size);
+  if (cost < 0 || cost > affordable) return false;
+  if (cloud.upgradeServer(GANG_HOST, size)) {
+    ns.tprint(`Upgraded gang host ${GANG_HOST} -> ${ns.format.ram(size)}.`);
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Keep /lib/gang.js (~36GB) running somewhere. Two strategies depending on home
+ * size:
+ *   - Home is big enough: reserve the gang's RAM out of home (the botnet honours
+ *     globalThis.gordReservedRam and vacates that space within a batch or two),
+ *     then run it on home. Free and immediate - no cloud server to buy.
+ *   - Home is too small: provision a dedicated cloud server (GANG_HOST), reserve
+ *     it whole from the botnet, and run it there.
+ * Publishes globalThis.gordGangPending so the dashboard can show a "starting"
+ * card during the short wait before it lands.
  * @param {NS} ns
  */
 function ensureGangManagerRunning(ns) {
-  if (!ns.gang.inGang()) return;
-
-  const hosts = ["home", ...ns.cloud.getServerNames()];
-  if (hosts.some(h => ns.scriptRunning(GANG_SCRIPT, h))) return;
+  if (!ns.gang.inGang()) {
+    globalThis.gordReservedRam = {};
+    globalThis.gordReservedHosts = new Set();
+    globalThis.gordGangPending = false;
+    return;
+  }
 
   const ram = ns.getScriptRam(GANG_SCRIPT, "home");
+  const cloudNames = ns.cloud.getServerNames();
+
+  // Already running somewhere? Sync the reservation to where it lives and stop.
+  const running = ["home", GANG_HOST, ...cloudNames].find(
+    h => ns.serverExists(h) && ns.scriptRunning(GANG_SCRIPT, h)
+  );
+  if (running) {
+    globalThis.gordGangPending = false;
+    // Only keep a whole-host reservation for the dedicated cloud server; when it
+    // runs on home/a shared server its RAM already shows as "used".
+    globalThis.gordReservedHosts = running === GANG_HOST ? new Set([GANG_HOST]) : new Set();
+    globalThis.gordReservedRam = {};
+    return;
+  }
+
+  // Not running yet - pick a strategy and carve out room.
+  const homeCanHost = ns.getServerMaxRam("home") >= ram + HOME_GANG_HEADROOM;
+  let hosts;
+  if (homeCanHost) {
+    // Reserve room on home so the botnet frees space for the gang there.
+    globalThis.gordReservedRam = { home: ram + 8 };
+    globalThis.gordReservedHosts = new Set();
+    hosts = ["home", ...cloudNames];
+  } else {
+    globalThis.gordReservedRam = {};
+    provisionGangHost(ns, ram);
+    globalThis.gordReservedHosts = ns.serverExists(GANG_HOST) ? new Set([GANG_HOST]) : new Set();
+    hosts = [GANG_HOST, ...cloudNames.filter(h => h !== GANG_HOST), "home"];
+  }
+
   for (const host of hosts) {
-    const free = ns.getServerMaxRam(host) - ns.getServerUsedRam(host);
+    if (!ns.serverExists(host)) continue;
     const headroom = host === "home" ? 8 : 0; // leave room for daemon children
-    if (free - headroom < ram) continue;
+    if (freeRam(ns, host) - headroom < ram) continue;
     if (host !== "home") ns.scp(GANG_SCRIPT, host, "home");
     if (ns.exec(GANG_SCRIPT, host, 1)) {
       ns.tprint(`Started ${GANG_SCRIPT} on ${host}`);
+      globalThis.gordGangPending = false;
       return;
     }
   }
 
-  ns.print(`WARN: no host with ${ns.format.ram(ram)} free for ${GANG_SCRIPT}`);
+  // Couldn't place it this tick - usually just waiting for the botnet's current
+  // batches to finish and free the RAM we reserved on home.
+  globalThis.gordGangPending = true;
+  ns.print(`WARN: waiting for ${ns.format.ram(ram)} to free for ${GANG_SCRIPT} (home ${ns.format.ram(freeRam(ns, "home"))} free)`);
 }
 
 // ── Augs / install / infra (same as bn4) ─────────────────────────────────────
@@ -430,7 +575,10 @@ function maybeUpgradeHomeRam(ns) {
   const cost = s.getUpgradeHomeRamCost();
   const money = playerMoney(ns);
   if (cost <= 0 || !isFinite(cost)) return;
-  if (money - cost < GANG_JOIN_MONEY) return;
+  // Only hold back the gang join-money while we're still bootstrapping toward
+  // the gang; once we're in one, that reservation just stalls home growth.
+  const reserve = ns.gang.inGang() ? 0 : GANG_JOIN_MONEY;
+  if (money - cost < reserve) return;
   if (cost <= money * 0.4) s.upgradeHomeRam();
 }
 
@@ -672,23 +820,21 @@ export async function main(ns) {
   if (readLastResetTime(ns) === 0) writeResetTime(ns);
 
   while (true) {
-    if (!ns.scriptRunning("/hacking/manager.js", "home")) {
-      ns.run("/hacking/manager.js", 1);
-    }
-
-    if (!ns.scriptRunning("/ui/dashboard.js", "home")) {
-      ns.run("/ui/dashboard.js", 1);
-    }
-
-    if (!ns.scriptRunning("/lib/stocks.js", "home")) {
-      ns.run("/lib/stocks.js", 1);
-    }
-
-    ensureGangManagerRunning(ns);
-
+    // Root the network FIRST so the helpers below have off-home hosts to land
+    // on, and buy port openers when affordable to unlock bigger servers.
     await acceptInvites(ns);
     await buyDarkweb(ns);
     rootEverything(ns);
+
+    // Launch helpers off-home (the ~63GB daemon fills home by itself). Order by
+    // priority: gang first (it also reserves cloud-gang from the botnet), then
+    // the hacking manager (our main income engine - starts earning on any 16GB
+    // server, no port openers needed), then the UI/luxury scripts.
+    ensureGangManagerRunning(ns);
+    ensureHelper(ns, "/hacking/manager.js");
+    ensureHelper(ns, "/ui/dashboard.js");
+    ensureHelper(ns, "/lib/stocks.js", { optional: true });
+
     await backdoorTargets(ns);
     maybeUpgradeHomeRam(ns);
 

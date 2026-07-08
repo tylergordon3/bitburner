@@ -17,22 +17,46 @@ let _hackRam   = 1.7;
 let _growRam   = 1.7;
 let _weakenRam = 1.75;
 
+/**
+ * Per-host RAM (GB) the node daemon wants kept free on a SHARED host, published
+ * on globalThis - e.g. space carved out of home so the gang manager can run
+ * there. Distinct from reservedHosts (which excludes a whole host); this just
+ * shrinks how much of a host the botnet will fill.
+ */
+function reservedRamFor(server) {
+  const m = globalThis.gordReservedRam;
+  const v = m && m[server];
+  return typeof v === "number" && v > 0 ? v : 0;
+}
+
 /** @param {NS} ns */
 function usableRam(ns, server) {
   const max = ns.getServerMaxRam(server);
   const used = ns.getServerUsedRam(server);
 
-  let reserve = 0;
-  if (server === "home") reserve = RESERVE_HOME_RAM;
+  let reserve = reservedRamFor(server);
+  if (server === "home") reserve += RESERVE_HOME_RAM;
 
   return Math.max(0, max - used - reserve);
 }
 
+/**
+ * Hosts the botnet must leave alone, published by the node daemon on the shared
+ * globalThis (e.g. a cloud server dedicated to /lib/gang.js). Undefined for
+ * nodes with no reservations, in which case nothing is excluded.
+ */
+function reservedHosts() {
+  const r = globalThis.gordReservedHosts;
+  return r instanceof Set ? r : new Set(r ?? []);
+}
+
 /** @param {NS} ns */
 function rootedWorkers(ns) {
+  const reserved = reservedHosts();
   return allServers(ns)
     .filter(s => ns.hasRootAccess(s))
-    .filter(s => ns.getServerMaxRam(s) > 0);
+    .filter(s => ns.getServerMaxRam(s) > 0)
+    .filter(s => !reserved.has(s));
 }
 
 /** @param {NS} ns */

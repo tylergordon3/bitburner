@@ -40,21 +40,16 @@ function scriptRamSafe(ns, file) {
 }
 
 /**
- * Total home RAM the daemon needs to run *usefully*: its own size plus the
- * helper scripts it starts (manager, dashboard, stocks) plus worker headroom.
- * The gang manager (~35GB) is intentionally excluded - the daemon places that
- * on a purchased server / later once infra grows, so we don't block handoff on
- * it here.
+ * Home RAM the daemon needs before we hand off. The daemon now runs its helpers
+ * (manager/dashboard/stocks) OFF home - on any rooted server - so we no longer
+ * add their sizes here. We only need home to hold the daemon itself plus a bit
+ * of slack (the gang, when applicable, is also placed off-home or in reserved
+ * space). Handing off at daemon+slack instead of daemon+all-helpers means we
+ * hand off a full RAM tier sooner.
  * @param {NS} ns @param {string} daemon
  */
 function requiredHomeRam(ns, daemon) {
-  return (
-    scriptRamSafe(ns, daemon) +
-    scriptRamSafe(ns, MANAGER) +
-    scriptRamSafe(ns, DASHBOARD) +
-    scriptRamSafe(ns, STOCKS) +
-    WORKER_HEADROOM
-  );
+  return scriptRamSafe(ns, daemon) + WORKER_HEADROOM;
 }
 
 /** @param {NS} ns */

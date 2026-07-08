@@ -1,8 +1,41 @@
 // ui/dashboard.js
+//
+// Core dashboard template. Renders the shell every BitNode shares (header,
+// player, goal, infra, network, pipeline, stocks) and splices in per-BN cards
+// from a small registry keyed by BitNode number. To add BN-specific panels,
+// create ui/bn<N>.js exporting extraCards(ns, C) and register it below - see
+// ui/bn2.js (gang card) for the pattern.
 
 import { FACTION_REQUIREMENTS } from "../lib/aug-targets.js";
+import { COLORS, el, card, label, progressBar, stat, statRow, formatDuration } from "./dashboard-lib.js";
+import { extraCards as bn2ExtraCards } from "./bn2.js";
+
+// BitNode number -> function returning that node's extra cards (an array).
+const BN_EXTRA_CARDS = {
+  2: bn2ExtraCards,
+};
+
+/**
+ * Extra cards for the current BitNode, or [] when the node has no extras.
+ * @param {NS} ns
+ * @param {typeof COLORS} C
+ * @param {number} node
+ */
+function bnExtraCards(ns, C, node) {
+  const fn = BN_EXTRA_CARDS[node];
+  if (!fn) return [];
+  try {
+    return fn(ns, C) ?? [];
+  } catch (e) {
+    return [el("div", { style: { color: C.red, fontSize: "12px" } }, `BN${node} card error: ${String(e)}`)];
+  }
+}
 
 const FINAL_HOST = "w0r1d_d43m0n";
+
+// DOM id on the dashboard's root element, used to measure content height for
+// dynamic tail sizing (see fitTail).
+const DASH_ID = "gordnet-dash";
 
 // Combat stats and their gate thresholds, derived from every combat-gated
 // faction requirement (Slum Snakes, Tetrads, Speakers for the Dead, etc.) so
@@ -59,6 +92,8 @@ export async function main(ns) {
   ns.ui.openTail();
   ns.ui.moveTail(20, 0);
 
+  const currentNode = ns.getResetInfo().currentNode;
+
   while (true) {
     const player      = ns.getPlayer();
     const money       = player.money;
@@ -85,7 +120,7 @@ export async function main(ns) {
       ram, cloud, final, state, target,
       goal, moneyRate, moneyEta, ramRate,
       augQueue, network, runDuration, stocks,
-      combat, augsOwned,
+      combat, augsOwned, currentNode,
     });
 
     await ns.sleep(5_000);
@@ -95,23 +130,18 @@ export async function main(ns) {
 // ── Render ───────────────────────────────────────────────────────────────────
 /** @param {NS} ns */
 function renderDashboard(ns, data) {
+  // Size to the previous (fully-committed) frame before redrawing - measuring
+  // right after printRaw can catch a half-rendered DOM. Heights are stable
+  // tick-to-tick, so the one-frame lag is imperceptible.
+  fitTail(ns);
   ns.clearLog();
   try {
     const { player, money, hack, incomeHour, ram, cloud, final,
             state, target, goal, moneyRate, moneyEta, ramRate,
-            augQueue, network, stocks, combat, augsOwned } = data;
+            augQueue, network, stocks, combat, augsOwned, currentNode } = data;
 
-    // Colours
-    const C = {
-      green:   "#4ade80",
-      yellow:  "#facc15",
-      red:     "#f87171",
-      blue:    "#60a5fa",
-      purple:  "#c084fc",
-      dim:     "rgba(255,255,255,0.45)",
-      border:  "rgba(255,255,255,0.10)",
-      cardBg:  "rgba(255,255,255,0.03)",
-    };
+    // Shared palette (see ui/dashboard-lib.js)
+    const C = COLORS;
 
     // Derived
     const hackPct     = Math.min(1, hack / Math.max(1, Number(final.required) || hack));
@@ -130,6 +160,7 @@ function renderDashboard(ns, data) {
 
     ns.printRaw(
       el("div", {
+        id: DASH_ID,
         style: {
           fontFamily: "'Courier New', monospace",
           fontSize: "14px",
@@ -227,8 +258,8 @@ function renderDashboard(ns, data) {
           ]),
         ),
 
-        // ── Gang (BN2 / SF2) - only rendered while lib/gang.js publishes ────
-        gangCard(ns, C),
+        // ── Per-BitNode extras (e.g. BN2 gang card) ─────────────────────────
+        ...bnExtraCards(ns, C, currentNode),
 
         // ── Row 2: Infra + Aug Queue in one card ────────────────────────────
         card(C, "INFRA / AUGS", [
@@ -351,7 +382,7 @@ function renderDashboard(ns, data) {
           el("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 16px" } },
 
             // Left: aug pipeline
-            el("div", {},
+            el("div", { style: { minWidth: 0 } },
               el("div", { style: { fontSize: "11px", color: C.dim, letterSpacing: "1px", marginBottom: "6px" } }, "AUGS"),
               ...(globalThis.gordAugPipeline ?? []).slice(0, 10).map((a, i) => {
                 const done    = a.canBuy;
@@ -382,7 +413,7 @@ function renderDashboard(ns, data) {
             ),
 
             // Right: faction pipeline
-            el("div", {},
+            el("div", { style: { minWidth: 0 } },
               el("div", { style: { fontSize: "11px", color: C.dim, letterSpacing: "1px", marginBottom: "6px" } }, "FACTIONS"),
               ...(globalThis.gordFactionPipeline ?? []).slice(0, 10).map((op, i) => {
                 const urgencyColor = op.urgency === "high"   ? C.red
@@ -403,7 +434,7 @@ function renderDashboard(ns, data) {
                   el("span", { style: { color: op.hackingFocus ? C.blue : "#e2e8f0", flex: "0 0 auto", whiteSpace: "nowrap", marginRight: "8px" } },
                     op.faction
                   ),
-                  el("span", { style: { color: urgencyColor, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", textAlign: "right" } }, op.reason ?? ""),
+                  el("span", { style: { color: urgencyColor, flex: 1, minWidth: 0, whiteSpace: "normal", wordBreak: "break-word", textAlign: "right", lineHeight: "1.3" } }, op.reason ?? ""),
                 );
               }),
             ),
@@ -484,8 +515,37 @@ function renderDashboard(ns, data) {
     ns.print("Dashboard error: " + String(e));
     ns.print(e?.stack ?? "");
   }
+}
 
-  ns.ui.resizeTail(900, 820);
+// Width is fixed to what the card layout was designed for; height tracks the
+// rendered content so every card (gang, stocks, pipelines) is fully visible
+// regardless of which BitNode we're in or how many pipeline rows there are.
+const DASH_WIDTH = 900;
+const DASH_MIN_H = 200;
+const DASH_MAX_H = 2000;
+
+/**
+ * Size the tail window to fit the rendered dashboard. Measures the actual DOM
+ * height of our root element (id=DASH_ID) and resizes to match, so nothing gets
+ * clipped and there's no empty space. Falls back to a sane default before the
+ * first frame exists or if the DOM isn't reachable.
+ * @param {NS} ns
+ */
+function fitTail(ns) {
+  let height = 820;
+  try {
+    // Access document via a string key: referencing the `document` identifier
+    // directly costs 25GB of script RAM in Bitburner; `globalThis["document"]`
+    // isn't flagged by the static RAM analyzer.
+    const doc = globalThis["document"];
+    const node = doc?.getElementById(DASH_ID);
+    if (node) {
+      // +58 covers the tail title bar and the log container's own padding.
+      height = Math.ceil(node.getBoundingClientRect().height) + 58;
+    }
+  } catch {}
+  height = Math.max(DASH_MIN_H, Math.min(DASH_MAX_H, height));
+  ns.ui.resizeTail(DASH_WIDTH, height);
 }
 
 // ── Data helpers ─────────────────────────────────────────────────────────────
@@ -702,148 +762,4 @@ function etaFromRate(remaining, ratePerHour) {
   if (remaining <= 0) return "complete";
   if (!ratePerHour || ratePerHour <= 0) return "-";
   return formatDuration((remaining / ratePerHour) * 3_600_000);
-}
-
-function formatDuration(ms) {
-  if (!Number.isFinite(ms) || ms < 0) return "-";
-  const sec = Math.floor(ms / 1000);
-  const min = Math.floor(sec / 60);
-  const hr  = Math.floor(min / 60);
-  const day = Math.floor(hr / 24);
-  if (day > 0) return `${day}d ${hr % 24}h`;
-  if (hr  > 0) return `${hr}h ${min % 60}m`;
-  if (min > 0) return `${min}m ${sec % 60}s`;
-  return `${sec}s`;
-}
-
-// ── Gang card ────────────────────────────────────────────────────────────────
-
-/**
- * Rendered only when lib/gang.js is running and publishing gordGangState;
- * returns null otherwise so non-gang bitnodes see no change.
- * @param {NS} ns
- */
-function gangCard(ns, C) {
-  const g = globalThis.gordGangState;
-  if (!g) return null;
-
-  if (Date.now() - (g.updatedAt ?? 0) > 30_000) {
-    return card(C, "GANG", [
-      el("div", { style: { color: C.dim, fontSize: "13px" } }, "gang.js not running"),
-    ]);
-  }
-
-  const penaltyColor = g.wantedPenalty >= 0.99 ? C.green
-                     : g.wantedPenalty >= 0.95 ? C.yellow
-                     : C.red;
-  const clashColor   = (g.minClash ?? 0) >= 0.6 ? C.green
-                     : (g.minClash ?? 0) >= 0.5 ? C.yellow
-                     : C.dim;
-
-  const tasks = Object.entries(g.taskCounts ?? {})
-    .sort((a, b) => b[1] - a[1])
-    .map(([task, n]) => `${task} x${n}`)
-    .join("  |  ");
-
-  return card(C, `GANG - ${g.faction}`, [
-    el("div", { style: { display: "flex", justifyContent: "space-between", marginBottom: "6px" } },
-      stat(C, "Members", `${g.members}/${g.maxMembers}`),
-      stat(C, "Respect", ns.format.number(g.respect)),
-      stat(C, "$/s", ns.format.number(g.moneyRate), C.green),
-      stat(C, "Wanted", `${((1 - g.wantedPenalty) * 100).toFixed(1)}% pen`, penaltyColor),
-    ),
-    label(C, `Territory ${(g.territory * 100).toFixed(1)}%`),
-    progressBar(g.territory, C.red),
-    el("div", { style: { display: "flex", justifyContent: "space-between", marginTop: "4px" } },
-      stat(C, "Power", ns.format.number(g.power)),
-      stat(C, "Clash", `${Math.round((g.minClash ?? 0) * 100)}%`, clashColor),
-      stat(C, "Warfare", g.warfare ? "ENGAGED" : "off", g.warfare ? C.red : C.dim),
-    ),
-    el("div", { style: { color: C.dim, fontSize: "11px", marginTop: "6px", wordBreak: "break-word" } },
-      tasks || "-"
-    ),
-  ]);
-}
-
-// ── UI primitives ─────────────────────────────────────────────────────────────
-
-function el(type, props = {}, ...children) {
-  const React = globalThis.React;
-  if (!React?.createElement) throw new Error("React not available");
-  return React.createElement(type, props, ...children);
-}
-
-function card(C, title, children) {
-  return el("div", {
-    style: {
-      border: `1px solid ${C.border}`,
-      borderRadius: "6px",
-      padding: "7px 10px",
-      marginBottom: "5px",
-      background: C.cardBg,
-    },
-  },
-    el("div", {
-      style: {
-        fontWeight: "bold",
-        fontSize: "13px",
-        letterSpacing: "1px",
-        color: C.dim,
-        marginBottom: "7px",
-        textTransform: "uppercase",
-      },
-    }, title),
-    ...children,
-  );
-}
-
-function label(C, text) {
-  return el("div", {
-    style: { fontSize: "12px", color: C.dim, marginBottom: "3px", letterSpacing: "0.5px" },
-  }, text);
-}
-
-function progressBar(pct, color) {
-  const filled = Math.round(Math.max(0, Math.min(1, pct)) * 20);
-  const empty  = 20 - filled;
-  return el("div", {
-    style: {
-      height: "6px",
-      borderRadius: "2px",
-      background: "rgba(255,255,255,0.08)",
-      marginBottom: "3px",
-      overflow: "hidden",
-    },
-  },
-    el("div", {
-      style: {
-        width: `${Math.round(pct * 100)}%`,
-        height: "100%",
-        background: color,
-        borderRadius: "2px",
-        transition: "width 0.3s",
-      },
-    }),
-  );
-}
-
-function statRow(C, icon, primary, secondary, color) {
-  return el("div", {
-    style: {
-      display: "flex",
-      justifyContent: "space-between",
-      alignItems: "baseline",
-      marginBottom: "4px",
-    },
-  },
-    el("span", { style: { color: C.dim, fontSize: "13px" } }, `${icon} ${primary}`),
-    el("span", { style: { color, fontSize: "13px", fontWeight: "bold" } }, secondary),
-  );
-}
-
-function stat(C, label_, value, color) {
-  return el("div", { style: { fontSize: "13px" } },
-    el("span", { style: { color: C.dim } }, `${label_} `),
-    el("span", { style: { fontWeight: "bold", color } }, String(value)),
-  );
 }
