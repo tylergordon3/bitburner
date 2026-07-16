@@ -9,10 +9,12 @@
 import { FACTION_REQUIREMENTS } from "../lib/aug-targets.js";
 import { COLORS, el, card, label, progressBar, stat, statRow, formatDuration } from "./dashboard-lib.js";
 import { extraCards as bn2ExtraCards } from "./bn2.js";
+import { extraCards as bn3ExtraCards } from "./bn3.js";
 
 // BitNode number -> function returning that node's extra cards (an array).
 const BN_EXTRA_CARDS = {
   2: bn2ExtraCards,
+  3: bn3ExtraCards,
 };
 
 /**
