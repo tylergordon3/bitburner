@@ -4,10 +4,14 @@
 // net, run the hacking botnet + helpers off-home, grind augs/factions, install,
 // finish), with BN3's defining mechanic bolted on: a CORPORATION.
 //
-// The corporation is the income engine here. The daemon owns corp *creation*
-// (one free, seed-funded call in BN3) exactly like the BN2 daemon owns gang
-// creation; day-to-day play is handed to /lib/corp.js, which - being far too
-// RAM-heavy to co-host with this daemon - runs on a dedicated cloud server.
+// The corporation is the income engine here. Corp *creation* is a one-shot
+// (bn3/corp-create.js) the daemon launches while it has no corp; day-to-day play
+// is handed to the corp manager, split into lib/corp-steady.js (small, always-on,
+// on the dedicated cloud-corp host) and lib/corp-build.js (bounded structural
+// buildout, run as a periodic one-shot on borrowed off-home RAM). Both are far
+// too RAM-heavy to co-host with this daemon on home. This daemon likewise keeps
+// its own heaviest calls off home via bn3/backdoor.js (backdoors + finishing the
+// BN) and bn3/econ.js (hacknet + home-RAM spending).
 //
 // Gangs still feature, but unlike BN2 there's no early-gang shortcut: forming
 // one needs -54,000 karma (SF2 lets us do it here at all). We don't grind crime
@@ -16,7 +20,7 @@
 // corp and the gang PERSIST through augmentation installs, so their managers
 // simply resume after each reset.
 
-import { allServers, pathTo, root } from "../lib/net.js";
+import { allServers } from "../lib/net.js";
 import { managePurchasedServers } from "../lib/pserv.js";
 import {
   trainCombatIfNeeded,
@@ -35,33 +39,40 @@ import {
   getAllAugCandidates,
   getUnjoinedFactionOpportunities,
   FACTION_REQUIREMENTS,
-  shouldJoinCityFaction,
 } from "../lib/aug-targets.js";
+// Shared daemon core (identical across bn2/bn3/bn4) - see lib/daemon-lib.js.
+import {
+  playerMoney,
+  hackingLevel,
+  freeRam,
+  ensureHelper,
+  buyDarkweb,
+  rootEverything,
+  acceptInvites,
+  canBuyAug,
+  readLastResetTime,
+  writeResetTime,
+} from "../lib/daemon-lib.js";
 
-const PROGRAMS = [
-  "BruteSSH.exe",
-  "FTPCrack.exe",
-  "relaySMTP.exe",
-  "HTTPWorm.exe",
-  "SQLInject.exe",
-];
-
-const BACKDOOR_PRIORITY = [
-  "CSEC",
-  "avmnite-02h",
-  "I.I.I.I",
-  "run4theh111z",
-  "The-Cave",
-  "w0r1d_d43m0n",
-];
-
-const RESET_FILE = "/data/last-reset.txt";
+// Off-home helper scripts (shared by every daemon) that keep this daemon's HOME
+// footprint small: each carries the expensive Singularity/Hacknet calls it needs,
+// and running them off-home means those never count against the daemon's RAM.
+const BACKDOOR_SCRIPT = "/lib/backdoor.js";   // server backdoors + finishing the BN
+const ECON_SCRIPT = "/lib/econ.js";           // hacknet + home-RAM spending
+const CORP_CREATE_SCRIPT = "/bn3/corp-create.js"; // one-shot corporation creation (BN3-only)
+const SELF = "/bn3/daemon.js";                // this daemon's path (post-reset callback)
 
 // ── Corporation ───────────────────────────────────────────────────────────────
 const CORP_NAME = "GordCorp";
-const CORP_SCRIPT = "/lib/corp.js";
-// Dedicated cloud server for the corp manager (it's too RAM-heavy to share home
-// with the daemon). Reserved from the botnet via globalThis.gordReservedHosts.
+// The corp manager is split in two to shrink its permanently-resident footprint:
+//   - corp-steady.js: small, always-on, lives on the reserved cloud-corp host.
+//   - corp-build.js: large but bounded structural buildout, run as a periodic
+//     one-shot on borrowed off-home RAM (so its RAM is only held transiently).
+const CORP_SCRIPT = "/lib/corp-steady.js";
+const CORP_BUILD_SCRIPT = "/lib/corp-build.js";
+// Dedicated cloud server for the always-on corp-steady manager. Reserved from the
+// botnet via globalThis.gordReservedHosts; sized to corp-steady (much smaller
+// than the old monolithic corp.js).
 const CORP_HOST = "cloud-corp";
 
 // ── Gang (late-game, -54k karma) ──────────────────────────────────────────────
@@ -79,19 +90,6 @@ const CRIMINAL_FACTIONS = /** @type {any[]} */ ([
   "Speakers for the Dead",
 ]);
 
-function playerMoney(ns) {
-  return ns.getPlayer().money ?? 0;
-}
-
-function hackingLevel(ns) {
-  return ns.getPlayer().skills?.hacking ?? ns.getHackingLevel();
-}
-
-/** @param {NS} ns @param {string} host */
-function freeRam(ns, host) {
-  return ns.getServerMaxRam(host) - ns.getServerUsedRam(host);
-}
-
 /** @param {NS} ns - true if we're in a gang; false (not just missing API) otherwise. */
 function inGangSafe(ns) {
   try {
@@ -101,137 +99,29 @@ function inGangSafe(ns) {
   }
 }
 
-/**
- * Ensure a persistent helper is running SOMEWHERE with enough RAM - not just on
- * home. globalThis is shared across every host in Bitburner, so these helpers
- * work fine on any rooted server; running them off-home keeps scarce home RAM
- * for the daemon. Warns (doesn't fail silently) when nothing has room, unless
- * { optional: true } is passed (luxury scripts wait quietly for RAM).
- * @param {NS} ns @param {string} script @param {{optional?: boolean}} [opts]
- */
-function ensureHelper(ns, script, opts = {}) {
-  if (allServers(ns).some(h => ns.hasRootAccess(h) && ns.scriptRunning(script, h))) return;
-
-  const ram = ns.getScriptRam(script, "home");
-  const reserved = globalThis.gordReservedHosts instanceof Set ? globalThis.gordReservedHosts : new Set();
-
-  const offHome = allServers(ns)
-    .filter(s => s !== "home" && ns.hasRootAccess(s) && ns.getServerMaxRam(s) > 0 && !reserved.has(s))
-    .sort((a, b) => freeRam(ns, b) - freeRam(ns, a));
-
-  for (const host of [...offHome, "home"]) {
-    const headroom = host === "home" ? 8 : 0;
-    if (freeRam(ns, host) - headroom < ram) continue;
-    if (host !== "home") ns.scp(ns.ls("home", ".js"), host, "home");
-    if (ns.exec(script, host, 1)) {
-      ns.print(`Started ${script} on ${host}`);
-      return;
-    }
-  }
-
-  if (!opts.optional) {
-    ns.print(`WARN: no host has ${ns.format.ram(ram)} free for ${script} (home ${ns.format.ram(freeRam(ns, "home"))} free)`);
-  }
-}
-
-/** @param {NS} ns */
-async function buyDarkweb(ns) {
-  const s = ns.singularity;
-
-  if (!ns.hasTorRouter()) {
-    if (playerMoney(ns) >= 200_000) s.purchaseTor();
-    return;
-  }
-
-  for (const p of PROGRAMS) {
-    if (!ns.fileExists(p, "home")) {
-      const cost = s.getDarkwebProgramCost(/** @type {any} */ (p));
-      if (cost > 0 && playerMoney(ns) >= cost) s.purchaseProgram(/** @type {any} */ (p));
-    }
-  }
-}
-
-/** @param {NS} ns */
-function rootEverything(ns) {
-  for (const server of allServers(ns)) {
-    if (server !== "home") {
-      try { root(ns, server); } catch {}
-    }
-  }
-}
-
-/**
- * Accept all pending faction invites, except city factions we should defer
- * (see shouldJoinCityFaction). This also picks up criminal-faction invites,
- * which is what lets maybeSetupGang found a gang once karma is deep enough.
- * @param {NS} ns
- */
-async function acceptInvites(ns) {
-  for (const faction of ns.singularity.checkFactionInvitations()) {
-    if (!shouldJoinCityFaction(ns, faction)) continue;
-    ns.singularity.joinFaction(/** @type {any} */ (faction));
-  }
-}
-
-/** @param {NS} ns */
-async function backdoorTargets(ns) {
-  for (const server of BACKDOOR_PRIORITY) {
-    if (!ns.serverExists(server)) continue;
-    const info = ns.getServer(server);
-    if (info.backdoorInstalled) continue;
-    if (!ns.hasRootAccess(server)) continue;
-    if (hackingLevel(ns) < ns.getServerRequiredHackingLevel(server)) continue;
-
-    const path = pathTo(ns, server);
-    if (!path.length) continue;
-
-    ns.singularity.connect("home");
-    let connected = true;
-    for (const hop of path.slice(1)) {
-      if (!ns.singularity.connect(hop)) {
-        connected = false;
-        break;
-      }
-    }
-
-    if (!connected) {
-      ns.singularity.connect("home");
-      continue;
-    }
-
-    ns.tprint(`Installing backdoor on ${server}...`);
-    await ns.singularity.installBackdoor();
-    ns.singularity.connect("home");
-  }
-}
-
 // ── Corporation setup ─────────────────────────────────────────────────────────
 
 /**
- * Create the corporation as soon as we can. In BN3 the seed-funded path is free,
- * so this fires almost immediately; the self-funded ($150b) path is only a
- * fallback for the theoretically-impossible case where seed funding is blocked.
- * Returns a status object the first time it creates the corp, else null.
+ * Ensure the corporation gets created, without carrying corporation.create-
+ * Corporation (20GB) on home: while we have no corp, keep a one-shot creator
+ * (bn3/corp-create.js) running off-home; it creates the corp and exits. Returns
+ * a status object the first time a corp appears (surfaced on the dashboard),
+ * else null. hasCorporation() itself is free (0GB), so this stays cheap.
  * @param {NS} ns
  */
 function maybeSetupCorp(ns) {
-  if (ns.corporation.hasCorporation()) return null;
-
-  if (ns.corporation.canCreateCorporation(false) === "Success") {
-    if (ns.corporation.createCorporation(CORP_NAME, false)) {
-      ns.tprint(`Created corporation ${CORP_NAME} (seed funded).`);
-      return { action: "Corp Created", detail: CORP_NAME };
-    }
+  if (!ns.corporation.hasCorporation()) {
+    ensureHelper(ns, CORP_CREATE_SCRIPT, { optional: true });
+    globalThis.gordHadCorp = false;
+    return null;
   }
 
-  if (ns.corporation.canCreateCorporation(true) === "Success" && playerMoney(ns) >= 150e9) {
-    if (ns.corporation.createCorporation(CORP_NAME, true)) {
-      ns.tprint(`Created corporation ${CORP_NAME} (self funded).`);
-      return { action: "Corp Created", detail: `${CORP_NAME} (self-funded)` };
-    }
-  }
-
-  return null;
+  // Only surface the event on a genuine 0->1 transition we watched this process
+  // lifetime (gordHadCorp === false). After a soft reset the corp persists but
+  // globalThis is wiped (undefined), so we must NOT report a spurious creation.
+  const surface = globalThis.gordHadCorp === false;
+  globalThis.gordHadCorp = true;
+  return surface ? { action: "Corp Created", detail: CORP_NAME } : null;
 }
 
 /**
@@ -353,6 +243,7 @@ function ensureCloudManagers(ns) {
   const reserved = new Set();
 
   if (ns.corporation.hasCorporation()) {
+    // Always-on operator on the reserved cloud-corp host.
     placeManager(ns, CORP_SCRIPT, CORP_HOST, reserved);
     globalThis.gordCorpPending = !allServers(ns).some(h => ns.hasRootAccess(h) && ns.scriptRunning(CORP_SCRIPT, h));
   } else {
@@ -365,23 +256,18 @@ function ensureCloudManagers(ns) {
 
   globalThis.gordReservedHosts = reserved;
   globalThis.gordReservedRam = {};
+
+  // Periodic structural buildout as a one-shot on borrowed off-home RAM (never on
+  // a reserved host). It exits after each pass; ensureHelper relaunches it next
+  // tick until buildout converges, then each pass is a quick no-op. optional: it
+  // waits quietly when no off-home host is roomy enough (early game), just like
+  // the old monolithic corp.js waited for its dedicated host.
+  if (ns.corporation.hasCorporation()) {
+    ensureHelper(ns, CORP_BUILD_SCRIPT, { optional: true });
+  }
 }
 
 // ── Augs / install / infra (same policy as bn4) ──────────────────────────────
-
-/** @param {NS} ns */
-function canBuyAug(ns, faction, aug, owned) {
-  const s = ns.singularity;
-  if (owned.has(aug)) return false;
-
-  const prereqs = s.getAugmentationPrereq(aug);
-  if (!prereqs.every(a => owned.has(a))) return false;
-
-  return (
-    s.getFactionRep(/** @type {any} */ (faction)) >= s.getAugmentationRepReq(aug) &&
-    playerMoney(ns) >= s.getAugmentationPrice(aug)
-  );
-}
 
 /** @param {NS} ns */
 function buyAugs(ns) {
@@ -446,22 +332,6 @@ function startBestFactionWork(ns, faction) {
   return null;
 }
 
-/** @param {NS} ns */
-function readLastResetTime(ns) {
-  try {
-    const raw = ns.read(RESET_FILE);
-    const t = Number(raw);
-    return isNaN(t) ? 0 : t;
-  } catch {
-    return 0;
-  }
-}
-
-/** @param {NS} ns */
-function writeResetTime(ns) {
-  ns.write(RESET_FILE, String(Date.now()), "w");
-}
-
 /**
  * Same install policy as bn4. Resets are cheap in BN3 too: the corporation (and
  * a gang, once formed) persist through installs, so the daemon just relaunches
@@ -510,84 +380,13 @@ function maybeInstall(ns) {
     }
 
     writeResetTime(ns);
-    ns.singularity.installAugmentations("/bn3/daemon.js");
+    ns.singularity.installAugmentations(SELF);
   }
-}
-
-/** @param {NS} ns */
-async function maybeFinishBN(ns) {
-  const target = "w0r1d_d43m0n";
-  if (!ns.serverExists(target)) return;
-
-  root(ns, target);
-
-  const server = ns.getServer(target);
-  if (!server.backdoorInstalled) return;
-  if (hackingLevel(ns) < ns.getServerRequiredHackingLevel(target)) return;
-
-  const nextBN = Number(ns.args[0] ?? 1);
-  ns.tprint(`Destroying w0r1d_d43m0n. Next BitNode: ${nextBN}`);
-  ns.singularity.destroyW0r1dD43m0n(nextBN, "/bn3/daemon.js");
-}
-
-/** @param {NS} ns */
-function maybeSpendOnHacknet(ns) {
-  if (hackingLevel(ns) > 200) return;
-
-  const hn = ns.hacknet;
-  const totalBudget = playerMoney(ns) * 0.20;
-  if (totalBudget < 1_000) return;
-
-  let spent = 0;
-  while (true) {
-    const remaining = totalBudget - spent;
-    if (remaining < 1_000) break;
-
-    const nodeCount = hn.numNodes();
-    let bestCost = Infinity;
-    let bestAction = null;
-
-    if (nodeCount < 8) {
-      const cost = hn.getPurchaseNodeCost();
-      if (cost > 0 && cost < bestCost && cost <= remaining) {
-        bestCost = cost;
-        bestAction = () => { hn.purchaseNode(); return cost; };
-      }
-    }
-
-    for (let i = 0; i < nodeCount; i++) {
-      const lvlCost  = hn.getLevelUpgradeCost(i, 1);
-      const ramCost  = hn.getRamUpgradeCost(i, 1);
-      const coreCost = hn.getCoreUpgradeCost(i, 1);
-
-      if (lvlCost  > 0 && lvlCost  < bestCost && lvlCost  <= remaining) { bestCost = lvlCost;  bestAction = () => { hn.upgradeLevel(i, 1); return lvlCost; }; }
-      if (ramCost  > 0 && ramCost  < bestCost && ramCost  <= remaining) { bestCost = ramCost;  bestAction = () => { hn.upgradeRam(i, 1);   return ramCost; }; }
-      if (coreCost > 0 && coreCost < bestCost && coreCost <= remaining) { bestCost = coreCost; bestAction = () => { hn.upgradeCore(i, 1);  return coreCost; }; }
-    }
-
-    if (!bestAction) break;
-    spent += bestAction();
-  }
-}
-
-/**
- * Upgrade home RAM when comfortably affordable. Keeps the botnet growing and
- * gives the cloud managers a home to fall back to if cloud servers are tight.
- * @param {NS} ns
- */
-function maybeUpgradeHomeRam(ns) {
-  const s = ns.singularity;
-  const cost = s.getUpgradeHomeRamCost();
-  const money = playerMoney(ns);
-  if (cost <= 0 || !isFinite(cost)) return;
-  if (cost <= money * 0.4) s.upgradeHomeRam();
 }
 
 /** @param {NS} ns @param {any} target */
 async function maybeBuyInfra(ns, target) {
   const money = playerMoney(ns);
-
-  maybeSpendOnHacknet(ns);
 
   if (!target) {
     return await managePurchasedServers(ns, 10e6, 0.25);
@@ -824,8 +623,12 @@ export async function main(ns) {
     ensureHelper(ns, "/ui/dashboard.js");
     ensureHelper(ns, "/lib/stocks.js", { optional: true });
 
-    await backdoorTargets(ns);
-    maybeUpgradeHomeRam(ns);
+    // Off-home helpers that carry this daemon's heaviest calls (see their file
+    // headers): backdoors + BN-finish, and hacknet/home-RAM spending. backdoor.js
+    // gets the next BitNode forwarded (the driver launches us with no args, so
+    // this defaults to 1 - same as the old in-daemon behaviour).
+    ensureHelper(ns, BACKDOOR_SCRIPT, { args: [Number(ns.args[0] ?? 1), SELF] });
+    ensureHelper(ns, ECON_SCRIPT, { optional: true });
 
     globalThis.gordState = await decideNextPriority(ns);
     // Surface a fresh corp/gang creation event over the routine priority.
@@ -840,7 +643,6 @@ export async function main(ns) {
     globalThis.gordAugPipeline = getAllAugCandidates(ns).slice(0, 10);
 
     maybeInstall(ns);
-    await maybeFinishBN(ns);
 
     ns.print(
       `Money: ${ns.format.number(playerMoney(ns))} | Hack: ${hackingLevel(ns)} | Karma: ${(ns.getPlayer().karma ?? 0).toFixed(0)}`

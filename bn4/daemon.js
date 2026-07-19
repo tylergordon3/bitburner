@@ -1,4 +1,3 @@
-import { allServers, pathTo, root } from "../lib/net.js";
 import { managePurchasedServers } from "../lib/pserv.js";
 import {
   trainCombatIfNeeded,
@@ -17,166 +16,26 @@ import {
   getAllAugCandidates,
   getUnjoinedFactionOpportunities,
   FACTION_REQUIREMENTS,
-  shouldJoinCityFaction,
 } from "../lib/aug-targets.js";
+// Shared daemon core (identical across bn2/bn3/bn4) - see lib/daemon-lib.js.
+import {
+  playerMoney,
+  hackingLevel,
+  ensureHelper,
+  buyDarkweb,
+  rootEverything,
+  acceptInvites,
+  canBuyAug,
+  readLastResetTime,
+  writeResetTime,
+} from "../lib/daemon-lib.js";
 
-const PROGRAMS = [
-  "BruteSSH.exe",
-  "FTPCrack.exe",
-  "relaySMTP.exe",
-  "HTTPWorm.exe",
-  "SQLInject.exe",
-];
-
-const BACKDOOR_PRIORITY = [
-  "CSEC",
-  "avmnite-02h",
-  "I.I.I.I",
-  "run4theh111z",
-  "The-Cave",
-  "w0r1d_d43m0n",
-];
-
-const RESET_FILE = "/data/last-reset.txt";
-const RESET_AFTER_MS = 16 * 60 * 60 * 1_000; // 16 hours
-
-function playerMoney(ns) {
-  return ns.getPlayer().money ?? 0;
-}
-
-function hackingLevel(ns) {
-  return ns.getPlayer().skills?.hacking ?? ns.getHackingLevel();
-}
-
-/** @param {NS} ns @param {string} host */
-function freeRam(ns, host) {
-  return ns.getServerMaxRam(host) - ns.getServerUsedRam(host);
-}
-
-/**
- * Ensure a persistent helper is running SOMEWHERE with enough RAM - not just on
- * home. globalThis is shared across every host in Bitburner, so these helpers
- * work fine on any rooted server; running them off-home keeps scarce home RAM
- * for the daemon. We prefer the roomiest off-home host and only fall back to
- * home as a last resort. Warns (doesn't fail silently) when nothing has room,
- * unless { optional: true } is passed (luxury scripts wait quietly for RAM).
- * @param {NS} ns @param {string} script @param {{optional?: boolean}} [opts]
- */
-function ensureHelper(ns, script, opts = {}) {
-  // Already running anywhere (home included)? Leave it be.
-  if (allServers(ns).some(h => ns.hasRootAccess(h) && ns.scriptRunning(script, h))) return;
-
-  const ram = ns.getScriptRam(script, "home");
-  const reserved = globalThis.gordReservedHosts instanceof Set ? globalThis.gordReservedHosts : new Set();
-
-  // Roomiest rooted non-home host first; home last (keep it for the daemon).
-  const offHome = allServers(ns)
-    .filter(s => s !== "home" && ns.hasRootAccess(s) && ns.getServerMaxRam(s) > 0 && !reserved.has(s))
-    .sort((a, b) => freeRam(ns, b) - freeRam(ns, a));
-
-  for (const host of [...offHome, "home"]) {
-    const headroom = host === "home" ? 8 : 0; // leave room for the daemon's own work
-    if (freeRam(ns, host) - headroom < ram) continue;
-    // Copy every source file, not just the entry script: Bitburner resolves a
-    // script's imports from the host it runs on, so the whole module closure has
-    // to be present. Files cost no RAM, so shipping them all is simplest/safest.
-    if (host !== "home") ns.scp(ns.ls("home", ".js"), host, "home");
-    if (ns.exec(script, host, 1)) {
-      ns.print(`Started ${script} on ${host}`);
-      return;
-    }
-  }
-
-  if (!opts.optional) {
-    ns.print(`WARN: no host has ${ns.format.ram(ram)} free for ${script} (home ${ns.format.ram(freeRam(ns, "home"))} free)`);
-  }
-}
-
-/** @param {NS} ns */
-async function buyDarkweb(ns) {
-  const s = ns.singularity;
-
-  if (!ns.hasTorRouter()) {
-    if (playerMoney(ns) >= 200_000) s.purchaseTor();
-    return;
-  }
-
-  for (const p of PROGRAMS) {
-    if (!ns.fileExists(p, "home")) {
-      const cost = s.getDarkwebProgramCost(/** @type {any} */ (p));
-      if (cost > 0 && playerMoney(ns) >= cost) s.purchaseProgram(/** @type {any} */ (p));
-    }
-  }
-}
-
-/** @param {NS} ns */
-function rootEverything(ns) {
-  for (const server of allServers(ns)) {
-    if (server !== "home") {
-      try { root(ns, server); } catch {}
-    }
-  }
-}
-
-/**
- * Accept all pending faction invites, except city factions we should defer
- * (see shouldJoinCityFaction) - joining one permanently bans its enemy city
- * factions for the rest of the run, so we don't want to burn that on a city
- * whose augs we already have while other city factions still have augs to give.
- * @param {NS} ns
- */
-async function acceptInvites(ns) {
-  for (const faction of ns.singularity.checkFactionInvitations()) {
-    if (!shouldJoinCityFaction(ns, faction)) continue;
-    ns.singularity.joinFaction(/** @type {any} */ (faction));
-  }
-}
-
-/** @param {NS} ns */
-async function backdoorTargets(ns) {
-  for (const server of BACKDOOR_PRIORITY) {
-    if (!ns.serverExists(server)) continue;
-    const info = ns.getServer(server);
-    if (info.backdoorInstalled) continue;
-    if (!ns.hasRootAccess(server)) continue;
-    if (hackingLevel(ns) < ns.getServerRequiredHackingLevel(server)) continue;
-
-    const path = pathTo(ns, server);
-    if (!path.length) continue;
-
-    ns.singularity.connect("home");
-    let connected = true;
-    for (const hop of path.slice(1)) {
-      if (!ns.singularity.connect(hop)) {
-        connected = false;
-        break;
-      }
-    }
-
-    if (!connected) {
-      ns.singularity.connect("home");
-      continue;
-    }
-
-    ns.tprint(`Installing backdoor on ${server}...`);
-    await ns.singularity.installBackdoor();
-    ns.singularity.connect("home");
-  }
-}
-
-/** @param {NS} ns */
-function canBuyAug(ns, faction, aug, owned) {
-  const s = ns.singularity;
-  if (owned.has(aug)) return false;
-
-  const prereqs = s.getAugmentationPrereq(aug);
-  if (!prereqs.every(a => owned.has(a))) return false;
-
-  return (
-    s.getFactionRep(/** @type {any} */ (faction)) >= s.getAugmentationRepReq(aug) &&
-    playerMoney(ns) >= s.getAugmentationPrice(aug)
-  );
-}
+// Off-home helper scripts (shared by every daemon) that keep this daemon's HOME
+// footprint small: each carries the expensive Singularity/Hacknet calls it needs,
+// and running them off-home means those never count against the daemon's RAM.
+const BACKDOOR_SCRIPT = "/lib/backdoor.js";   // server backdoors + finishing the BN
+const ECON_SCRIPT = "/lib/econ.js";           // hacknet + home-RAM spending
+const SELF = "/bn4/daemon.js";                // this daemon's path (post-reset callback)
 
 /** @param {NS} ns */
 function buyAugs(ns) {
@@ -245,22 +104,6 @@ function startBestFactionWork(ns, faction) {
 }
 
 /** @param {NS} ns */
-function readLastResetTime(ns) {
-  try {
-    const raw = ns.read(RESET_FILE);
-    const t = Number(raw);
-    return isNaN(t) ? 0 : t;
-  } catch {
-    return 0;
-  }
-}
-
-/** @param {NS} ns */
-function writeResetTime(ns) {
-  ns.write(RESET_FILE, String(Date.now()), "w");
-}
-
-/** @param {NS} ns */
 function maybeInstall(ns) {
   const ownedWithPurchased = ns.singularity.getOwnedAugmentations(true);
   const ownedInstalled = ns.singularity.getOwnedAugmentations(false);
@@ -306,80 +149,13 @@ function maybeInstall(ns) {
     }
 
     writeResetTime(ns);
-    ns.singularity.installAugmentations("/bn4/daemon.js");
-  }
-}
-
-/** @param {NS} ns */
-async function maybeFinishBN(ns) {
-  const target = "w0r1d_d43m0n";
-  if (!ns.serverExists(target)) return;
-
-  root(ns, target);
-
-  const server = ns.getServer(target);
-  if (!server.backdoorInstalled) return;
-  if (hackingLevel(ns) < ns.getServerRequiredHackingLevel(target)) return;
-
-  const nextBN = Number(ns.args[0] ?? 1);
-  ns.tprint(`Destroying w0r1d_d43m0n. Next BitNode: ${nextBN}`);
-  ns.singularity.destroyW0r1dD43m0n(nextBN, "/bn4/daemon.js");
-}
-
-/**
- * Fix #10: Buy/upgrade hacknet nodes cheaply during early game.
- * Past hacking level 200, purchased servers dominate and this becomes a no-op.
- * @param {NS} ns
- */
-function maybeSpendOnHacknet(ns) {
-  if (hackingLevel(ns) > 200) return;
-
-  const hn = ns.hacknet;
-  const totalBudget = playerMoney(ns) * 0.20;
-  if (totalBudget < 1_000) return;
-
-  let spent = 0;
-
-  // Loop until we've exhausted the budget or nothing is affordable
-  while (true) {
-    const remaining = totalBudget - spent;
-    if (remaining < 1_000) break;
-
-    const nodeCount = hn.numNodes();
-    let bestCost = Infinity;
-    let bestAction = null;
-
-    // Buy a new node if under cap
-    if (nodeCount < 8) {
-      const cost = hn.getPurchaseNodeCost();
-      if (cost > 0 && cost < bestCost && cost <= remaining) {
-        bestCost = cost;
-        bestAction = () => { hn.purchaseNode(); return cost; };
-      }
-    }
-
-    // Check all upgrades across existing nodes
-    for (let i = 0; i < nodeCount; i++) {
-      const lvlCost  = hn.getLevelUpgradeCost(i, 1);
-      const ramCost  = hn.getRamUpgradeCost(i, 1);
-      const coreCost = hn.getCoreUpgradeCost(i, 1);
-
-      if (lvlCost  > 0 && lvlCost  < bestCost && lvlCost  <= remaining) { bestCost = lvlCost;  bestAction = () => { hn.upgradeLevel(i, 1); return lvlCost; }; }
-      if (ramCost  > 0 && ramCost  < bestCost && ramCost  <= remaining) { bestCost = ramCost;  bestAction = () => { hn.upgradeRam(i, 1);   return ramCost; }; }
-      if (coreCost > 0 && coreCost < bestCost && coreCost <= remaining) { bestCost = coreCost; bestAction = () => { hn.upgradeCore(i, 1);  return coreCost; }; }
-    }
-
-    if (!bestAction) break;
-    spent += bestAction();
+    ns.singularity.installAugmentations(SELF);
   }
 }
 
 /** @param {NS} ns @param {any} target */
 async function maybeBuyInfra(ns, target) {
   const money = playerMoney(ns);
-
-  // Fix #10: spend on hacknet while hacking income is minimal
-  maybeSpendOnHacknet(ns);
 
   if (!target) {
     return await managePurchasedServers(ns, 10e6, 0.25);
@@ -616,7 +392,11 @@ export async function main(ns) {
     ensureHelper(ns, "/ui/dashboard.js");
     ensureHelper(ns, "/lib/stocks.js", { optional: true });
 
-    await backdoorTargets(ns);
+    // Off-home helpers carrying this daemon's heaviest calls: backdoors + BN-finish
+    // (backdoor.js gets the next BitNode + this daemon's path forwarded), and
+    // hacknet/home-RAM spending (econ.js).
+    ensureHelper(ns, BACKDOOR_SCRIPT, { args: [Number(ns.args[0] ?? 1), SELF] });
+    ensureHelper(ns, ECON_SCRIPT, { optional: true });
 
     globalThis.gordState = await decideNextPriority(ns);
 
@@ -629,7 +409,6 @@ export async function main(ns) {
     globalThis.gordAugPipeline = getAllAugCandidates(ns).slice(0, 10);
 
     maybeInstall(ns);
-    await maybeFinishBN(ns);
 
     ns.print(
       `Money: ${ns.format.number(playerMoney(ns))} | Hack: ${hackingLevel(ns)}`

@@ -4,7 +4,7 @@
 // (ui/dashboard.js) calls extraCards() for the current node and splices the
 // result into the layout below the Player/Goal row. BN3's defining mechanic is
 // the corporation, so we surface a CORP card fed by globalThis.gordCorpState
-// (published by lib/corp.js). Mirrors ui/bn2.js's gang card.
+// (published by lib/corp-steady.js). Mirrors ui/bn2.js's gang card.
 
 import { card, stat, label, progressBar, el } from "./dashboard-lib.js";
 
@@ -19,7 +19,7 @@ export function extraCards(ns, C) {
   const corp = corpCard(ns, C);
   if (corp) return [corp];
 
-  // Corp exists but lib/corp.js hasn't landed on a host yet (see the daemon's
+  // Corp exists but lib/corp-steady.js hasn't landed on a host yet (see the daemon's
   // ensureCloudManagers): show a placeholder so the card isn't just absent.
   if (globalThis.gordCorpPending) {
     return [card(C, "CORP", [
@@ -32,7 +32,7 @@ export function extraCards(ns, C) {
 }
 
 /**
- * Rendered only when lib/corp.js is running and publishing gordCorpState;
+ * Rendered only when lib/corp-steady.js is running and publishing gordCorpState;
  * returns null otherwise so nothing shows before the corp exists.
  * @param {NS} ns
  */
@@ -42,7 +42,7 @@ function corpCard(ns, C) {
 
   if (Date.now() - (s.updatedAt ?? 0) > 30_000) {
     return card(C, "CORP", [
-      el("div", { style: { color: C.dim, fontSize: "13px" } }, "corp.js not running"),
+      el("div", { style: { color: C.dim, fontSize: "13px" } }, "corp-steady.js not running"),
     ]);
   }
 
