@@ -15,8 +15,8 @@ import {
   getNextAugTarget,
   getAllAugCandidates,
   getUnjoinedFactionOpportunities,
-  FACTION_REQUIREMENTS,
 } from "../lib/aug-targets.js";
+import { forNode } from "../lib/config.js";
 // Shared daemon core (identical across bn2/bn3/bn4) - see lib/daemon-lib.js.
 import {
   playerMoney,
@@ -30,12 +30,18 @@ import {
   writeResetTime,
 } from "../lib/daemon-lib.js";
 
+// Every tunable value comes from lib/config.js, resolved for this BitNode (see
+// BITNODE there for the per-node overrides).
+const CFG = forNode(4);
+const AUGS = CFG.augs;
+const FACTION_REQUIREMENTS = CFG.factions.requirements;
+
 // Off-home helper scripts (shared by every daemon) that keep this daemon's HOME
 // footprint small: each carries the expensive Singularity/Hacknet calls it needs,
 // and running them off-home means those never count against the daemon's RAM.
-const BACKDOOR_SCRIPT = "/lib/backdoor.js";   // server backdoors + finishing the BN
-const ECON_SCRIPT = "/lib/econ.js";           // hacknet + home-RAM spending
-const SELF = "/bn4/daemon.js";                // this daemon's path (post-reset callback)
+const BACKDOOR_SCRIPT = CFG.paths.backdoor;   // server backdoors + finishing the BN
+const ECON_SCRIPT = CFG.paths.econ;           // hacknet + home-RAM spending
+const SELF = CFG.paths.daemon;                // this daemon's path (post-reset callback)
 
 /** @param {NS} ns */
 function buyAugs(ns) {
@@ -61,8 +67,8 @@ function buyAugs(ns) {
 
   // Buy cheapest first; NeuroFlux Governor always last.
   candidates.sort((a, b) => {
-    const aNFG = a.aug === "NeuroFlux Governor" ? 1 : 0;
-    const bNFG = b.aug === "NeuroFlux Governor" ? 1 : 0;
+    const aNFG = a.aug === AUGS.neuroFlux ? 1 : 0;
+    const bNFG = b.aug === AUGS.neuroFlux ? 1 : 0;
     if (aNFG !== bNFG) return aNFG - bNFG;
     return a.price - b.price;
   });
@@ -79,17 +85,11 @@ function buyAugs(ns) {
   return purchases;
 }
 
-const INSTALL_PRIORITY_AUGS = [
-  "BitWire",
-  "Neuralstimulator",
-  "Neural-Retention Enhancement",
-  "CashRoot Starter Kit",
-  "Hacknet Node CPU Architecture Neural-Upload",
-];
+const INSTALL_PRIORITY_AUGS = AUGS.installPriority;
 
 /** @param {NS} ns */
 function startBestFactionWork(ns, faction) {
-  const types = ["hacking", "field", "security"];
+  const types = CFG.player.factionWorkTypes;
 
   for (const type of types) {
     const ok = ns.singularity.workForFaction(
@@ -109,7 +109,7 @@ function maybeInstall(ns) {
   const ownedInstalled = ns.singularity.getOwnedAugmentations(false);
   const queued = ownedWithPurchased.length - ownedInstalled.length;
 
-  const hasRedPill = ownedWithPurchased.includes("The Red Pill");
+  const hasRedPill = ownedWithPurchased.includes(AUGS.redPill);
   const hasPriorityAug = INSTALL_PRIORITY_AUGS.some(
     a => ownedWithPurchased.includes(a) && !ownedInstalled.includes(a)
   );
@@ -117,15 +117,15 @@ function maybeInstall(ns) {
   // All priority augs already installed — any single new aug is worth a reset
   // (price multiplier resets, so next aug is cheaper to sequence from scratch).
   const allPriorityDone = INSTALL_PRIORITY_AUGS.every(a => ownedInstalled.includes(a));
-  const aggressiveInstall = allPriorityDone && queued >= 1;
+  const aggressiveInstall = allPriorityDone && queued >= AUGS.install.minQueued;
 
   const lastReset = readLastResetTime(ns);
   const elapsed = Date.now() - lastReset;
   // Reduced from 16h → 8h: late-game aug prices compound fast, sooner resets win
-  const TIME_TRIGGER_MS = 8 * 60 * 60 * 1_000;
-  const timeTriggered = queued >= 1 && elapsed >= TIME_TRIGGER_MS;
+  const TIME_TRIGGER_MS = AUGS.install.timeTriggerMs;
+  const timeTriggered = queued >= AUGS.install.minQueued && elapsed >= TIME_TRIGGER_MS;
 
-  if (hasRedPill || queued >= 5 || (queued >= 2 && hasPriorityAug) || aggressiveInstall || timeTriggered) {
+  if (hasRedPill || queued >= AUGS.install.queuedThreshold || (queued >= AUGS.install.priorityQueuedThreshold && hasPriorityAug) || aggressiveInstall || timeTriggered) {
     if (timeTriggered) {
       const hours = (elapsed / 3_600_000).toFixed(1);
       ns.tprint(`Time-triggered install after ${hours}h with ${queued} aug(s) queued.`);
@@ -137,14 +137,14 @@ function maybeInstall(ns) {
     // Dump remaining cash into NeuroFlux Governor right before resetting.
     const s = ns.singularity;
     const nfgFaction = (ns.getPlayer().factions ?? []).find(f =>
-      s.getFactionRep(/** @type {any} */ (f)) >= s.getAugmentationRepReq("NeuroFlux Governor")
+      s.getFactionRep(/** @type {any} */ (f)) >= s.getAugmentationRepReq(AUGS.neuroFlux)
     ) ?? null;
     if (nfgFaction) {
       let bought = true;
       while (bought) {
-        const price = s.getAugmentationPrice("NeuroFlux Governor");
+        const price = s.getAugmentationPrice(AUGS.neuroFlux);
         if (playerMoney(ns) < price) break;
-        bought = s.purchaseAugmentation(/** @type {any} */ (nfgFaction), "NeuroFlux Governor");
+        bought = s.purchaseAugmentation(/** @type {any} */ (nfgFaction), AUGS.neuroFlux);
       }
     }
 
@@ -158,24 +158,24 @@ async function maybeBuyInfra(ns, target) {
   const money = playerMoney(ns);
 
   if (!target) {
-    return await managePurchasedServers(ns, 10e6, 0.25);
+    return await managePurchasedServers(ns, CFG.infra.noTarget.reserveMoney, CFG.infra.noTarget.spendFraction);
   }
 
   const { price, moneyMissing = 0, repMissing = 0 } = target;
 
   if (repMissing > 0) {
-    const hardCap = money > price ? money - price : money * 0.05;
-    return await managePurchasedServers(ns, 50e6, 0.10, hardCap);
+    const hardCap = money > price ? money - price : money * CFG.infra.repPending.fallbackCapFraction;
+    return await managePurchasedServers(ns, CFG.infra.repPending.reserveMoney, CFG.infra.repPending.spendFraction, hardCap);
   }
 
-  const tinyBudget = moneyMissing * 0.05;
-  if (tinyBudget < 1e6) {
+  const tinyBudget = moneyMissing * CFG.infra.savingBudgetFraction;
+  if (tinyBudget < CFG.infra.minBudget) {
     return {
       action: "Saving for Aug",
       detail: `${target.aug}: need $${ns.format.number(moneyMissing)}`,
     };
   }
-  return await managePurchasedServers(ns, price, 0.05, tinyBudget);
+  return await managePurchasedServers(ns, price, CFG.infra.savingSpendFraction, tinyBudget);
 }
 
 /**
@@ -201,7 +201,7 @@ function maybeDoSecondaryFactionWork(ns, primaryFaction) {
     const currentRep = s.getFactionRep(/** @type {any} */ (factionName));
 
     const hasUsefulWork = augs.some(aug => {
-      if (aug === "NeuroFlux Governor") return false;
+      if (aug === AUGS.neuroFlux) return false;
       if (owned.has(aug)) return false;
       const prereqs = s.getAugmentationPrereq(aug);
       if (!prereqs.every(a => owned.has(a))) return false;
@@ -300,7 +300,7 @@ async function decideNextPriority(ns) {
         const owned = new Set(s.getOwnedAugmentations(true));
         const currentRep = s.getFactionRep(/** @type {any} */ (target.faction));
         return s.getAugmentationsFromFaction(/** @type {any} */ (target.faction)).some(aug => {
-          if (aug === "NeuroFlux Governor") return false;
+          if (aug === AUGS.neuroFlux) return false;
           if (owned.has(aug)) return false;
           if (aug === target.aug) return false;
           return s.getAugmentationRepReq(aug) > currentRep;
@@ -388,14 +388,14 @@ export async function main(ns) {
 
     // Launch helpers off-home when possible (keeps scarce home RAM for the
     // daemon). Income manager first, then UI/luxury scripts.
-    ensureHelper(ns, "/hacking/manager.js");
-    ensureHelper(ns, "/ui/dashboard.js");
-    ensureHelper(ns, "/lib/stocks.js", { optional: true });
+    ensureHelper(ns, CFG.paths.manager);
+    ensureHelper(ns, CFG.paths.dashboard);
+    ensureHelper(ns, CFG.paths.stocks, { optional: true });
 
     // Off-home helpers carrying this daemon's heaviest calls: backdoors + BN-finish
     // (backdoor.js gets the next BitNode + this daemon's path forwarded), and
     // hacknet/home-RAM spending (econ.js).
-    ensureHelper(ns, BACKDOOR_SCRIPT, { args: [Number(ns.args[0] ?? 1), SELF] });
+    ensureHelper(ns, BACKDOOR_SCRIPT, { args: [Number(ns.args[0] ?? CFG.backdoor.defaultNextBN), SELF] });
     ensureHelper(ns, ECON_SCRIPT, { optional: true });
 
     globalThis.gordState = await decideNextPriority(ns);
@@ -406,13 +406,13 @@ export async function main(ns) {
     }
 
     // Expose the full sorted candidate list for the dashboard's "pipeline" view.
-    globalThis.gordAugPipeline = getAllAugCandidates(ns).slice(0, 10);
+    globalThis.gordAugPipeline = getAllAugCandidates(ns).slice(0, AUGS.pipelineSize);
 
     maybeInstall(ns);
 
     ns.print(
       `Money: ${ns.format.number(playerMoney(ns))} | Hack: ${hackingLevel(ns)}`
     );
-    await ns.sleep(15_000);
+    await ns.sleep(CFG.daemon.tickMs);
   }
 }

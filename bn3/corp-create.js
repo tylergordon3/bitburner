@@ -10,7 +10,9 @@
 // case where seed funding is blocked. Mirrors how the corp's day-to-day play
 // lives in its own scripts (lib/corp-steady.js / lib/corp-build.js).
 
-const CORP_NAME = "GordCorp";
+import { CONFIG } from "../lib/config.js";
+
+const CORP_NAME = CONFIG.corp.name;
 
 /** @param {NS} ns */
 export async function main(ns) {
@@ -25,7 +27,7 @@ export async function main(ns) {
   }
 
   const money = ns.getPlayer().money ?? 0;
-  if (c.canCreateCorporation(true) === "Success" && money >= 150e9) {
+  if (c.canCreateCorporation(true) === "Success" && money >= CONFIG.corp.selfFundCost) {
     if (c.createCorporation(CORP_NAME, true)) {
       ns.tprint(`Created corporation ${CORP_NAME} (self funded).`);
     }

@@ -6,17 +6,12 @@
 // palette. Nothing here touches Singularity or costs RAM beyond the base
 // script size - these are pure React element builders.
 
+import { CONFIG } from "../lib/config.js";
+
 // ── Palette ────────────────────────────────────────────────────────────────
-export const COLORS = {
-  green:   "#4ade80",
-  yellow:  "#facc15",
-  red:     "#f87171",
-  blue:    "#60a5fa",
-  purple:  "#c084fc",
-  dim:     "rgba(255,255,255,0.45)",
-  border:  "rgba(255,255,255,0.10)",
-  cardBg:  "rgba(255,255,255,0.03)",
-};
+// Defined in CONFIG.ui.colors; re-exported here so every card builder can keep
+// taking a `C` palette argument.
+export const COLORS = CONFIG.ui.colors;
 
 // ── UI primitives ────────────────────────────────────────────────────────────
 

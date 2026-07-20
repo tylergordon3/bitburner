@@ -10,25 +10,15 @@
 // room for it. It does NOT import lib/aug-targets.js on purpose: importing it
 // would pull that module's many Singularity calls into this script's RAM cost
 // for no benefit here. (At SF4.3 Singularity RAM is 1x; at lower SF4 levels it's
-// 4x/16x, which would make even this lean driver much heavier.)
+// 4x/16x, which would make even this lean driver much heavier.) lib/config.js is
+// safe to import by contrast - it has no Netscript calls at all.
 
 import { allServers, root } from "../lib/net.js";
+import { CONFIG, forNode } from "../lib/config.js";
 
-const MANAGER = "/hacking/manager.js";
-const WORKER = "/early/worker.js";
-const GANG_BOOT = "/early/gang-boot.js";
-const DASHBOARD = "/ui/dashboard.js";
-const STOCKS = "/lib/stocks.js";
-const HACK = "/hacking/hack.js";
-const GROW = "/hacking/grow.js";
-const WEAKEN = "/hacking/weaken.js";
-
-// Free RAM the daemon needs on home on top of its own script size: enough for
-// the botnet workers it spawns plus a little slack. The dashboard/stocks/manager
-// script sizes are added on top of this dynamically (see requiredHomeRam).
-const WORKER_HEADROOM = 8;
-
-const HOME = "home";
+const P = CONFIG.paths;
+const D = CONFIG.driver;
+const HOME = P.home;
 
 /** @param {NS} ns @param {string} file */
 function scriptRamSafe(ns, file) {
@@ -49,7 +39,7 @@ function scriptRamSafe(ns, file) {
  * @param {NS} ns @param {string} daemon
  */
 function requiredHomeRam(ns, daemon) {
-  return scriptRamSafe(ns, daemon) + WORKER_HEADROOM;
+  return scriptRamSafe(ns, daemon) + D.workerHeadroom;
 }
 
 /** @param {NS} ns */
@@ -64,25 +54,28 @@ function homeFreeRam(ns) {
  * @param {NS} ns
  */
 function ensureMoneyEngine(ns) {
-  if (ns.fileExists(MANAGER, HOME)) {
-    if (!ns.scriptRunning(MANAGER, HOME)) ns.run(MANAGER, 1);
+  if (ns.fileExists(P.manager, HOME)) {
+    if (!ns.scriptRunning(P.manager, HOME)) ns.run(P.manager, 1);
     return;
   }
 
   // Fallback: root everything and fill each server with worker.js threads.
-  const workerRam = scriptRamSafe(ns, WORKER) || 2.5;
+  const workerRam = scriptRamSafe(ns, P.worker) || D.fallbackWorkerRam;
   for (const server of allServers(ns)) {
     try { root(ns, server); } catch {}
     if (!ns.hasRootAccess(server)) continue;
-    if (ns.scriptRunning(WORKER, server)) continue;
+    if (ns.scriptRunning(P.worker, server)) continue;
 
-    const reserve = server === HOME ? WORKER_HEADROOM : 0;
+    const reserve = server === HOME ? D.workerHeadroom : 0;
     const free = ns.getServerMaxRam(server) - ns.getServerUsedRam(server) - reserve;
     const threads = Math.floor(free / workerRam);
     if (threads <= 0) continue;
 
-    if (server !== HOME) ns.scp(WORKER, server, HOME);
-    ns.exec(WORKER, server, threads);
+    // Copy every source file, not just worker.js: Bitburner resolves a script's
+    // imports from the host it runs on, and worker.js imports lib/config.js.
+    // Files cost no RAM, so shipping them all is simplest and safest.
+    if (server !== HOME) ns.scp(ns.ls(HOME, ".js"), server, HOME);
+    ns.exec(P.worker, server, threads);
   }
 }
 
@@ -92,15 +85,15 @@ function ensureMoneyEngine(ns) {
  * @param {NS} ns
  */
 function stopMoneyEngine(ns) {
-  ns.scriptKill(MANAGER, HOME);
-  ns.scriptKill(WORKER, HOME);
-  ns.scriptKill(GANG_BOOT, HOME);
-  ns.scriptKill("/startup.js", HOME);
+  ns.scriptKill(P.manager, HOME);
+  ns.scriptKill(P.worker, HOME);
+  ns.scriptKill(P.gangBoot, HOME);
+  ns.scriptKill(P.legacyStartup, HOME);
 
   for (const server of allServers(ns)) {
     if (!ns.hasRootAccess(server)) continue;
     for (const p of ns.ps(server)) {
-      if ([HACK, GROW, WEAKEN, WORKER].includes(p.filename)) ns.kill(p.pid);
+      if ([P.hack, P.grow, P.weaken, P.worker].includes(p.filename)) ns.kill(p.pid);
     }
   }
 }
@@ -119,18 +112,21 @@ function inGangSafe(ns) {
  * too big to share a fresh 32GB home with the botnet, so we only launch it once
  * home has grown enough to hold it alongside the manager, and we briefly clear
  * the botnet to make room (ensureMoneyEngine restarts it next tick, adapting to
- * the RAM gang-boot now holds). BN2-only: gang creation elsewhere needs karma
- * <= -54000, which this bootstrap doesn't pursue.
+ * the RAM gang-boot now holds).
+ *
+ * Only nodes whose config names a bootstrap gang faction (see BITNODE in
+ * lib/config.js - BN2 only today) can do this: everywhere else founding a gang
+ * needs karma <= -54,000, which this bootstrap doesn't pursue.
  * @param {NS} ns @param {number} node
  */
 function maybeStartGang(ns, node) {
-  if (node !== 2) return;
-  if (!ns.fileExists(GANG_BOOT, HOME)) return;
-  if (ns.scriptRunning(GANG_BOOT, HOME)) return;
+  if (!forNode(node).gang.faction) return;
+  if (!ns.fileExists(P.gangBoot, HOME)) return;
+  if (ns.scriptRunning(P.gangBoot, HOME)) return;
   if (inGangSafe(ns)) return;
 
-  const bootRam = scriptRamSafe(ns, GANG_BOOT);
-  const gate = bootRam + scriptRamSafe(ns, MANAGER) + WORKER_HEADROOM;
+  const bootRam = scriptRamSafe(ns, P.gangBoot);
+  const gate = bootRam + scriptRamSafe(ns, P.manager) + D.workerHeadroom;
   if (ns.getServerMaxRam(HOME) < gate) return;
 
   // Botnet workers hog home, so clear them to make room; the botnet restarts
@@ -139,8 +135,8 @@ function maybeStartGang(ns, node) {
   if (homeFreeRam(ns) < bootRam) stopMoneyEngine(ns);
   if (homeFreeRam(ns) < bootRam) return;
 
-  if (ns.exec(GANG_BOOT, HOME, 1) !== 0) {
-    ns.tprint(`Launched ${GANG_BOOT} (${ns.format.ram(bootRam)}) - starting the gang early.`);
+  if (ns.exec(P.gangBoot, HOME, 1) !== 0) {
+    ns.tprint(`Launched ${P.gangBoot} (${ns.format.ram(bootRam)}) - starting the gang early.`);
   }
 }
 
@@ -149,13 +145,15 @@ export async function main(ns) {
   ns.disableLog("ALL");
 
   const node = ns.getResetInfo().currentNode;
-  let daemon = `/bn${node}/daemon.js`;
+  // Registered nodes get their daemon path from config; anything else still
+  // resolves by convention so a new bnX/ folder works without a config edit.
+  let daemon = forNode(node).paths.daemon ?? `/bn${node}/daemon.js`;
 
   if (!ns.fileExists(daemon, HOME)) {
     ns.tprint(`WARN: ${daemon} not found for BitNode ${node}.`);
     // Fall back to the BN4 daemon if it exists, else just keep earning so the
     // player can drop in a daemon and let this pick it up.
-    daemon = ns.fileExists("/bn4/daemon.js", HOME) ? "/bn4/daemon.js" : daemon;
+    daemon = ns.fileExists(D.fallbackDaemon, HOME) ? D.fallbackDaemon : daemon;
     ns.tprint(daemon.startsWith(`/bn${node}`) ? "No daemon to hand off to - earning until one exists." : `Falling back to ${daemon}.`);
   }
 
@@ -193,6 +191,6 @@ export async function main(ns) {
       `free ${ns.format.ram(homeFreeRam(ns))} | $${ns.format.number(ns.getServerMoneyAvailable(HOME))}`
     );
 
-    await ns.sleep(15_000);
+    await ns.sleep(D.tickMs);
   }
 }

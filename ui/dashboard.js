@@ -6,7 +6,7 @@
 // create ui/bn<N>.js exporting extraCards(ns, C) and register it below - see
 // ui/bn2.js (gang card) for the pattern.
 
-import { FACTION_REQUIREMENTS } from "../lib/aug-targets.js";
+import { CONFIG } from "../lib/config.js";
 import { COLORS, el, card, label, progressBar, stat, statRow, formatDuration } from "./dashboard-lib.js";
 import { extraCards as bn2ExtraCards } from "./bn2.js";
 import { extraCards as bn3ExtraCards } from "./bn3.js";
@@ -33,42 +33,26 @@ function bnExtraCards(ns, C, node) {
   }
 }
 
-const FINAL_HOST = "w0r1d_d43m0n";
+// Everything below comes from CONFIG.ui / CONFIG.factions - see lib/config.js.
+const UI = CONFIG.ui;
+const FACTION_REQUIREMENTS = CONFIG.factions.requirements;
+
+const FINAL_HOST = CONFIG.backdoor.finalHost;
 
 // DOM id on the dashboard's root element, used to measure content height for
 // dynamic tail sizing (see fitTail).
-const DASH_ID = "gordnet-dash";
+const DASH_ID = UI.rootId;
 
 // Combat stats and their gate thresholds, derived from every combat-gated
 // faction requirement (Slum Snakes, Tetrads, Speakers for the Dead, etc.) so
 // the player card can show how close we are to full gang/combat eligibility.
-const COMBAT_STAT_DEFS = [
-  { key: "strength",  label: "STR" },
-  { key: "defense",   label: "DEF" },
-  { key: "dexterity", label: "DEX" },
-  { key: "agility",   label: "AGI" },
-];
+const COMBAT_STAT_DEFS = UI.combatStats;
 
 // Servers that need backdoors for faction access / BN progression
-const BACKDOOR_CHECKLIST = [
-  { server: "CSEC",          label: "CyberSec"    },
-  { server: "avmnite-02h",   label: "NiteSec"     },
-  { server: "I.I.I.I",      label: "The Black Hand" },
-  { server: "run4theh111z",  label: "BitRunners"  },
-  { server: "The-Cave",      label: "The Cave" },
-  { server: "w0r1d_d43m0n", label: "World Daemon" },
-];
+const BACKDOOR_CHECKLIST = UI.backdoorChecklist;
 
 // Factions worth joining for aug access — shown as joined ✓ / pending ✗
-const FACTION_CHECKLIST = [
-  "CyberSec",
-  "NiteSec",
-  "The Black Hand",
-  "BitRunners",
-  "Daedalus",
-  "Illuminati",
-  "The Covenant",
-];
+const FACTION_CHECKLIST = UI.factionChecklist;
 
 // ── Trend state ─────────────────────────────────────────────────────────────
 let lastHackLevel = 0;
@@ -92,7 +76,7 @@ let ramPerHour   = 0;
 export async function main(ns) {
   ns.disableLog("ALL");
   ns.ui.openTail();
-  ns.ui.moveTail(20, 0);
+  ns.ui.moveTail(UI.tail.x, UI.tail.y);
 
   const currentNode = ns.getResetInfo().currentNode;
 
@@ -125,7 +109,7 @@ export async function main(ns) {
       combat, augsOwned, currentNode,
     });
 
-    await ns.sleep(5_000);
+    await ns.sleep(UI.refreshMs);
   }
 }
 
@@ -522,9 +506,9 @@ function renderDashboard(ns, data) {
 // Width is fixed to what the card layout was designed for; height tracks the
 // rendered content so every card (gang, stocks, pipelines) is fully visible
 // regardless of which BitNode we're in or how many pipeline rows there are.
-const DASH_WIDTH = 900;
-const DASH_MIN_H = 200;
-const DASH_MAX_H = 2000;
+const DASH_WIDTH = UI.tail.width;
+const DASH_MIN_H = UI.tail.minHeight;
+const DASH_MAX_H = UI.tail.maxHeight;
 
 /**
  * Size the tail window to fit the rendered dashboard. Measures the actual DOM
@@ -552,13 +536,11 @@ function fitTail(ns) {
 
 // ── Data helpers ─────────────────────────────────────────────────────────────
 
-const ROOTING_PROGRAMS = [
-  { name: "BruteSSH.exe",  label: "BruteSSH"  },
-  { name: "FTPCrack.exe",  label: "FTPCrack"  },
-  { name: "relaySMTP.exe", label: "relaySMTP" },
-  { name: "HTTPWorm.exe",  label: "HTTPWorm"  },
-  { name: "SQLInject.exe", label: "SQLInject" },
-];
+// The 5 port openers, labelled by filename minus the .exe.
+const ROOTING_PROGRAMS = CONFIG.programs.portOpeners.map(name => ({
+  name,
+  label: name.replace(/\.exe$/, ""),
+}));
 
 /** @param {NS} ns */
 function getNetworkStatus(ns) {
@@ -614,7 +596,7 @@ function getCombatStats(ns) {
       label,
       have,
       met:   need > 0 && have >= need,
-      close: need > 0 && have < need && need - have <= 50,
+      close: need > 0 && have < need && need - have <= UI.closeStatGap,
     };
   });
 }
@@ -749,7 +731,7 @@ function getAugQueueInfo(ns) {
   const installed     = ns.singularity.getOwnedAugmentations(false);
   const queued        = withPurchased.length - installed.length;
 
-  const hasRedPill = withPurchased.includes("The Red Pill") && !installed.includes("The Red Pill");
+  const hasRedPill = withPurchased.includes(CONFIG.augs.redPill) && !installed.includes(CONFIG.augs.redPill);
 
   const urgency        = hasRedPill ? "high" : queued >= 5 ? "medium" : "low";
   const recommendation = hasRedPill         ? "[!!] Install now - Red Pill queued!"

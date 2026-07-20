@@ -1,21 +1,16 @@
 import { allServers, root } from "../lib/net.js";
+import { CONFIG } from "../lib/config.js";
 
-const HACK = "/hacking/hack.js";
-const GROW = "/hacking/grow.js";
-const WEAKEN = "/hacking/weaken.js";
-
-const SECURITY_PER_HACK = 0.002;
-const SECURITY_PER_GROW = 0.004;
-const WEAKEN_AMOUNT = 0.05;
-
-const BATCH_SPACING = 200;
-const MONEY_FRACTION = 0.1;
-const RESERVE_HOME_RAM = 8;
+const H = CONFIG.hacking;
+const HOME = CONFIG.paths.home;
+const HACK = CONFIG.paths.hack;
+const GROW = CONFIG.paths.grow;
+const WEAKEN = CONFIG.paths.weaken;
 
 // Cached once at startup — avoids repeated getScriptRam() calls in the sizing hot path
-let _hackRam   = 1.7;
-let _growRam   = 1.7;
-let _weakenRam = 1.75;
+let _hackRam   = H.fallbackRam.hack;
+let _growRam   = H.fallbackRam.grow;
+let _weakenRam = H.fallbackRam.weaken;
 
 /**
  * Per-host RAM (GB) the node daemon wants kept free on a SHARED host, published
@@ -35,7 +30,7 @@ function usableRam(ns, server) {
   const used = ns.getServerUsedRam(server);
 
   let reserve = reservedRamFor(server);
-  if (server === "home") reserve += RESERVE_HOME_RAM;
+  if (server === HOME) reserve += H.reserveHomeRam;
 
   return Math.max(0, max - used - reserve);
 }
@@ -67,7 +62,7 @@ function validTargets(ns) {
     .filter(s => ns.hasRootAccess(s))
     .filter(s => ns.getServerMaxMoney(s) > 0)
     .filter(s => ns.getServerRequiredHackingLevel(s) <= hacking)
-    .filter(s => !s.startsWith("hacknet-server"));
+    .filter(s => !s.startsWith(H.excludeTargetPrefix));
 }
 
 /** @param {NS} ns */
@@ -85,14 +80,14 @@ function targetScore(ns, server) {
 function bestTarget(ns) {
   const targets = validTargets(ns);
   targets.sort((a, b) => targetScore(ns, b) - targetScore(ns, a));
-  return targets[0] ?? "n00dles";
+  return targets[0] ?? H.defaultTarget;
 }
 
 /** @param {NS} ns */
 async function copyScripts(ns) {
   for (const server of rootedWorkers(ns)) {
-    if (server !== "home") {
-      await ns.scp([HACK, GROW, WEAKEN], server, "home");
+    if (server !== HOME) {
+      await ns.scp([HACK, GROW, WEAKEN], server, HOME);
     }
   }
 }
@@ -106,11 +101,11 @@ function calcBatch(ns, target, moneyFraction) {
   const growMultiplier = 1 / Math.max(0.01, 1 - hackedFraction);
   const growThreads = Math.max(1, Math.ceil(ns.growthAnalyze(target, growMultiplier)));
 
-  const hackSec = hackThreads * SECURITY_PER_HACK;
-  const growSec = growThreads * SECURITY_PER_GROW;
+  const hackSec = hackThreads * H.securityPerHack;
+  const growSec = growThreads * H.securityPerGrow;
 
-  const weaken1Threads = Math.max(1, Math.ceil(hackSec / WEAKEN_AMOUNT));
-  const weaken2Threads = Math.max(1, Math.ceil(growSec / WEAKEN_AMOUNT));
+  const weaken1Threads = Math.max(1, Math.ceil(hackSec / H.weakenAmount));
+  const weaken2Threads = Math.max(1, Math.ceil(growSec / H.weakenAmount));
 
   const ram =
     hackThreads * _hackRam +
@@ -137,22 +132,15 @@ function calcBestFitBatch(ns, target) {
   const bestFreeRam = rootedWorkers(ns)
     .reduce((sum, s) => sum + usableRam(ns, s), 0);
 
-  const fractions = [
-    0.10,
-    0.05,
-    0.025,
-    0.01,
-    0.005,
-    0.0025,
-    0.001,
-  ];
+  const fractions = H.moneyFractions;
 
   for (const fraction of fractions) {
     const batch = calcBatch(ns, target, fraction);
     if (batch.ram <= bestFreeRam) return batch;
   }
 
-  return calcBatch(ns, target, 0.001);
+  // Nothing fits - fall back to the smallest bite we're willing to take.
+  return calcBatch(ns, target, fractions[fractions.length - 1]);
 }
 
 /** @param {NS} ns */
@@ -195,8 +183,8 @@ async function prep(ns, target) {
     const sec = ns.getServerSecurityLevel(target);
     const minSec = ns.getServerMinSecurityLevel(target);
 
-    const needsWeaken = sec > minSec + 5;
-    const needsGrow = money < maxMoney * 0.95;
+    const needsWeaken = sec > minSec + H.prepSecurityTolerance;
+    const needsGrow = money < maxMoney * H.prepMoneyThreshold;
 
     if (!needsWeaken && !needsGrow) return;
 
@@ -207,7 +195,7 @@ async function prep(ns, target) {
     const totalFreeRam = workers.reduce((sum, h) => sum + usableRam(ns, h), 0);
     const totalThreads = Math.floor(totalFreeRam / _weakenRam); // same RAM cost for both
     const exactWeakenNeeded = needsWeaken
-      ? Math.ceil((sec - minSec) / WEAKEN_AMOUNT)
+      ? Math.ceil((sec - minSec) / H.weakenAmount)
       : 0;
     const weakenAlloc = Math.min(exactWeakenNeeded, totalThreads);
     const growAlloc   = needsGrow ? Math.max(0, totalThreads - weakenAlloc) : 0;
@@ -242,7 +230,7 @@ async function prep(ns, target) {
       security: sec,
       minSecurity: minSec,
     };
-    await ns.sleep(wait + 1_000);
+    await ns.sleep(wait + H.prepSleepPadMs);
   }
 }
 
@@ -264,10 +252,10 @@ function launchBatch(ns, batch, batchId) {
   if (totalFreeRam < batch.ram) return false;
 
   // Target landing order: H, W1, G, W2 at t+0, t+200, t+400, t+600
-  const hackDelay    = Math.max(0, weakenTime - hackTime   - BATCH_SPACING * 2);
+  const hackDelay    = Math.max(0, weakenTime - hackTime   - H.batchSpacingMs * 2);
   const weaken1Delay = 0;                                               // lands at weakenTime
-  const growDelay    = Math.max(0, weakenTime - growTime   + BATCH_SPACING * 2);
-  const weaken2Delay = BATCH_SPACING * 3;                               // lands last at weakenTime+600
+  const growDelay    = Math.max(0, weakenTime - growTime   + H.batchSpacingMs * 2);
+  const weaken2Delay = H.batchSpacingMs * 3;                            // lands last at weakenTime+600
 
   const tag = `batch-${batchId}`;
 
@@ -330,7 +318,7 @@ export async function main(ns) {
 
     const sortedTargets = validTargets(ns);
     sortedTargets.sort((a, b) => targetScore(ns, b) - targetScore(ns, a));
-    const target = sortedTargets[0] ?? "n00dles";
+    const target = sortedTargets[0] ?? H.defaultTarget;
 
     if (target !== currentTarget) {
       currentTarget = target;
@@ -353,7 +341,7 @@ export async function main(ns) {
         target,
         ramNeeded: batch.ram,
       };
-      await ns.sleep(2_000);
+      await ns.sleep(H.waitForRamMs);
       continue;
     }
 
@@ -369,13 +357,13 @@ export async function main(ns) {
         const maxMoney2 = ns.getServerMaxMoney(secondTarget);
         const sec2      = ns.getServerSecurityLevel(secondTarget);
         const minSec2   = ns.getServerMinSecurityLevel(secondTarget);
-        const ready2    = sec2 <= minSec2 + 5 && money2 >= maxMoney2 * 0.95;
+        const ready2    = sec2 <= minSec2 + H.prepSecurityTolerance && money2 >= maxMoney2 * H.prepMoneyThreshold;
         if (ready2) {
           launchBatch(ns, secondBatch, batchId++);
         }
       }
     }
 
-    await ns.sleep(BATCH_SPACING);
+    await ns.sleep(H.batchSpacingMs);
   }
 }

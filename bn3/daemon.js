@@ -38,8 +38,8 @@ import {
   getNextAugTarget,
   getAllAugCandidates,
   getUnjoinedFactionOpportunities,
-  FACTION_REQUIREMENTS,
 } from "../lib/aug-targets.js";
+import { forNode } from "../lib/config.js";
 // Shared daemon core (identical across bn2/bn3/bn4) - see lib/daemon-lib.js.
 import {
   playerMoney,
@@ -54,41 +54,44 @@ import {
   writeResetTime,
 } from "../lib/daemon-lib.js";
 
+// Every tunable value comes from lib/config.js, resolved for BitNode 3. BN3 has
+// no gang shortcut, so gang.karma keeps CONFIG's universal -54,000 gate (see
+// BITNODE in lib/config.js).
+const CFG = forNode(3);
+const AUGS = CFG.augs;
+const GANG = CFG.gang;
+const CORP = CFG.corp;
+const FACTION_REQUIREMENTS = CFG.factions.requirements;
+
 // Off-home helper scripts (shared by every daemon) that keep this daemon's HOME
 // footprint small: each carries the expensive Singularity/Hacknet calls it needs,
 // and running them off-home means those never count against the daemon's RAM.
-const BACKDOOR_SCRIPT = "/lib/backdoor.js";   // server backdoors + finishing the BN
-const ECON_SCRIPT = "/lib/econ.js";           // hacknet + home-RAM spending
-const CORP_CREATE_SCRIPT = "/bn3/corp-create.js"; // one-shot corporation creation (BN3-only)
-const SELF = "/bn3/daemon.js";                // this daemon's path (post-reset callback)
+const BACKDOOR_SCRIPT = CFG.paths.backdoor;   // server backdoors + finishing the BN
+const ECON_SCRIPT = CFG.paths.econ;           // hacknet + home-RAM spending
+const CORP_CREATE_SCRIPT = CFG.paths.corpCreate; // one-shot corporation creation (BN3-only)
+const SELF = CFG.paths.daemon;                // this daemon's path (post-reset callback)
 
 // ── Corporation ───────────────────────────────────────────────────────────────
-const CORP_NAME = "GordCorp";
+const CORP_NAME = CORP.name;
 // The corp manager is split in two to shrink its permanently-resident footprint:
 //   - corp-steady.js: small, always-on, lives on the reserved cloud-corp host.
 //   - corp-build.js: large but bounded structural buildout, run as a periodic
 //     one-shot on borrowed off-home RAM (so its RAM is only held transiently).
-const CORP_SCRIPT = "/lib/corp-steady.js";
-const CORP_BUILD_SCRIPT = "/lib/corp-build.js";
+const CORP_SCRIPT = CFG.paths.corpSteady;
+const CORP_BUILD_SCRIPT = CFG.paths.corpBuild;
 // Dedicated cloud server for the always-on corp-steady manager. Reserved from the
 // botnet via globalThis.gordReservedHosts; sized to corp-steady (much smaller
 // than the old monolithic corp.js).
-const CORP_HOST = "cloud-corp";
+const CORP_HOST = CORP.host;
 
 // ── Gang (late-game, -54k karma) ──────────────────────────────────────────────
-const GANG_KARMA = -54_000;
-const GANG_SCRIPT = "/lib/gang.js";
-const GANG_HOST = "cloud-gang";
+const GANG_KARMA = GANG.karma;
+const GANG_SCRIPT = CFG.paths.gang;
+const GANG_HOST = GANG.host;
 // Criminal factions that can found a gang; whichever we're already in is used.
 // Cast to any[] so its elements don't trip checkJs against FactionName (a plain
 // `string` isn't assignable to the union) - see [[bitburner-enum-string-casts]].
-const CRIMINAL_FACTIONS = /** @type {any[]} */ ([
-  "Slum Snakes",
-  "Tetrads",
-  "The Syndicate",
-  "The Dark Army",
-  "Speakers for the Dead",
-]);
+const CRIMINAL_FACTIONS = /** @type {any[]} */ (GANG.criminalFactions);
 
 /** @param {NS} ns - true if we're in a gang; false (not just missing API) otherwise. */
 function inGangSafe(ns) {
@@ -164,14 +167,14 @@ function provisionCloudHost(ns, name, needRam) {
   if (cloud.getServerLimit() <= 0) return false;
 
   const maxRam = cloud.getRamLimit();
-  let size = 2;
+  let size = CFG.cloudHost.minRam;
   while (size < needRam && size < maxRam) size *= 2;
   if (size < needRam) return false; // even the largest tier can't hold it
 
   const exists = ns.serverExists(name);
   if (exists && ns.getServerMaxRam(name) >= needRam) return true;
 
-  const budget = playerMoney(ns) * 0.5;
+  const budget = playerMoney(ns) * CFG.cloudHost.spendFraction;
 
   if (!exists) {
     if (cloud.getServerNames().length >= cloud.getServerLimit()) return false;
@@ -220,7 +223,7 @@ function placeManager(ns, script, dedicatedHost, reserved) {
   candidates.push(...offHome, "home");
 
   for (const host of candidates) {
-    const headroom = host === "home" ? 8 : 0;
+    const headroom = host === "home" ? CFG.helpers.homeHeadroom : 0;
     if (freeRam(ns, host) - headroom < ram) continue;
     if (host !== "home") ns.scp(ns.ls("home", ".js"), host, "home");
     if (ns.exec(script, host, 1)) {
@@ -292,8 +295,8 @@ function buyAugs(ns) {
   }
 
   candidates.sort((a, b) => {
-    const aNFG = a.aug === "NeuroFlux Governor" ? 1 : 0;
-    const bNFG = b.aug === "NeuroFlux Governor" ? 1 : 0;
+    const aNFG = a.aug === AUGS.neuroFlux ? 1 : 0;
+    const bNFG = b.aug === AUGS.neuroFlux ? 1 : 0;
     if (aNFG !== bNFG) return aNFG - bNFG;
     return a.price - b.price;
   });
@@ -310,17 +313,11 @@ function buyAugs(ns) {
   return purchases;
 }
 
-const INSTALL_PRIORITY_AUGS = [
-  "BitWire",
-  "Neuralstimulator",
-  "Neural-Retention Enhancement",
-  "CashRoot Starter Kit",
-  "Hacknet Node CPU Architecture Neural-Upload",
-];
+const INSTALL_PRIORITY_AUGS = AUGS.installPriority;
 
 /** @param {NS} ns */
 function startBestFactionWork(ns, faction) {
-  const types = ["hacking", "field", "security"];
+  const types = CFG.player.factionWorkTypes;
   for (const type of types) {
     const ok = ns.singularity.workForFaction(
       /** @type {any} */ (faction),
@@ -343,20 +340,20 @@ function maybeInstall(ns) {
   const ownedInstalled = ns.singularity.getOwnedAugmentations(false);
   const queued = ownedWithPurchased.length - ownedInstalled.length;
 
-  const hasRedPill = ownedWithPurchased.includes("The Red Pill");
+  const hasRedPill = ownedWithPurchased.includes(AUGS.redPill);
   const hasPriorityAug = INSTALL_PRIORITY_AUGS.some(
     a => ownedWithPurchased.includes(a) && !ownedInstalled.includes(a)
   );
 
   const allPriorityDone = INSTALL_PRIORITY_AUGS.every(a => ownedInstalled.includes(a));
-  const aggressiveInstall = allPriorityDone && queued >= 1;
+  const aggressiveInstall = allPriorityDone && queued >= AUGS.install.minQueued;
 
   const lastReset = readLastResetTime(ns);
   const elapsed = Date.now() - lastReset;
-  const TIME_TRIGGER_MS = 8 * 60 * 60 * 1_000;
-  const timeTriggered = queued >= 1 && elapsed >= TIME_TRIGGER_MS;
+  const TIME_TRIGGER_MS = AUGS.install.timeTriggerMs;
+  const timeTriggered = queued >= AUGS.install.minQueued && elapsed >= TIME_TRIGGER_MS;
 
-  if (hasRedPill || queued >= 5 || (queued >= 2 && hasPriorityAug) || aggressiveInstall || timeTriggered) {
+  if (hasRedPill || queued >= AUGS.install.queuedThreshold || (queued >= AUGS.install.priorityQueuedThreshold && hasPriorityAug) || aggressiveInstall || timeTriggered) {
     if (timeTriggered) {
       const hours = (elapsed / 3_600_000).toFixed(1);
       ns.tprint(`Time-triggered install after ${hours}h with ${queued} aug(s) queued.`);
@@ -368,14 +365,14 @@ function maybeInstall(ns) {
     // Dump remaining cash into NeuroFlux Governor right before resetting.
     const s = ns.singularity;
     const nfgFaction = (ns.getPlayer().factions ?? []).find(f =>
-      s.getFactionRep(/** @type {any} */ (f)) >= s.getAugmentationRepReq("NeuroFlux Governor")
+      s.getFactionRep(/** @type {any} */ (f)) >= s.getAugmentationRepReq(AUGS.neuroFlux)
     ) ?? null;
     if (nfgFaction) {
       let bought = true;
       while (bought) {
-        const price = s.getAugmentationPrice("NeuroFlux Governor");
+        const price = s.getAugmentationPrice(AUGS.neuroFlux);
         if (playerMoney(ns) < price) break;
-        bought = s.purchaseAugmentation(/** @type {any} */ (nfgFaction), "NeuroFlux Governor");
+        bought = s.purchaseAugmentation(/** @type {any} */ (nfgFaction), AUGS.neuroFlux);
       }
     }
 
@@ -389,24 +386,24 @@ async function maybeBuyInfra(ns, target) {
   const money = playerMoney(ns);
 
   if (!target) {
-    return await managePurchasedServers(ns, 10e6, 0.25);
+    return await managePurchasedServers(ns, CFG.infra.noTarget.reserveMoney, CFG.infra.noTarget.spendFraction);
   }
 
   const { price, moneyMissing = 0, repMissing = 0 } = target;
 
   if (repMissing > 0) {
-    const hardCap = money > price ? money - price : money * 0.05;
-    return await managePurchasedServers(ns, 50e6, 0.10, hardCap);
+    const hardCap = money > price ? money - price : money * CFG.infra.repPending.fallbackCapFraction;
+    return await managePurchasedServers(ns, CFG.infra.repPending.reserveMoney, CFG.infra.repPending.spendFraction, hardCap);
   }
 
-  const tinyBudget = moneyMissing * 0.05;
-  if (tinyBudget < 1e6) {
+  const tinyBudget = moneyMissing * CFG.infra.savingBudgetFraction;
+  if (tinyBudget < CFG.infra.minBudget) {
     return {
       action: "Saving for Aug",
       detail: `${target.aug}: need $${ns.format.number(moneyMissing)}`,
     };
   }
-  return await managePurchasedServers(ns, price, 0.05, tinyBudget);
+  return await managePurchasedServers(ns, price, CFG.infra.savingSpendFraction, tinyBudget);
 }
 
 /**
@@ -431,7 +428,7 @@ function maybeDoSecondaryFactionWork(ns, primaryFaction) {
     const currentRep = s.getFactionRep(/** @type {any} */ (factionName));
 
     const hasUsefulWork = augs.some(aug => {
-      if (aug === "NeuroFlux Governor") return false;
+      if (aug === AUGS.neuroFlux) return false;
       if (owned.has(aug)) return false;
       const prereqs = s.getAugmentationPrereq(aug);
       if (!prereqs.every(a => owned.has(a))) return false;
@@ -528,7 +525,7 @@ async function decideNextPriority(ns) {
         const owned = new Set(s.getOwnedAugmentations(true));
         const currentRep = s.getFactionRep(/** @type {any} */ (target.faction));
         return s.getAugmentationsFromFaction(/** @type {any} */ (target.faction)).some(aug => {
-          if (aug === "NeuroFlux Governor") return false;
+          if (aug === AUGS.neuroFlux) return false;
           if (owned.has(aug)) return false;
           if (aug === target.aug) return false;
           return s.getAugmentationRepReq(aug) > currentRep;
@@ -619,15 +616,15 @@ export async function main(ns) {
     // Keep the cloud-hosted managers (corp, gang) alive on their reserved hosts,
     // then the botnet income engine and UI/luxury scripts off-home.
     ensureCloudManagers(ns);
-    ensureHelper(ns, "/hacking/manager.js");
-    ensureHelper(ns, "/ui/dashboard.js");
-    ensureHelper(ns, "/lib/stocks.js", { optional: true });
+    ensureHelper(ns, CFG.paths.manager);
+    ensureHelper(ns, CFG.paths.dashboard);
+    ensureHelper(ns, CFG.paths.stocks, { optional: true });
 
     // Off-home helpers that carry this daemon's heaviest calls (see their file
     // headers): backdoors + BN-finish, and hacknet/home-RAM spending. backdoor.js
     // gets the next BitNode forwarded (the driver launches us with no args, so
     // this defaults to 1 - same as the old in-daemon behaviour).
-    ensureHelper(ns, BACKDOOR_SCRIPT, { args: [Number(ns.args[0] ?? 1), SELF] });
+    ensureHelper(ns, BACKDOOR_SCRIPT, { args: [Number(ns.args[0] ?? CFG.backdoor.defaultNextBN), SELF] });
     ensureHelper(ns, ECON_SCRIPT, { optional: true });
 
     globalThis.gordState = await decideNextPriority(ns);
@@ -640,13 +637,13 @@ export async function main(ns) {
       globalThis.gordState.purchases = bought;
     }
 
-    globalThis.gordAugPipeline = getAllAugCandidates(ns).slice(0, 10);
+    globalThis.gordAugPipeline = getAllAugCandidates(ns).slice(0, AUGS.pipelineSize);
 
     maybeInstall(ns);
 
     ns.print(
       `Money: ${ns.format.number(playerMoney(ns))} | Hack: ${hackingLevel(ns)} | Karma: ${(ns.getPlayer().karma ?? 0).toFixed(0)}`
     );
-    await ns.sleep(15_000);
+    await ns.sleep(CFG.daemon.tickMs);
   }
 }
