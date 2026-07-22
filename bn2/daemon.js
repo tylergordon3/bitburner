@@ -603,7 +603,6 @@ export async function main(ns) {
     ensureGangManagerRunning(ns);
     ensureHelper(ns, CFG.paths.manager);
     ensureHelper(ns, CFG.paths.dashboard);
-    ensureHelper(ns, CFG.paths.journal, { optional: true });
     ensureHelper(ns, CFG.paths.stocks, { optional: true });
 
     // Off-home helpers carrying this daemon's heaviest calls: backdoors + BN-finish

@@ -1,48 +1,40 @@
 // ui/dashboard.js
 //
-// Core dashboard template. Renders the shell every BitNode shares (header,
-// player, goal, infra, network, pipeline, stocks) and splices in per-BN cards
-// from a small registry keyed by BitNode number. To add BN-specific panels,
-// create ui/bn<N>.js exporting extraCards(ns, C) and register it below - see
-// ui/bn2.js (gang card) for the pattern.
+// GORDNET HUD - one tabbed tail window that combines everything into a single UI:
+//   STATS   - cross-BitNode progression (Source-Files, Intelligence, all-time
+//             earnings, augs, karma/kills) PLUS the live operational cards
+//             (player, goal, infra, network, aug/faction pipeline, stocks).
+//   JOURNAL - the plain-text "what am I doing and why" narrative (ui/journal.js).
+//   GANG    - the gang / karma-bootstrap card (ui/bn5.js -> ui/bn2.js).
+//   CORP    - the corporation card (ui/bn3.js).
+//
+// The script loop paints the HUD (clearLog + printRaw). A tab click only flips a
+// module variable (activeTab) - it must NOT call any ns function, because calling
+// ns from a DOM event handler stops the script. (React hooks in a printRaw'd
+// component are also unsupported here, so a self-managing component isn't an
+// option - the loop drives rendering.) To keep the JOURNAL tab's scroll from
+// resetting, the loop repaints only on a tab switch or every uiRefreshMs. This
+// one tail replaces the old separate dashboard + journal windows.
 
-import { CONFIG } from "../lib/config.js";
+import { CONFIG, forNode } from "../lib/config.js";
 import { COLORS, el, card, label, progressBar, stat, statRow, formatDuration } from "./dashboard-lib.js";
-import { extraCards as bn2ExtraCards } from "./bn2.js";
-import { extraCards as bn3ExtraCards } from "./bn3.js";
-import { extraCards as bn5ExtraCards } from "./bn5.js";
-
-// BitNode number -> function returning that node's extra cards (an array).
-const BN_EXTRA_CARDS = {
-  2: bn2ExtraCards,
-  3: bn3ExtraCards,
-  5: bn5ExtraCards,
-};
-
-/**
- * Extra cards for the current BitNode, or [] when the node has no extras.
- * @param {NS} ns
- * @param {typeof COLORS} C
- * @param {number} node
- */
-function bnExtraCards(ns, C, node) {
-  const fn = BN_EXTRA_CARDS[node];
-  if (!fn) return [];
-  try {
-    return fn(ns, C) ?? [];
-  } catch (e) {
-    return [el("div", { style: { color: C.red, fontSize: "12px" } }, `BN${node} card error: ${String(e)}`)];
-  }
-}
+// Gang + corp panels reuse the existing per-node card modules. bn5's extraCards
+// already composes the running-gang card (via bn2.js) with the BN5 karma
+// bootstrap card and returns [] elsewhere, so it doubles as a universal gang
+// panel; bn3's returns the corp card (or a pending/empty placeholder).
+import { extraCards as gangExtraCards } from "./bn5.js";
+import { extraCards as corpExtraCards } from "./bn3.js";
+import { updateJournal, journalPanel } from "./journal.js";
 
 // Everything below comes from CONFIG.ui / CONFIG.factions - see lib/config.js.
 const UI = CONFIG.ui;
+const HUD = UI.hud;
 const FACTION_REQUIREMENTS = CONFIG.factions.requirements;
 
 const FINAL_HOST = CONFIG.backdoor.finalHost;
 
-// DOM id on the dashboard's root element, used to measure content height for
-// dynamic tail sizing (see fitTail).
+// DOM id on the HUD root element, used to measure content height for dynamic
+// tail sizing (see fitTail).
 const DASH_ID = UI.rootId;
 
 // Combat stats and their gate thresholds, derived from every combat-gated
@@ -53,8 +45,34 @@ const COMBAT_STAT_DEFS = UI.combatStats;
 // Servers that need backdoors for faction access / BN progression
 const BACKDOOR_CHECKLIST = UI.backdoorChecklist;
 
-// Factions worth joining for aug access — shown as joined ✓ / pending ✗
+// Factions worth joining for aug access - shown as joined / pending
 const FACTION_CHECKLIST = UI.factionChecklist;
+
+// The four HUD tabs.
+const TABS = [
+  { id: "stats",   label: "STATS" },
+  { id: "journal", label: "JOURNAL" },
+  { id: "gang",    label: "GANG" },
+  { id: "corp",    label: "CORP" },
+];
+
+// Module UI state. The HUD paints via the script loop (clearLog + printRaw); a
+// tab click ONLY sets activeTab here - a pure JS assignment, no ns call - and the
+// loop repaints with the new tab on its next pass. Two hard-won constraints drove
+// this design:
+//   1. Calling ANY ns function from a DOM event handler (onClick) stops the
+//      script, so the handler must not touch ns - it just flips activeTab.
+//   2. React hooks (useState/useEffect) in a printRaw'd component are NOT
+//      supported in this environment (they throw on mount), so we can't make the
+//      component self-managing; the loop drives rendering instead.
+let activeTab = "stats";
+let statsData = null;
+// Repaint only when the tab changed or the refresh interval elapsed, so the
+// JOURNAL tab isn't torn down (losing scroll) on every poll.
+let lastRenderedTab = null;
+let lastRenderAt = 0;
+let renderAgain = false;   // one extra paint after a tab switch, for fitTail sizing
+let lastStatsAt = 0;
 
 // ── Trend state ─────────────────────────────────────────────────────────────
 let lastHackLevel = 0;
@@ -78,74 +96,44 @@ let ramPerHour   = 0;
 export async function main(ns) {
   ns.disableLog("ALL");
   ns.ui.openTail();
+  ns.ui.setTailTitle("GORDNET");
   ns.ui.moveTail(UI.tail.x, UI.tail.y);
 
-  const currentNode = ns.getResetInfo().currentNode;
-
   while (true) {
-    const player      = ns.getPlayer();
-    const money       = player.money;
-    const hack        = player.skills.hacking;
-    const incomeHour  = getIncomePerHour(ns);
-    const ram         = getRamStats(ns);
-    const cloud       = getCloudStats(ns);
-    const final       = getHackTargetEstimate(ns, FINAL_HOST);
-    const state       = globalThis.gordState ?? {};
-    const target      = state.target ?? {};
-    const goal        = getGoalEstimate(ns, target);
-    const moneyRate   = updateMoneyTrend(ns);
-    const ramRate     = updateRamTrend(ns, ram.max);
-    const augQueue    = getAugQueueInfo(ns);
-    const moneyEta    = etaFromRate(target.moneyMissing ?? 0, moneyRate);
-    const network     = getNetworkStatus(ns);
-    const runDuration = getRunDuration(ns);
-    const stocks      = globalThis.gordStockState ?? null;
-    const combat      = getCombatStats(ns);
-    const augsOwned   = ns.singularity.getOwnedAugmentations(true).length;
+    // Journal buffer is cheap (reads globalThis) - refresh every poll.
+    try { updateJournal(ns); } catch (e) { ns.print("journal error: " + String(e)); }
 
-    renderDashboard(ns, {
-      player, money, hack, incomeHour,
-      ram, cloud, final, state, target,
-      goal, moneyRate, moneyEta, ramRate,
-      augQueue, network, runDuration, stocks,
-      combat, augsOwned, currentNode,
-    });
+    const now = Date.now();
 
-    await ns.sleep(UI.refreshMs);
+    // Heavier stats data only while the STATS tab is showing, on a slow cadence.
+    if (activeTab === "stats" && (statsData === null || now - lastStatsAt >= HUD.statsRefreshMs)) {
+      try { statsData = gatherStats(ns); lastStatsAt = now; } catch (e) { ns.print("stats error: " + String(e)); }
+    }
+
+    // Repaint on a tab switch (snappy) or when the refresh interval elapses.
+    const tabChanged = activeTab !== lastRenderedTab;
+    if (tabChanged || renderAgain || now - lastRenderAt >= HUD.uiRefreshMs) {
+      renderHud(ns);
+      lastRenderAt = now;
+      lastRenderedTab = activeTab;
+      // A tab switch changes the panel height; paint once more next poll so
+      // fitTail (which measures the prior frame) sizes to the new content.
+      renderAgain = tabChanged;
+    }
+
+    await ns.sleep(HUD.tickMs);
   }
 }
 
-// ── Render ───────────────────────────────────────────────────────────────────
+// ── Render ────────────────────────────────────────────────────────────────────
+
 /** @param {NS} ns */
-function renderDashboard(ns, data) {
-  // Size to the previous (fully-committed) frame before redrawing - measuring
-  // right after printRaw can catch a half-rendered DOM. Heights are stable
-  // tick-to-tick, so the one-frame lag is imperceptible.
+function renderHud(ns) {
+  // Measure the previous (committed) frame before redrawing - see fitTail.
   fitTail(ns);
   ns.clearLog();
   try {
-    const { player, money, hack, incomeHour, ram, cloud, final,
-            state, target, goal, moneyRate, moneyEta, ramRate,
-            augQueue, network, stocks, combat, augsOwned, currentNode } = data;
-
-    // Shared palette (see ui/dashboard-lib.js)
     const C = COLORS;
-
-    // Derived
-    const hackPct     = Math.min(1, hack / Math.max(1, Number(final.required) || hack));
-    const ramPct      = ram.max > 0 ? ram.used / ram.max : 0;
-    const repPct      = target.repReq  > 0 ? Math.min(1, (target.rep  ?? 0) / target.repReq)  : 1;
-    const moneyPct    = target.price   > 0 ? Math.min(1, money / target.price)                 : 1;
-    const augInstall  = augQueue.urgency === "high"   ? C.red
-                      : augQueue.urgency === "medium" ? C.yellow
-                      : C.green;
-
-    const actionColor = state.action?.startsWith("Crime")    ? C.red
-                      : state.action?.startsWith("Studying") ? C.blue
-                      : state.action?.startsWith("Training") ? C.yellow
-                      : state.action?.startsWith("Faction")  ? C.purple
-                      : C.green;
-
     ns.printRaw(
       el("div", {
         id: DASH_ID,
@@ -158,365 +146,499 @@ function renderDashboard(ns, data) {
           color: "#e2e8f0",
         },
       },
-
-        // ── Header ──────────────────────────────────────────────────────────
-        el("div", {
-          style: {
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "baseline",
-            marginBottom: "6px",
-            borderBottom: `1px solid ${C.border}`,
-            paddingBottom: "4px",
-          },
-        },
-          el("span", { style: { fontSize: "17px", fontWeight: "bold", letterSpacing: "2px", color: C.green } },
-            "[ GORDNET ]"
-          ),
-          el("div", { style: { display: "flex", gap: "14px", alignItems: "baseline" } },
-            el("span", { style: { fontSize: "13px", color: C.yellow } },
-              `run ${data.runDuration}`
-            ),
-            el("span", { style: { fontSize: "13px", color: C.dim } },
-              new Date().toLocaleTimeString()
-            ),
-          ),
-        ),
-
-        // ── Row 1: Player + Goal side-by-side ───────────────────────────────
-        el("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px", marginBottom: "8px" } },
-
-          // Player card
-          card(C, "PLAYER", [
-            statRow(C, "$", `${ns.format.number(money)}`, `+${ns.format.number(incomeHour)}/hr`, C.green),
-            statRow(C, "~", `Hack ${hack}`, final.missing <= 0 ? "[OK]" : `${final.eta} to BN`, hack >= (Number(final.required) || hack) ? C.green : C.yellow),
-            progressBar(hackPct, C.blue),
-
-            // Combat stats — gate for Slum Snakes/Tetrads/Syndicate/etc.
-            el("div", { style: { display: "flex", justifyContent: "space-between", marginTop: "6px" } },
-              ...combat.map(s =>
-                stat(C, s.label, s.have, s.met ? C.green : s.close ? C.yellow : C.dim)
-              ),
-            ),
-
-            el("div", { style: { display: "flex", justifyContent: "space-between", marginTop: "6px" } },
-              stat(C, "City",   player.city),
-              stat(C, "Karma",  ns.format.number(data.player.karma)),
-              stat(C, "Kills",  data.player.numPeopleKilled),
-            ),
-
-            el("div", { style: { display: "flex", justifyContent: "space-between", marginTop: "6px" } },
-              stat(C, "Factions", `${(player.factions ?? []).length} joined`),
-              stat(C, "Augs",     `${augsOwned} owned`),
-            ),
-          ]),
-
-          // Current Goal card
-          card(C, "GOAL", [
-            el("div", { style: { display: "flex", alignItems: "center", gap: "6px", marginBottom: "6px" } },
-              el("span", {
-                style: {
-                  background: actionColor + "22",
-                  border: `1px solid ${actionColor}55`,
-                  color: actionColor,
-                  borderRadius: "4px",
-                  padding: "1px 6px",
-                  fontSize: "13px",
-                  fontWeight: "bold",
-                },
-              }, state.action ?? "Idle"),
-            ),
-            el("div", { style: { color: C.dim, fontSize: "13px", marginBottom: "8px", wordBreak: "break-word", lineHeight: "1.4" } },
-              state.detail ?? "-"
-            ),
-            target.faction ? el("div", { style: {} },
-              label(C, "Rep"),
-              progressBar(repPct, C.purple),
-              el("div", { style: { display: "flex", justifyContent: "space-between", fontSize: "13px", color: C.dim, marginBottom: "5px" } },
-                el("span", {}, `${ns.format.number(target.rep ?? 0)} / ${ns.format.number(target.repReq ?? 0)}`),
-                el("span", {}, goal.eta),
-              ),
-              label(C, "Price"),
-              progressBar(moneyPct, C.green),
-              el("div", { style: { display: "flex", justifyContent: "space-between", fontSize: "13px", color: C.dim } },
-                el("span", {}, `$${ns.format.number(money)} / $${ns.format.number(target.price ?? 0)}`),
-                el("span", {}, moneyEta),
-              ),
-            ) : el("div", { style: { color: C.dim, fontSize: "13px" } }, "No aug target"),
-          ]),
-        ),
-
-        // ── Per-BitNode extras (e.g. BN2 gang card) ─────────────────────────
-        ...bnExtraCards(ns, C, currentNode),
-
-        // ── Row 2: Infra + Aug Queue in one card ────────────────────────────
-        card(C, "INFRA / AUGS", [
-          el("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 20px" } },
-
-            // Left: RAM + cloud
-            el("div", {},
-              progressBar(ramPct, ramPct > 0.9 ? C.red : ramPct > 0.7 ? C.yellow : C.blue),
-              el("div", { style: { display: "flex", justifyContent: "space-between", fontSize: "12px", color: C.dim, marginBottom: "5px" } },
-                el("span", {}, `${ns.format.ram(ram.used)} / ${ns.format.ram(ram.max)}`),
-                el("span", {}, `+${ns.format.ram(ramRate)}/hr`),
-              ),
-              el("div", { style: { display: "flex", gap: "10px", fontSize: "12px" } },
-                stat(C, "Cloud", `${cloud.count}/${cloud.limit}`),
-                stat(C, "RAM",   ns.format.ram(cloud.ram)),
-              ),
-            ),
-
-            // Right: aug queue
-            el("div", {},
-              el("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "5px" } },
-                el("span", { style: { color: C.dim, fontSize: "12px" } }, "Queued augs"),
-                el("span", {
-                  style: {
-                    background: augInstall + "22",
-                    border: `1px solid ${augInstall}55`,
-                    color: augInstall,
-                    borderRadius: "4px",
-                    padding: "0 7px",
-                    fontWeight: "bold",
-                    fontSize: "13px",
-                  },
-                }, String(augQueue.queued)),
-              ),
-              el("div", {
-                style: {
-                  fontSize: "12px",
-                  color: augInstall,
-                  padding: "3px 6px",
-                  background: augInstall + "11",
-                  borderRadius: "4px",
-                  borderLeft: `3px solid ${augInstall}`,
-                },
-              }, augQueue.recommendation),
-            ),
-          ),
-        ]),
-
-        // ── Network Checklist ────────────────────────────────────────────────
-        card(C, "NETWORK", [
-          el("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "4px 16px" } },
-
-            // Backdoors — compact badge row
-            el("div", {},
-              el("div", { style: { fontSize: "11px", color: C.dim, letterSpacing: "1px", marginBottom: "4px" } }, "BACKDOORS"),
-              el("div", { style: { display: "flex", flexWrap: "wrap", gap: "4px" } },
-                ...network.backdoors.map(b => {
-                  const color = b.done ? C.green : !b.exists ? "rgba(255,255,255,0.2)" : !b.rooted ? C.red : C.yellow;
-                  return el("span", {
-                    key: b.server,
-                    style: {
-                      fontSize: "11px",
-                      padding: "1px 6px",
-                      borderRadius: "3px",
-                      border: `1px solid ${color}55`,
-                      color,
-                      background: color + "11",
-                    },
-                  }, b.label);
-                }),
-              ),
-            ),
-
-            // Factions — compact badge row
-            el("div", {},
-              el("div", { style: { fontSize: "11px", color: C.dim, letterSpacing: "1px", marginBottom: "4px" } }, "FACTIONS"),
-              el("div", { style: { display: "flex", flexWrap: "wrap", gap: "4px" } },
-                ...network.factions.map(f => {
-                  const color = f.joined ? C.green : C.dim;
-                  return el("span", {
-                    key: f.name,
-                    style: {
-                      fontSize: "11px",
-                      padding: "1px 6px",
-                      borderRadius: "3px",
-                      border: `1px solid ${color}55`,
-                      color,
-                      background: color + "11",
-                    },
-                  }, f.name);
-                }),
-              ),
-            ),
-          ),
-
-          // Programs — full-width badge row below the grid
-          el("div", { style: { marginTop: "8px", borderTop: `1px solid ${C.border}`, paddingTop: "6px" } },
-            el("div", { style: { fontSize: "11px", color: C.dim, letterSpacing: "1px", marginBottom: "4px" } }, "PROGRAMS"),
-            el("div", { style: { display: "flex", flexWrap: "wrap", gap: "4px" } },
-              ...network.programs.map(p => {
-                const color = p.owned ? C.green : C.dim;
-                return el("span", {
-                  key: p.name,
-                  style: {
-                    fontSize: "11px",
-                    padding: "1px 6px",
-                    borderRadius: "3px",
-                    border: `1px solid ${color}55`,
-                    color,
-                    background: color + "11",
-                  },
-                }, p.label);
-              }),
-            ),
-          ),
-        ]),
-
-        // ── Aug Pipeline + Faction Pipeline (merged) ─────────────────────────
-        card(C, "PIPELINE", [
-          el("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 16px" } },
-
-            // Left: aug pipeline
-            el("div", { style: { minWidth: 0 } },
-              el("div", { style: { fontSize: "11px", color: C.dim, letterSpacing: "1px", marginBottom: "6px" } }, "AUGS"),
-              ...(globalThis.gordAugPipeline ?? []).slice(0, 10).map((a, i) => {
-                const done    = a.canBuy;
-                const repDone = a.repMissing <= 0;
-                const color   = done ? C.green : repDone ? C.yellow : C.dim;
-                const etaStr  = done ? "READY"
-                              : isFinite(a.estimatedMs) ? formatDuration(a.estimatedMs)
-                              : repDone ? `$${ns.format.number(a.moneyMissing)}`
-                              : `${ns.format.number(a.repMissing)} rep`;
-                return el("div", {
-                  key: i,
-                  style: {
-                    display: "flex",
-                    justifyContent: "space-between",
-                    alignItems: "center",
-                    fontSize: "11px",
-                    padding: "2px 0",
-                    borderBottom: i < 9 ? `1px solid ${C.border}` : "none",
-                    minWidth: 0,
-                  },
-                },
-                  el("span", { style: { color: i === 0 ? "#e2e8f0" : C.dim, fontWeight: i === 0 ? "bold" : "normal", flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } },
-                    `${i === 0 ? "> " : "  "}${a.aug}`
-                  ),
-                  el("span", { style: { color, fontWeight: "bold", flexShrink: 0, marginLeft: "8px", whiteSpace: "nowrap" } }, etaStr),
-                );
-              }),
-            ),
-
-            // Right: faction pipeline
-            el("div", { style: { minWidth: 0 } },
-              el("div", { style: { fontSize: "11px", color: C.dim, letterSpacing: "1px", marginBottom: "6px" } }, "FACTIONS"),
-              ...(globalThis.gordFactionPipeline ?? []).slice(0, 10).map((op, i) => {
-                const urgencyColor = op.urgency === "high"   ? C.red
-                                   : op.urgency === "medium" ? C.yellow
-                                   : C.dim;
-                return el("div", {
-                  key: i,
-                  style: {
-                    display: "flex",
-                    justifyContent: "space-between",
-                    alignItems: "center",
-                    fontSize: "11px",
-                    padding: "2px 0",
-                    borderBottom: i < 9 ? `1px solid ${C.border}` : "none",
-                    minWidth: 0,
-                  },
-                },
-                  el("span", { style: { color: op.hackingFocus ? C.blue : "#e2e8f0", flex: "0 0 auto", whiteSpace: "nowrap", marginRight: "8px" } },
-                    op.faction
-                  ),
-                  el("span", { style: { color: urgencyColor, flex: 1, minWidth: 0, whiteSpace: "normal", wordBreak: "break-word", textAlign: "right", lineHeight: "1.3" } }, op.reason ?? ""),
-                );
-              }),
-            ),
-          ),
-        ]),
-
-        // ── Stocks ───────────────────────────────────────────────────────────
-        (() => {
-          if (!stocks) {
-            return card(C, "STOCKS", [
-              el("div", { style: { color: C.dim, fontSize: "13px" } }, "stocks.js not running"),
-            ]);
-          }
-
-          const tierLabel = stocks.tier === 2 ? "4S (forecast)" : stocks.tier === 1 ? "Momentum" : "No TIX access";
-          const tierColor = stocks.tier === 2 ? C.green : stocks.tier === 1 ? C.yellow : C.dim;
-
-          return card(C, "STOCKS", [
-            // Header: tier + total portfolio value
-            el("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" } },
-              el("span", { style: { color: tierColor, fontSize: "12px", fontWeight: "bold" } }, tierLabel),
-              el("span", { style: { color: C.green, fontSize: "13px", fontWeight: "bold" } },
-                stocks.totalValue > 0 ? `Portfolio: $${ns.format.number(stocks.totalValue)}` : "No positions"
-              ),
-            ),
-
-            // Position rows
-            ...(stocks.positions.length === 0
-              ? [el("div", { style: { color: C.dim, fontSize: "12px" } }, "No open positions")]
-              : stocks.positions.slice(0, 6).map((p, i) => {
-                  const isLong   = p.sharesLong  > 0;
-                  const isShort  = p.sharesShort > 0;
-                  const pl       = isLong ? p.longPL : p.shortPL;
-                  const posVal   = isLong ? p.longValue : p.shortValue;
-                  const plColor  = pl >= 0 ? C.green : C.red;
-                  const typeTag  = isShort ? "[S]" : "[L]";
-                  const typeClr  = isShort ? C.purple : C.blue;
-                  const fStr     = p.forecast !== null
-                    ? ` ${(p.forecast * 100).toFixed(0)}%`
-                    : "";
-
-                  return el("div", {
-                    key: i,
-                    style: {
-                      display: "flex",
-                      justifyContent: "space-between",
-                      alignItems: "center",
-                      fontSize: "12px",
-                      padding: "2px 0",
-                      borderBottom: i < Math.min(stocks.positions.length, 6) - 1 ? `1px solid ${C.border}` : "none",
-                    },
-                  },
-                    el("div", { style: { display: "flex", gap: "5px", alignItems: "center" } },
-                      el("span", { style: { color: typeClr, fontWeight: "bold", fontSize: "11px" } }, typeTag),
-                      el("span", { style: { color: "#e2e8f0" } }, p.sym),
-                      el("span", { style: { color: C.dim, fontSize: "11px" } }, fStr),
-                    ),
-                    el("div", { style: { display: "flex", gap: "10px", alignItems: "center" } },
-                      el("span", { style: { color: C.dim, fontSize: "11px" } }, `$${ns.format.number(posVal)}`),
-                      el("span", { style: { color: plColor, fontWeight: "bold", fontSize: "11px" } },
-                        `${pl >= 0 ? "+" : ""}$${ns.format.number(pl)}`
-                      ),
-                    ),
-                  );
-                })
-            ),
-
-            // Recent trade log (last 2 lines)
-            ...((globalThis.gordStockLog ?? []).slice(-2).map((line, i) =>
-              el("div", { key: `log-${i}`, style: { color: C.dim, fontSize: "11px", marginTop: i === 0 ? "6px" : "1px", fontFamily: "monospace" } }, line)
-            )),
-          ]);
-        })(),
-
+        headerBar(ns, C),
+        tabBar(ns, C),
+        activePanel(ns, C),
       )
     );
   } catch (e) {
-    ns.print("Dashboard error: " + String(e));
+    ns.print("HUD error: " + String(e));
     ns.print(e?.stack ?? "");
   }
 }
 
+/** @param {NS} ns */
+function headerBar(ns, C) {
+  const node = ns.getResetInfo().currentNode;
+  const name = forNode(node).name ?? "";
+  return el("div", {
+    style: {
+      display: "flex", justifyContent: "space-between", alignItems: "baseline",
+      marginBottom: "6px", borderBottom: `1px solid ${C.border}`, paddingBottom: "4px",
+    },
+  },
+    el("span", { style: { fontSize: "17px", fontWeight: "bold", letterSpacing: "2px", color: C.green } }, "[ GORDNET ]"),
+    el("div", { style: { display: "flex", gap: "14px", alignItems: "baseline" } },
+      el("span", { style: { fontSize: "13px", color: C.blue } }, `BN${node}${name ? " " + name : ""}`),
+      el("span", { style: { fontSize: "13px", color: C.yellow } }, `run ${getRunDuration(ns)}`),
+      el("span", { style: { fontSize: "13px", color: C.dim } }, new Date().toLocaleTimeString()),
+    ),
+  );
+}
+
+/**
+ * Tab bar. onClick ONLY sets the module-level activeTab (a pure JS assignment,
+ * no ns call); the render loop repaints with the new tab on its next poll. This
+ * is the fix for the click-crash: calling any ns function from a DOM event
+ * handler stops the script.
+ * @param {NS} ns
+ */
+function tabBar(ns, C) {
+  return el("div", { style: { display: "flex", gap: "4px", marginBottom: "8px" } },
+    ...TABS.map(t => {
+      const on = activeTab === t.id;
+      return el("div", {
+        key: t.id,
+        onClick: () => { activeTab = t.id; },
+        style: {
+          cursor: "pointer",
+          userSelect: "none",
+          fontSize: "12px",
+          fontWeight: "bold",
+          letterSpacing: "1px",
+          padding: "3px 12px",
+          borderRadius: "4px 4px 0 0",
+          color: on ? C.green : C.dim,
+          background: on ? C.green + "18" : "transparent",
+          borderBottom: on ? `2px solid ${C.green}` : `2px solid ${C.border}`,
+        },
+      }, t.label);
+    }),
+  );
+}
+
+/** @param {NS} ns */
+function activePanel(ns, C) {
+  try {
+    if (activeTab === "journal") return journalPanel(ns, C);
+    if (activeTab === "gang")    return wrapCards(gangPanel(ns, C), C, "No gang yet - grinding toward one (watch the karma line in STATS / JOURNAL).");
+    if (activeTab === "corp")    return wrapCards(corpPanel(ns, C), C, "No corporation in this BitNode.");
+    if (!statsData) return el("div", { style: { color: C.dim, fontSize: "13px", padding: "8px 2px" } }, "Gathering stats...");
+    return el("div", {}, ...statsPanel(ns, C, statsData));
+  } catch (e) {
+    return el("div", { style: { color: C.red, fontSize: "12px" } }, `panel error: ${String(e)}`);
+  }
+}
+
+function wrapCards(cards, C, emptyMsg) {
+  if (!cards || cards.length === 0) {
+    return el("div", { style: { color: C.dim, fontSize: "13px", padding: "8px 2px" } }, emptyMsg);
+  }
+  return el("div", {}, ...cards);
+}
+
+/** @param {NS} ns */
+function gangPanel(ns, C) {
+  try { return gangExtraCards(ns, C) ?? []; } catch { return []; }
+}
+
+/** @param {NS} ns */
+function corpPanel(ns, C) {
+  try { return corpExtraCards(ns, C) ?? []; } catch { return []; }
+}
+
+// ── STATS tab ─────────────────────────────────────────────────────────────────
+
+/**
+ * Persistent progression card (leads the STATS tab) followed by the live
+ * operational cards. Returns an array of cards for the panel wrapper.
+ * @param {NS} ns
+ */
+function statsPanel(ns, C, d) {
+  return [progressionCard(ns, C, d), ...buildOperationalCards(ns, C, d)];
+}
+
+/**
+ * Cross-BitNode progression: Source-Files, Intelligence, augs, karma/kills, and
+ * all-time earnings. These carry across BitNodes (SF, Intelligence) or represent
+ * whole-run progress, unlike the per-tick operational cards below.
+ * @param {NS} ns
+ */
+function progressionCard(ns, C, d) {
+  const fmt = (v) => (v == null ? "-" : ns.format.number(v));
+  const rowStyle = { display: "flex", justifyContent: "space-between", marginTop: "6px" };
+  const badge = (color) => ({
+    fontSize: "11px", padding: "1px 6px", borderRadius: "3px",
+    border: `1px solid ${color}55`, color, background: color + "11",
+  });
+
+  const sfBadges = d.sf.length
+    ? d.sf.map(([num, lvl]) => el("span", { key: num, style: badge(C.purple) }, `SF${num}.${lvl}`))
+    : [el("span", { style: { color: C.dim, fontSize: "12px" } }, "none yet")];
+
+  return card(C, "PROGRESSION - persists across BitNodes", [
+    el("div", { style: rowStyle },
+      stat(C, "BitNode", `${d.node}${d.nodeName ? " " + d.nodeName : ""}`, C.blue),
+      stat(C, "Intelligence", ns.format.number(d.intelligence), C.purple),
+      stat(C, "Augs", `${d.augsInstalled} installed`),
+    ),
+    el("div", { style: rowStyle },
+      stat(C, "Karma", ns.format.number(d.karma), d.karma < 0 ? C.red : C.dim),
+      stat(C, "Kills", d.kills),
+      stat(C, "Run", d.runDuration, C.yellow),
+    ),
+    el("div", { style: { marginTop: "8px" } },
+      label(C, "SOURCE-FILES"),
+      el("div", { style: { display: "flex", flexWrap: "wrap", gap: "4px" } }, ...sfBadges),
+    ),
+    el("div", { style: { ...rowStyle, marginTop: "8px" } },
+      stat(C, "$ all-time", `$${fmt(d.allTime)}`, C.green),
+      stat(C, "$ this install", `$${fmt(d.install)}`, C.green),
+    ),
+  ]);
+}
+
+/**
+ * The live operational cards (player, goal, infra, network, pipeline, stocks) -
+ * the former dashboard body, minus the header (now shared) and the per-BN
+ * gang/corp cards (now their own tabs). Returns an array of card elements.
+ * @param {NS} ns
+ */
+function buildOperationalCards(ns, C, data) {
+  const { player, money, hack, incomeHour, ram, cloud, final,
+          state, target, goal, moneyRate, moneyEta, ramRate,
+          augQueue, network, stocks, combat, augsOwned } = data;
+
+  // Derived
+  const hackPct     = Math.min(1, hack / Math.max(1, Number(final.required) || hack));
+  const ramPct      = ram.max > 0 ? ram.used / ram.max : 0;
+  const repPct      = target.repReq  > 0 ? Math.min(1, (target.rep  ?? 0) / target.repReq)  : 1;
+  const moneyPct    = target.price   > 0 ? Math.min(1, money / target.price)                 : 1;
+  const augInstall  = augQueue.urgency === "high"   ? C.red
+                    : augQueue.urgency === "medium" ? C.yellow
+                    : C.green;
+
+  const actionColor = state.action?.startsWith("Crime")    ? C.red
+                    : state.action?.startsWith("Studying") ? C.blue
+                    : state.action?.startsWith("Training") ? C.yellow
+                    : state.action?.startsWith("Faction")  ? C.purple
+                    : C.green;
+
+  return [
+    // ── Row 1: Player + Goal side-by-side ───────────────────────────────────
+    el("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px", marginBottom: "8px" } },
+
+      // Player card
+      card(C, "PLAYER", [
+        statRow(C, "$", `${ns.format.number(money)}`, `+${ns.format.number(incomeHour)}/hr`, C.green),
+        statRow(C, "~", `Hack ${hack}`, final.missing <= 0 ? "[OK]" : `${final.eta} to BN`, hack >= (Number(final.required) || hack) ? C.green : C.yellow),
+        progressBar(hackPct, C.blue),
+
+        // Combat stats - gate for Slum Snakes/Tetrads/Syndicate/etc.
+        el("div", { style: { display: "flex", justifyContent: "space-between", marginTop: "6px" } },
+          ...combat.map(s =>
+            stat(C, s.label, s.have, s.met ? C.green : s.close ? C.yellow : C.dim)
+          ),
+        ),
+
+        el("div", { style: { display: "flex", justifyContent: "space-between", marginTop: "6px" } },
+          stat(C, "City",   player.city),
+          stat(C, "Karma",  ns.format.number(data.player.karma)),
+          stat(C, "Kills",  data.player.numPeopleKilled),
+        ),
+
+        el("div", { style: { display: "flex", justifyContent: "space-between", marginTop: "6px" } },
+          stat(C, "Factions", `${(player.factions ?? []).length} joined`),
+          stat(C, "Augs",     `${augsOwned} owned`),
+        ),
+      ]),
+
+      // Current Goal card
+      card(C, "GOAL", [
+        el("div", { style: { display: "flex", alignItems: "center", gap: "6px", marginBottom: "6px" } },
+          el("span", {
+            style: {
+              background: actionColor + "22",
+              border: `1px solid ${actionColor}55`,
+              color: actionColor,
+              borderRadius: "4px",
+              padding: "1px 6px",
+              fontSize: "13px",
+              fontWeight: "bold",
+            },
+          }, state.action ?? "Idle"),
+        ),
+        el("div", { style: { color: C.dim, fontSize: "13px", marginBottom: "8px", wordBreak: "break-word", lineHeight: "1.4" } },
+          state.detail ?? "-"
+        ),
+        target.faction ? el("div", { style: {} },
+          label(C, "Rep"),
+          progressBar(repPct, C.purple),
+          el("div", { style: { display: "flex", justifyContent: "space-between", fontSize: "13px", color: C.dim, marginBottom: "5px" } },
+            el("span", {}, `${ns.format.number(target.rep ?? 0)} / ${ns.format.number(target.repReq ?? 0)}`),
+            el("span", {}, goal.eta),
+          ),
+          label(C, "Price"),
+          progressBar(moneyPct, C.green),
+          el("div", { style: { display: "flex", justifyContent: "space-between", fontSize: "13px", color: C.dim } },
+            el("span", {}, `$${ns.format.number(money)} / $${ns.format.number(target.price ?? 0)}`),
+            el("span", {}, moneyEta),
+          ),
+        ) : el("div", { style: { color: C.dim, fontSize: "13px" } }, "No aug target"),
+      ]),
+    ),
+
+    // ── Infra + Aug Queue in one card ───────────────────────────────────────
+    card(C, "INFRA / AUGS", [
+      el("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 20px" } },
+
+        // Left: RAM + cloud
+        el("div", {},
+          progressBar(ramPct, ramPct > 0.9 ? C.red : ramPct > 0.7 ? C.yellow : C.blue),
+          el("div", { style: { display: "flex", justifyContent: "space-between", fontSize: "12px", color: C.dim, marginBottom: "5px" } },
+            el("span", {}, `${ns.format.ram(ram.used)} / ${ns.format.ram(ram.max)}`),
+            el("span", {}, `+${ns.format.ram(ramRate)}/hr`),
+          ),
+          el("div", { style: { display: "flex", gap: "10px", fontSize: "12px" } },
+            stat(C, "Cloud", `${cloud.count}/${cloud.limit}`),
+            stat(C, "RAM",   ns.format.ram(cloud.ram)),
+          ),
+        ),
+
+        // Right: aug queue
+        el("div", {},
+          el("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "5px" } },
+            el("span", { style: { color: C.dim, fontSize: "12px" } }, "Queued augs"),
+            el("span", {
+              style: {
+                background: augInstall + "22",
+                border: `1px solid ${augInstall}55`,
+                color: augInstall,
+                borderRadius: "4px",
+                padding: "0 7px",
+                fontWeight: "bold",
+                fontSize: "13px",
+              },
+            }, String(augQueue.queued)),
+          ),
+          el("div", {
+            style: {
+              fontSize: "12px",
+              color: augInstall,
+              padding: "3px 6px",
+              background: augInstall + "11",
+              borderRadius: "4px",
+              borderLeft: `3px solid ${augInstall}`,
+            },
+          }, augQueue.recommendation),
+        ),
+      ),
+    ]),
+
+    // ── Network Checklist ───────────────────────────────────────────────────
+    card(C, "NETWORK", [
+      el("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "4px 16px" } },
+
+        // Backdoors - compact badge row
+        el("div", {},
+          el("div", { style: { fontSize: "11px", color: C.dim, letterSpacing: "1px", marginBottom: "4px" } }, "BACKDOORS"),
+          el("div", { style: { display: "flex", flexWrap: "wrap", gap: "4px" } },
+            ...network.backdoors.map(b => {
+              const color = b.done ? C.green : !b.exists ? "rgba(255,255,255,0.2)" : !b.rooted ? C.red : C.yellow;
+              return el("span", {
+                key: b.server,
+                style: {
+                  fontSize: "11px",
+                  padding: "1px 6px",
+                  borderRadius: "3px",
+                  border: `1px solid ${color}55`,
+                  color,
+                  background: color + "11",
+                },
+              }, b.label);
+            }),
+          ),
+        ),
+
+        // Factions - compact badge row
+        el("div", {},
+          el("div", { style: { fontSize: "11px", color: C.dim, letterSpacing: "1px", marginBottom: "4px" } }, "FACTIONS"),
+          el("div", { style: { display: "flex", flexWrap: "wrap", gap: "4px" } },
+            ...network.factions.map(f => {
+              const color = f.joined ? C.green : C.dim;
+              return el("span", {
+                key: f.name,
+                style: {
+                  fontSize: "11px",
+                  padding: "1px 6px",
+                  borderRadius: "3px",
+                  border: `1px solid ${color}55`,
+                  color,
+                  background: color + "11",
+                },
+              }, f.name);
+            }),
+          ),
+        ),
+      ),
+
+      // Programs - full-width badge row below the grid
+      el("div", { style: { marginTop: "8px", borderTop: `1px solid ${C.border}`, paddingTop: "6px" } },
+        el("div", { style: { fontSize: "11px", color: C.dim, letterSpacing: "1px", marginBottom: "4px" } }, "PROGRAMS"),
+        el("div", { style: { display: "flex", flexWrap: "wrap", gap: "4px" } },
+          ...network.programs.map(p => {
+            const color = p.owned ? C.green : C.dim;
+            return el("span", {
+              key: p.name,
+              style: {
+                fontSize: "11px",
+                padding: "1px 6px",
+                borderRadius: "3px",
+                border: `1px solid ${color}55`,
+                color,
+                background: color + "11",
+              },
+            }, p.label);
+          }),
+        ),
+      ),
+    ]),
+
+    // ── Aug Pipeline + Faction Pipeline (merged) ────────────────────────────
+    card(C, "PIPELINE", [
+      el("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 16px" } },
+
+        // Left: aug pipeline
+        el("div", { style: { minWidth: 0 } },
+          el("div", { style: { fontSize: "11px", color: C.dim, letterSpacing: "1px", marginBottom: "6px" } }, "AUGS"),
+          ...(globalThis.gordAugPipeline ?? []).slice(0, 10).map((a, i) => {
+            const done    = a.canBuy;
+            const repDone = a.repMissing <= 0;
+            const color   = done ? C.green : repDone ? C.yellow : C.dim;
+            const etaStr  = done ? "READY"
+                          : isFinite(a.estimatedMs) ? formatDuration(a.estimatedMs)
+                          : repDone ? `$${ns.format.number(a.moneyMissing)}`
+                          : `${ns.format.number(a.repMissing)} rep`;
+            return el("div", {
+              key: i,
+              style: {
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                fontSize: "11px",
+                padding: "2px 0",
+                borderBottom: i < 9 ? `1px solid ${C.border}` : "none",
+                minWidth: 0,
+              },
+            },
+              el("span", { style: { color: i === 0 ? "#e2e8f0" : C.dim, fontWeight: i === 0 ? "bold" : "normal", flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } },
+                `${i === 0 ? "> " : "  "}${a.aug}`
+              ),
+              el("span", { style: { color, fontWeight: "bold", flexShrink: 0, marginLeft: "8px", whiteSpace: "nowrap" } }, etaStr),
+            );
+          }),
+        ),
+
+        // Right: faction pipeline
+        el("div", { style: { minWidth: 0 } },
+          el("div", { style: { fontSize: "11px", color: C.dim, letterSpacing: "1px", marginBottom: "6px" } }, "FACTIONS"),
+          ...(globalThis.gordFactionPipeline ?? []).slice(0, 10).map((op, i) => {
+            const urgencyColor = op.urgency === "high"   ? C.red
+                               : op.urgency === "medium" ? C.yellow
+                               : C.dim;
+            return el("div", {
+              key: i,
+              style: {
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                fontSize: "11px",
+                padding: "2px 0",
+                borderBottom: i < 9 ? `1px solid ${C.border}` : "none",
+                minWidth: 0,
+              },
+            },
+              el("span", { style: { color: op.hackingFocus ? C.blue : "#e2e8f0", flex: "0 0 auto", whiteSpace: "nowrap", marginRight: "8px" } },
+                op.faction
+              ),
+              el("span", { style: { color: urgencyColor, flex: 1, minWidth: 0, whiteSpace: "normal", wordBreak: "break-word", textAlign: "right", lineHeight: "1.3" } }, op.reason ?? ""),
+            );
+          }),
+        ),
+      ),
+    ]),
+
+    // ── Stocks ──────────────────────────────────────────────────────────────
+    (() => {
+      if (!stocks) {
+        return card(C, "STOCKS", [
+          el("div", { style: { color: C.dim, fontSize: "13px" } }, "stocks.js not running"),
+        ]);
+      }
+
+      const tierLabel = stocks.tier === 2 ? "4S (forecast)" : stocks.tier === 1 ? "Momentum" : "No TIX access";
+      const tierColor = stocks.tier === 2 ? C.green : stocks.tier === 1 ? C.yellow : C.dim;
+
+      return card(C, "STOCKS", [
+        // Header: tier + total portfolio value
+        el("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" } },
+          el("span", { style: { color: tierColor, fontSize: "12px", fontWeight: "bold" } }, tierLabel),
+          el("span", { style: { color: C.green, fontSize: "13px", fontWeight: "bold" } },
+            stocks.totalValue > 0 ? `Portfolio: $${ns.format.number(stocks.totalValue)}` : "No positions"
+          ),
+        ),
+
+        // Position rows
+        ...(stocks.positions.length === 0
+          ? [el("div", { style: { color: C.dim, fontSize: "12px" } }, "No open positions")]
+          : stocks.positions.slice(0, 6).map((p, i) => {
+              const isLong   = p.sharesLong  > 0;
+              const isShort  = p.sharesShort > 0;
+              const pl       = isLong ? p.longPL : p.shortPL;
+              const posVal   = isLong ? p.longValue : p.shortValue;
+              const plColor  = pl >= 0 ? C.green : C.red;
+              const typeTag  = isShort ? "[S]" : "[L]";
+              const typeClr  = isShort ? C.purple : C.blue;
+              const fStr     = p.forecast !== null
+                ? ` ${(p.forecast * 100).toFixed(0)}%`
+                : "";
+
+              return el("div", {
+                key: i,
+                style: {
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  fontSize: "12px",
+                  padding: "2px 0",
+                  borderBottom: i < Math.min(stocks.positions.length, 6) - 1 ? `1px solid ${C.border}` : "none",
+                },
+              },
+                el("div", { style: { display: "flex", gap: "5px", alignItems: "center" } },
+                  el("span", { style: { color: typeClr, fontWeight: "bold", fontSize: "11px" } }, typeTag),
+                  el("span", { style: { color: "#e2e8f0" } }, p.sym),
+                  el("span", { style: { color: C.dim, fontSize: "11px" } }, fStr),
+                ),
+                el("div", { style: { display: "flex", gap: "10px", alignItems: "center" } },
+                  el("span", { style: { color: C.dim, fontSize: "11px" } }, `$${ns.format.number(posVal)}`),
+                  el("span", { style: { color: plColor, fontWeight: "bold", fontSize: "11px" } },
+                    `${pl >= 0 ? "+" : ""}$${ns.format.number(pl)}`
+                  ),
+                ),
+              );
+            })
+        ),
+
+        // Recent trade log (last 2 lines)
+        ...((globalThis.gordStockLog ?? []).slice(-2).map((line, i) =>
+          el("div", { key: `log-${i}`, style: { color: C.dim, fontSize: "11px", marginTop: i === 0 ? "6px" : "1px", fontFamily: "monospace" } }, line)
+        )),
+      ]);
+    })(),
+  ];
+}
+
 // Width is fixed to what the card layout was designed for; height tracks the
-// rendered content so every card (gang, stocks, pipelines) is fully visible
-// regardless of which BitNode we're in or how many pipeline rows there are.
+// rendered content so every tab (stats, journal, gang, corp) is fully visible.
 const DASH_WIDTH = UI.tail.width;
 const DASH_MIN_H = UI.tail.minHeight;
 const DASH_MAX_H = UI.tail.maxHeight;
 
 /**
- * Size the tail window to fit the rendered dashboard. Measures the actual DOM
- * height of our root element (id=DASH_ID) and resizes to match, so nothing gets
- * clipped and there's no empty space. Falls back to a sane default before the
- * first frame exists or if the DOM isn't reachable.
+ * Size the tail window to fit the rendered HUD. Measures the actual DOM height
+ * of our root element (id=DASH_ID) and resizes to match, so nothing gets clipped
+ * and there's no empty space. Falls back to a sane default before the first
+ * frame exists or if the DOM isn't reachable.
  * @param {NS} ns
  */
 function fitTail(ns) {
@@ -537,6 +659,64 @@ function fitTail(ns) {
 }
 
 // ── Data helpers ─────────────────────────────────────────────────────────────
+
+/**
+ * Gather everything the STATS tab needs in one pass: persistent progression
+ * (Source-Files, Intelligence, all-time money) plus the live operational data.
+ * @param {NS} ns
+ */
+function gatherStats(ns) {
+  const player = ns.getPlayer();
+  const reset  = ns.getResetInfo();
+  const ram    = getRamStats(ns);
+  const state  = globalThis.gordState ?? {};
+  const target = state.target ?? {};
+  const moneyRate = updateMoneyTrend(ns);
+
+  let allTime = null, install = null;
+  try {
+    const n = /** @type {any} */ (ns);
+    const ms = n.getMoneySources?.();
+    allTime = ms?.sinceStart?.total ?? null;
+    install = ms?.sinceInstall?.total ?? null;
+  } catch {}
+
+  const sf = [...(reset.ownedSF ?? new Map()).entries()].sort((a, b) => a[0] - b[0]);
+
+  return {
+    // Live operational
+    player,
+    money:       player.money,
+    hack:        player.skills.hacking,
+    incomeHour:  getIncomePerHour(ns),
+    ram,
+    cloud:       getCloudStats(ns),
+    final:       getHackTargetEstimate(ns, FINAL_HOST),
+    state,
+    target,
+    goal:        getGoalEstimate(ns, target),
+    moneyRate,
+    moneyEta:    etaFromRate(target.moneyMissing ?? 0, moneyRate),
+    ramRate:     updateRamTrend(ns, ram.max),
+    augQueue:    getAugQueueInfo(ns),
+    network:     getNetworkStatus(ns),
+    stocks:      globalThis.gordStockState ?? null,
+    combat:      getCombatStats(ns),
+    augsOwned:   ns.singularity.getOwnedAugmentations(true).length,
+
+    // Persistent-across-BitNodes progression
+    node:          reset.currentNode,
+    nodeName:      forNode(reset.currentNode).name ?? "",
+    sf,
+    intelligence:  player.skills.intelligence ?? 0,
+    augsInstalled: (reset.ownedAugs ?? new Map()).size,
+    karma:         player.karma ?? 0,
+    kills:         player.numPeopleKilled ?? 0,
+    runDuration:   getRunDuration(ns),
+    allTime,
+    install,
+  };
+}
 
 // The 5 port openers, labelled by filename minus the .exe.
 const ROOTING_PROGRAMS = CONFIG.programs.portOpeners.map(name => ({
