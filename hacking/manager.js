@@ -2,15 +2,22 @@ import { allServers, root } from "../lib/net.js";
 import { CONFIG } from "../lib/config.js";
 
 const H = CONFIG.hacking;
+const SH = CONFIG.share;
 const HOME = CONFIG.paths.home;
 const HACK = CONFIG.paths.hack;
 const GROW = CONFIG.paths.grow;
 const WEAKEN = CONFIG.paths.weaken;
+const SHARE = CONFIG.paths.share;
 
 // Cached once at startup — avoids repeated getScriptRam() calls in the sizing hot path
 let _hackRam   = H.fallbackRam.hack;
 let _growRam   = H.fallbackRam.grow;
 let _weakenRam = H.fallbackRam.weaken;
+// share.js per-thread RAM: 1.6 (base) + 2.4 (ns.share) = 4.0GB. Real value read
+// in main(); this is only the pre-read fallback.
+let _shareThreadRam = 4.0;
+// Last-published set of share hosts, so we only log on change (see manageShare).
+let _lastShareHosts = "";
 
 /**
  * Per-host RAM (GB) the node daemon wants kept free on a SHARED host, published
@@ -52,6 +59,143 @@ function rootedWorkers(ns) {
     .filter(s => ns.hasRootAccess(s))
     .filter(s => ns.getServerMaxRam(s) > 0)
     .filter(s => !reserved.has(s));
+}
+
+// ── Faction-rep sharing (ns.share) ────────────────────────────────────────────
+//
+// While the daemon is farming faction rep, dedicate a small capped slice of the
+// botnet to share.js. Running share.js occupies real RAM (it shows up in each
+// host's usedRam), so usableRam() already excludes it - the botnet naturally
+// works around the shared portion without any separate reservation. See
+// CONFIG.share for the full rationale and the diminishing-returns math.
+
+/** @param {NS} ns - true when the daemon's current action is faction WORK. */
+function farmingRep(ns) {
+  if (!SH?.enabled) return false;
+  const action = globalThis.gordState?.action;
+  if (typeof action !== "string") return false;
+  return (SH.repActionPrefixes ?? []).some(p => action.startsWith(p));
+}
+
+/** @param {NS} ns - hosts the botnet may draw share threads from (not home/reserved). */
+function shareEligibleHosts(ns) {
+  const reserved = reservedHosts();
+  return allServers(ns).filter(
+    s => s !== HOME && ns.hasRootAccess(s) && ns.getServerMaxRam(s) > 0 && !reserved.has(s)
+  );
+}
+
+/**
+ * Total share RAM (GB) to dedicate this tick. A fraction of eligible network RAM
+ * (the "use a couple, not all" cap), further capped by targetBonus so we never
+ * chase the flat tail of the 1 + ln(threads)/25 curve. Returns 0 below the floor.
+ * @param {NS} ns @param {string[]} hosts
+ */
+function shareBudgetRam(ns, hosts) {
+  const totalRam = hosts.reduce((sum, h) => sum + ns.getServerMaxRam(h), 0);
+  if (totalRam <= 0) return 0;
+
+  // Invert bonus = 1 + ln(T)/25 at targetBonus to get the thread count past
+  // which extra share isn't worth the money-RAM, then convert to RAM.
+  const targetThreads = Math.exp(25 * (SH.targetBonus - 1));
+  const budget = Math.min(SH.fraction * totalRam, targetThreads * _shareThreadRam, SH.maxRam);
+  return budget >= SH.minRam ? budget : 0;
+}
+
+/**
+ * Spread `budgetRam` over the fewest servers (largest-first, so it stays "a
+ * couple"), hard-capped at maxServers. Whole or partial per host. Returns a
+ * { host: reservedGB } plan.
+ * @param {NS} ns @param {number} budgetRam
+ */
+function planShare(ns, budgetRam) {
+  const hosts = shareEligibleHosts(ns).sort(
+    (a, b) => ns.getServerMaxRam(b) - ns.getServerMaxRam(a)
+  );
+
+  const plan = {};
+  let remaining = budgetRam;
+  for (const host of hosts) {
+    if (Object.keys(plan).length >= SH.maxServers) break;
+    if (remaining < _shareThreadRam) break;
+    const give = Math.min(ns.getServerMaxRam(host), remaining);
+    const threads = Math.floor(give / _shareThreadRam);
+    if (threads <= 0) continue;
+    plan[host] = threads * _shareThreadRam;
+    remaining -= plan[host];
+  }
+  return plan;
+}
+
+/** @param {NS} ns @param {string} host - threads of share.js currently on host. */
+function shareThreadsOn(ns, host) {
+  let t = 0;
+  for (const p of ns.ps(host)) if (p.filename === SHARE) t += p.threads;
+  return t;
+}
+
+/**
+ * Reconcile running share.js against the current plan. Runs BEFORE the botnet
+ * allocation each tick, so once share.js is launched its RAM shows up in
+ * usableRam() and the botnet plans around it.
+ *
+ * Each host is started at most once (while it has 0 share threads) and left
+ * alone thereafter - we accept whatever thread count actually fit rather than
+ * re-evicting to chase an exact number, so a host that also runs another helper
+ * never thrashes. share stops on a host only when it leaves the plan.
+ * @param {NS} ns
+ */
+function manageShare(ns) {
+  const plan = farmingRep(ns) ? planShare(ns, shareBudgetRam(ns, shareEligibleHosts(ns))) : {};
+
+  // Stop share on any host no longer in the plan. Kill by pid (via ns.ps/ns.kill,
+  // already used here) rather than ns.scriptKill, so this adds no manager RAM.
+  for (const host of allServers(ns)) {
+    if (!ns.hasRootAccess(host) || plan[host]) continue;
+    for (const p of ns.ps(host)) {
+      if (p.filename === SHARE) ns.kill(p.pid);
+    }
+  }
+
+  // Start share on wanted hosts that aren't sharing yet.
+  for (const [host, gb] of Object.entries(plan)) {
+    const want = Math.floor(gb / _shareThreadRam);
+    if (want <= 0 || shareThreadsOn(ns, host) > 0) continue;
+
+    if (host !== HOME) ns.scp(SHARE, host, HOME);
+
+    const capacity = () =>
+      Math.floor((ns.getServerMaxRam(host) - ns.getServerUsedRam(host)) / _shareThreadRam);
+
+    let threads = Math.min(want, capacity());
+    if (threads <= 0) {
+      // No free room - this host is dedicated to share now, so evict its botnet
+      // scripts (rep is the priority) and take what the plan wants.
+      for (const p of ns.ps(host)) {
+        if ([HACK, GROW, WEAKEN].includes(p.filename)) ns.kill(p.pid);
+      }
+      threads = Math.min(want, capacity());
+    }
+    if (threads > 0) ns.exec(SHARE, host, threads);
+  }
+
+  // Actual running totals (may be < plan if a host was partly occupied).
+  const servers = Object.keys(plan).filter(h => shareThreadsOn(ns, h) > 0);
+  const threads = servers.reduce((s, h) => s + shareThreadsOn(ns, h), 0);
+  const bonus = 1 + Math.log(Math.max(1, threads)) / 25;
+
+  // Log only on change so the per-tick loop doesn't spam.
+  const key = servers.slice().sort().join(",");
+  if (key !== _lastShareHosts) {
+    _lastShareHosts = key;
+    if (key) {
+      ns.print(`[share] ${servers.length} server(s), ${threads} threads → faction rep ×${bonus.toFixed(3)} (+${((bonus - 1) * 100).toFixed(1)}%)`);
+    } else {
+      ns.print("[share] off (not farming faction rep)");
+    }
+  }
+
+  globalThis.gordShareState = { active: servers.length > 0, servers, threads, bonus };
 }
 
 /** @param {NS} ns */
@@ -300,6 +444,7 @@ export async function main(ns) {
   _hackRam   = ns.getScriptRam(HACK);
   _growRam   = ns.getScriptRam(GROW);
   _weakenRam = ns.getScriptRam(WEAKEN);
+  _shareThreadRam = ns.getScriptRam(SHARE) || _shareThreadRam;
 
   const reset = ns.args.includes("--reset");
   if (reset) killOldHackScripts(ns);
@@ -315,6 +460,17 @@ export async function main(ns) {
     }
 
     await copyScripts(ns);
+
+    // Reconcile faction-rep sharing BEFORE sizing batches: share.js occupies
+    // real RAM, so once it's launched usableRam() already reflects it and the
+    // botnet plans around the shared slice. Guarded: share is an optional side
+    // mode and must NEVER be able to stop the core hacking loop (e.g. if it hits
+    // a stale config on a runner). On error, log and keep hacking.
+    try {
+      manageShare(ns);
+    } catch (e) {
+      ns.print(`[share] disabled this tick (error): ${String(e)}`);
+    }
 
     const sortedTargets = validTargets(ns);
     sortedTargets.sort((a, b) => targetScore(ns, b) - targetScore(ns, a));
