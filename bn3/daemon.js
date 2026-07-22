@@ -618,6 +618,7 @@ export async function main(ns) {
     ensureCloudManagers(ns);
     ensureHelper(ns, CFG.paths.manager);
     ensureHelper(ns, CFG.paths.dashboard);
+    ensureHelper(ns, CFG.paths.journal, { optional: true });
     ensureHelper(ns, CFG.paths.stocks, { optional: true });
 
     // Off-home helpers that carry this daemon's heaviest calls (see their file
