@@ -1,5 +1,6 @@
 import { allServers, root } from "../lib/net.js";
 import { CONFIG } from "../lib/config.js";
+import * as F from "../lib/formulas.js";
 
 const H = CONFIG.hacking;
 const SH = CONFIG.share;
@@ -212,11 +213,22 @@ function validTargets(ns) {
 /** @param {NS} ns */
 function targetScore(ns, server) {
   const maxMoney = ns.getServerMaxMoney(server);
+  if (maxMoney <= 0) return 0;
+
+  // With Formulas, rank by expected steady-state yield at the prepped state a
+  // batch actually farms: money × (steal % per thread) × (success chance) per
+  // unit cycle time (weakenTime bounds a batch). This picks genuinely richer
+  // targets than the current-security heuristic below.
+  if (F.hasFormulas(ns)) {
+    const { weakenTime } = F.batchTimes(ns, server);
+    if (weakenTime <= 0) return 0;
+    return (maxMoney * F.hackPercent(ns, server) * F.hackChance(ns, server)) / weakenTime;
+  }
+
+  // Fallback (no Formulas.exe): the original heuristic, unchanged.
   const minSec = ns.getServerMinSecurityLevel(server);
   const hackTime = ns.getHackTime(server);
-
-  if (maxMoney <= 0 || hackTime <= 0) return 0;
-
+  if (hackTime <= 0) return 0;
   return maxMoney / minSec / hackTime;
 }
 
@@ -238,12 +250,24 @@ async function copyScripts(ns) {
 
 /** @param {NS} ns @param {string} target @param {number} moneyFraction */
 function calcBatch(ns, target, moneyFraction) {
-  const hackAnalyze = ns.hackAnalyze(target);
-  const hackThreads = Math.max(1, Math.floor(moneyFraction / hackAnalyze));
+  const useFormulas = F.hasFormulas(ns);
 
-  const hackedFraction = Math.min(0.9, hackThreads * hackAnalyze);
-  const growMultiplier = 1 / Math.max(0.01, 1 - hackedFraction);
-  const growThreads = Math.max(1, Math.ceil(ns.growthAnalyze(target, growMultiplier)));
+  // Steal-% per hack thread and the resulting grow threads, both evaluated at the
+  // prepped (min-security, max-money) state a batch actually hits. With Formulas
+  // these are exact; without it we keep the original current-state approximations
+  // (ns.hackAnalyze reads current security, ns.growthAnalyze ignores it), so
+  // behaviour is identical when Formulas.exe is absent.
+  const hackPct = useFormulas ? F.hackPercent(ns, target) : ns.hackAnalyze(target);
+  const hackThreads = Math.max(1, Math.floor(moneyFraction / hackPct));
+  const hackedFraction = Math.min(0.9, hackThreads * hackPct);
+
+  let growThreads;
+  if (useFormulas) {
+    growThreads = Math.max(1, F.growThreadsToFull(ns, target, 1 - hackedFraction));
+  } else {
+    const growMultiplier = 1 / Math.max(0.01, 1 - hackedFraction);
+    growThreads = Math.max(1, Math.ceil(ns.growthAnalyze(target, growMultiplier)));
+  }
 
   const hackSec = hackThreads * H.securityPerHack;
   const growSec = growThreads * H.securityPerGrow;
@@ -257,6 +281,16 @@ function calcBatch(ns, target, moneyFraction) {
     weaken1Threads * _weakenRam +
     weaken2Threads * _weakenRam;
 
+  // Batch legs run against the prepped server, so with Formulas we time them at
+  // min security; ns.get*Time (current security) is the fallback.
+  const times = useFormulas
+    ? F.batchTimes(ns, target)
+    : {
+        hackTime: ns.getHackTime(target),
+        growTime: ns.getGrowTime(target),
+        weakenTime: ns.getWeakenTime(target),
+      };
+
   return {
     target,
     moneyFraction,
@@ -265,9 +299,9 @@ function calcBatch(ns, target, moneyFraction) {
     weaken1Threads,
     weaken2Threads,
     ram,
-    hackTime: ns.getHackTime(target),
-    growTime: ns.getGrowTime(target),
-    weakenTime: ns.getWeakenTime(target),
+    hackTime: times.hackTime,
+    growTime: times.growTime,
+    weakenTime: times.weakenTime,
   };
 }
 

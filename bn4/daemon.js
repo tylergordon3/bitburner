@@ -28,6 +28,8 @@ import {
   canBuyAug,
   readLastResetTime,
   writeResetTime,
+  recordResetSummary,
+  consumeResetSummary,
 } from "../lib/daemon-lib.js";
 
 // Every tunable value comes from lib/config.js, resolved for this BitNode (see
@@ -146,6 +148,18 @@ function maybeInstall(ns) {
         if (playerMoney(ns) < price) break;
         bought = s.purchaseAugmentation(/** @type {any} */ (nfgFaction), AUGS.neuroFlux);
       }
+    }
+
+    // Record what this reset installs + how long the run lasted, for the next
+    // boot's journal. Computed AFTER the NeuroFlux buys above and BEFORE
+    // writeResetTime (which overwrites the old timestamp we need for the
+    // duration). Guarded: a summary failure must never block the install.
+    try {
+      const installedSet = new Set(s.getOwnedAugmentations(false));
+      const installing = s.getOwnedAugmentations(true).filter(a => !installedSet.has(a));
+      recordResetSummary(ns, installing, Date.now() - readLastResetTime(ns));
+    } catch (e) {
+      ns.print(`reset summary failed: ${String(e)}`);
     }
 
     writeResetTime(ns);
@@ -378,6 +392,11 @@ export async function main(ns) {
   ns.disableLog("ALL");
 
   if (readLastResetTime(ns) === 0) writeResetTime(ns);
+
+  // If the previous run ended in an aug install, surface a one-time summary for
+  // the journal. globalThis is wiped by the install, so this is read from disk
+  // (and blanked) exactly once, here at boot.
+  globalThis.gordLastReset = consumeResetSummary(ns);
 
   while (true) {
     // Root the network FIRST so the helpers below have off-home hosts to land

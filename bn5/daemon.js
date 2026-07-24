@@ -61,6 +61,8 @@ import {
   canBuyAug,
   readLastResetTime,
   writeResetTime,
+  recordResetSummary,
+  consumeResetSummary,
 } from "../lib/daemon-lib.js";
 
 // Every tunable value comes from lib/config.js, resolved for BitNode 5 - that's
@@ -101,6 +103,26 @@ function inGangSafe(ns) {
   } catch {
     return false;
   }
+}
+
+/**
+ * The BitNode to enter when lib/backdoor.js destroys w0r1d_d43m0n - encoding the
+ * "run BN5.1, then BN5.2, then stop" plan (see [[bitnode-progress]]):
+ *   - BN5 with SF-5 level 0 (this is 5.1): re-enter BN5 (return 5) to do 5.2.
+ *   - BN5 with SF-5 level >= 1 (5.2 done, or beyond): return 0, the halt sentinel
+ *     lib/backdoor.js reads as "backdoor everything but DON'T auto-destroy" - the
+ *     player then destroys w0r1d_d43m0n manually and picks the next node (BN10).
+ * An explicit daemon arg ([0]) always overrides. getResetInfo() is free (0GB).
+ * @param {NS} ns
+ */
+function plannedNextBN(ns) {
+  if (ns.args[0] != null) return Number(ns.args[0]);
+
+  const info = ns.getResetInfo();
+  if (info.currentNode !== 5) return CFG.backdoor.defaultNextBN;
+
+  const sf5 = info.ownedSF.get(5) ?? 0;
+  return sf5 < 1 ? 5 : 0; // 5.1 -> re-enter BN5; 5.2+ -> halt for manual selection
 }
 
 // ── Gang bootstrap ────────────────────────────────────────────────────────────
@@ -377,6 +399,19 @@ function maybeInstall(ns) {
       }
     }
 
+    // Record what this reset installs + how long the run lasted, for the next
+    // boot's journal. Computed AFTER the NeuroFlux buys above (so late NFG is
+    // counted) and BEFORE writeResetTime (which overwrites the old timestamp we
+    // need for the duration). Guarded: a summary failure must never block the
+    // install.
+    try {
+      const installedSet = new Set(s.getOwnedAugmentations(false));
+      const installing = s.getOwnedAugmentations(true).filter(a => !installedSet.has(a));
+      recordResetSummary(ns, installing, Date.now() - readLastResetTime(ns));
+    } catch (e) {
+      ns.print(`reset summary failed: ${String(e)}`);
+    }
+
     writeResetTime(ns);
     ns.singularity.installAugmentations(SELF);
   }
@@ -620,6 +655,11 @@ export async function main(ns) {
 
   if (readLastResetTime(ns) === 0) writeResetTime(ns);
 
+  // If the previous run ended in an aug install, surface a one-time summary for
+  // the journal. globalThis is wiped by the install, so this is read from disk
+  // (and blanked) exactly once, here at boot.
+  globalThis.gordLastReset = consumeResetSummary(ns);
+
   while (true) {
     // Root the network FIRST so the helpers below have off-home hosts to land
     // on, and buy port openers when affordable (crime funds these via darkweb).
@@ -639,7 +679,10 @@ export async function main(ns) {
     // (backdoor.js gets the next BitNode + this daemon's path forwarded), and
     // hacknet/home-RAM spending (econ.js - hacknet is weak in BN5 but it also
     // buys home RAM, which stays valuable).
-    ensureHelper(ns, BACKDOOR_SCRIPT, { args: [Number(ns.args[0] ?? CFG.backdoor.defaultNextBN), SELF] });
+    // nextBN follows the 5.1->5.2->halt plan (plannedNextBN); no cbScript arg, so
+    // backdoor.js defaults it to the cold-start driver - the safe entry for a
+    // fresh 32GB node (running the big daemon directly there could fail to fit).
+    ensureHelper(ns, BACKDOOR_SCRIPT, { args: [plannedNextBN(ns)] });
     ensureHelper(ns, ECON_SCRIPT, { optional: true });
 
     globalThis.gordState = await decideNextPriority(ns);

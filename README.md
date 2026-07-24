@@ -16,6 +16,24 @@ from anything (including the deliberately-lean `early/driver.js`).
 Two things deliberately stay out: `lib/gang.js`'s gain-formula replicas (they
 transcribe the game's own `formulas.ts`) and the dashboard's layout CSS.
 
+## Formulas API
+
+[`lib/formulas.js`](lib/formulas.js) wraps Bitburner's Formulas API with a runtime
+safeguard. `ns.formulas` throws unless `Formulas.exe` is on home. SF-5 ("start with
+Formulas.exe") and BN-5 itself both grant the exe, so with SF-5 we normally have it
+from the start of every node — but it's still a file: it's briefly absent at the
+very start of BN-5 until a soft reset ([bitburner#2675](https://github.com/danielyxie/bitburner/issues/2675)),
+and any node entered without adequate SF-5 lacks it. `hasFormulas(ns)` detects the
+exe at runtime, so callers use exact formula math when it's present and fall back
+to the approximate `ns.*` analysis functions when it isn't — a no-op in the normal
+case, insurance otherwise. The `ns.formulas.*` calls themselves cost 0GB.
+
+Today the HGW botnet ([`hacking/manager.js`](hacking/manager.js)) uses it to size
+batches and score targets at the **prepped** (min-security, max-money) state a
+batch actually farms — exact steal-%, exact grow threads, and min-security batch
+timings — instead of the target's current-security state. `lib/gang.js`'s replicas
+and `lib/econ.js`'s hacknet buys remain candidates for the same treatment.
+
 ## BitNode entry points
 
 Each bitnode gets a thin `bnX/daemon.js` orchestrator; everything reusable lives in `lib/`.

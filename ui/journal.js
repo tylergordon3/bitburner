@@ -19,10 +19,10 @@
 // PRINTED / pushed string to ASCII (comments are fine as-is).
 
 import { CONFIG } from "../lib/config.js";
-import { el } from "./dashboard-lib.js";
+import { el, formatDuration } from "./dashboard-lib.js";
 
 const J = CONFIG.ui.journal;
-const STEP = J.progressStepPct || 5;
+const STEP = J.progressStepPct || 10;
 
 // Gym stat short-codes (as emitted by lib/player-actions.js) -> full words.
 const STAT_NAMES = {
@@ -36,11 +36,17 @@ let lastKey = null;
 let lastProgressAt = 0;
 let lastMilestone = -1;   // floor(pct / STEP) last logged for the current intent
 let lastPurchases = "";
+let shownResetAt = 0;     // gordLastReset.at we've already reported (report once)
 
-/** Append an entry {text, kind} to the ring buffer, trimming to bufferSize. */
-function push(text, kind) {
+/**
+ * Append an entry {text, kind, hl} to the ring buffer, trimming to bufferSize.
+ * `hl` is an optional list of exact substrings (augmentation / faction names) the
+ * renderer should emphasise; percentages and $ amounts are highlighted
+ * automatically regardless.
+ */
+function push(text, kind, hl) {
   const buf = globalThis.gordJournal ?? (globalThis.gordJournal = []);
-  buf.push({ text, kind, at: Date.now() });
+  buf.push({ text, kind, at: Date.now(), hl });
   const max = J.bufferSize || 400;
   if (buf.length > max) buf.splice(0, buf.length - max);
 }
@@ -55,13 +61,30 @@ export function updateJournal(ns) {
     started = true;
   }
 
+  // One-time reset summary. The daemon publishes gordLastReset at boot after an
+  // aug install (read from disk, since globalThis is wiped by the install). Emit
+  // it once, independent of intention changes, so a reset is always announced.
+  const reset = globalThis.gordLastReset;
+  if (reset && reset.at && reset.at !== shownResetAt) {
+    shownResetAt = reset.at;
+    push(resetSummaryText(reset), "sys", { augs: reset.augs ?? [], factions: [] });
+  }
+
   const state = globalThis.gordState;
   if (!state) return;
+
+  const hl = collectHl(state);
 
   // Purchase events fire on the tick an aug is bought; log them as they land.
   const purch = (state.purchases ?? []).join(" | ");
   if (purch && purch !== lastPurchases) {
-    for (const p of state.purchases) push(`${clock()}  [+] Bought ${p}`, "buy");
+    for (const p of state.purchases) {
+      const [aug, faction] = String(p).split(" from ");
+      push(`${clock()}  [+] Bought ${p}`, "buy", {
+        augs: [aug].filter(Boolean),
+        factions: [faction].filter(Boolean),
+      });
+    }
     lastPurchases = purch;
   }
 
@@ -71,7 +94,7 @@ export function updateJournal(ns) {
   if (key !== lastKey) {
     // New intention: announce it, seed the milestone from where we are so we
     // don't immediately re-log the same bucket.
-    push(`${clock()}  ${text}`, "head");
+    push(`${clock()}  ${withRatioPercent(text)}`, "head", hl);
     lastKey = key;
     lastProgressAt = now;
     const p0 = progressLine(ns, state);
@@ -86,12 +109,34 @@ export function updateJournal(ns) {
         ? milestone > lastMilestone
         : (J.progressMs > 0 && now - lastProgressAt >= J.progressMs);
       if (due) {
-        push(`${clock()}     - ${p.line}`, "prog");
+        push(`${clock()}     - ${withRatioPercent(p.line)}`, "prog", hl);
         lastProgressAt = now;
         if (milestone != null) lastMilestone = milestone;
       }
     }
   }
+}
+
+/** Highlight tokens present in the current intention, split by kind. */
+function collectHl(state) {
+  const t = state.target ?? null;
+  const augs = new Set();
+  const factions = new Set();
+  if (t?.aug) augs.add(t.aug);
+  if (t?.faction) factions.add(t.faction);
+  if (state.faction) factions.add(state.faction);
+  const gangFac = globalThis.gordGangState?.faction;
+  if (gangFac) factions.add(gangFac);
+  return { augs: [...augs].filter(Boolean), factions: [...factions].filter(Boolean) };
+}
+
+/** The one-line summary for a completed aug install. */
+function resetSummaryText(reset) {
+  const augs = reset.augs ?? [];
+  const n = augs.length;
+  const dur = formatDuration(reset.sinceMs ?? 0);
+  const names = n ? `: ${augs.join(", ")}` : "";
+  return `======== Reset: installed ${n} augmentation${n === 1 ? "" : "s"} after ${dur}${names} ========`;
 }
 
 /**
@@ -113,10 +158,12 @@ export function journalPanel(ns, C) {
     style: {
       maxHeight: `${J.panelHeight || 520}px`,
       overflowY: "auto",
+      overflowX: "auto",              // long lines scroll horizontally, never wrap
       display: "flex",
       flexDirection: "column",
+      alignItems: "flex-start",       // size lines to content so the widest sets scroll width
       fontFamily: "'Courier New', monospace",
-      fontSize: "12px",
+      fontSize: "13px",
       lineHeight: "1.5",
       padding: "2px",
     },
@@ -124,10 +171,114 @@ export function journalPanel(ns, C) {
     ...(lines.length
       ? lines.map((e, i) => el("div", {
           key: i,
-          style: { color: colorFor(e.kind), whiteSpace: "pre-wrap", wordBreak: "break-word" },
-        }, e.text))
+          style: { color: colorFor(e.kind), whiteSpace: "pre" },  // no wrapping
+        }, ...lineChildren(e.text, e.hl, C)))
       : [el("div", { style: { color: C.dim } }, "No activity yet - the daemon hasn't published a state.")]),
   );
+}
+
+// ── Inline highlighting ───────────────────────────────────────────────────────
+// Emphasise the parts of a line the player cares about, each in its own colour so
+// they read apart: augmentation names (cyan), faction names (light purple), and
+// any percentage or $ amount - the "fractions" (yellow). Aug/faction names are
+// passed in as exact `hl` tokens ({ augs, factions }) since they can't be
+// pattern-matched; numbers are found by regex. Non-highlighted text inherits the
+// line's base kind colour from the parent div.
+
+const NUM_PATTERNS = [
+  /\d+(?:\.\d+)?%/g,                 // percentages: 96.00%, 4.25%
+  /\$\d[\d.,]*[kmbtqKMBTQ]?/g,       // money: $98.953k, $54.655m
+];
+
+/**
+ * Non-overlapping, ordered highlight ranges for `text`. Exact aug/faction tokens
+ * win over the numeric patterns on overlap, and longer matches win at the same
+ * start, so "Speech Enhancement" isn't split by a shorter token.
+ */
+function buildRanges(text, hl) {
+  const ranges = [];
+  const addTokens = (tokens, cls) => {
+    for (const tok of tokens ?? []) {
+      if (!tok) continue;
+      let idx = 0;
+      while ((idx = text.indexOf(tok, idx)) !== -1) {
+        ranges.push({ start: idx, end: idx + tok.length, cls });
+        idx += tok.length;
+      }
+    }
+  };
+  addTokens(hl?.augs, "aug");
+  addTokens(hl?.factions, "faction");
+  for (const re of NUM_PATTERNS) {
+    re.lastIndex = 0;
+    let m;
+    while ((m = re.exec(text)) !== null) {
+      ranges.push({ start: m.index, end: m.index + m[0].length, cls: "num" });
+    }
+  }
+  // Order by start; on ties prefer the longer span, then names over numbers.
+  const nameRank = (cls) => (cls === "num" ? 1 : 0);
+  ranges.sort((a, b) => a.start - b.start || (b.end - b.start) - (a.end - a.start)
+                       || nameRank(a.cls) - nameRank(b.cls));
+  const out = [];
+  let lastEnd = 0;
+  for (const r of ranges) {
+    if (r.start < lastEnd) continue; // drop overlap
+    out.push(r);
+    lastEnd = r.end;
+  }
+  return out;
+}
+
+/** Split `text` into styled span children for the JOURNAL tab. */
+function lineChildren(text, hl, C) {
+  const ranges = buildRanges(text, hl);
+  if (!ranges.length) return [text];
+
+  const styleFor = (cls) => cls === "aug"     ? { color: C.augHl, fontWeight: "bold" }
+                          : cls === "faction" ? { color: C.factionHl, fontWeight: "bold" }
+                          : { color: C.numHl };
+
+  const out = [];
+  let pos = 0;
+  let k = 0;
+  for (const r of ranges) {
+    if (r.start > pos) out.push(el("span", { key: k++ }, text.slice(pos, r.start)));
+    out.push(el("span", { key: k++, style: styleFor(r.cls) }, text.slice(r.start, r.end)));
+    pos = r.end;
+  }
+  if (pos < text.length) out.push(el("span", { key: k++ }, text.slice(pos)));
+  return out;
+}
+
+// ── Fraction -> percent ───────────────────────────────────────────────────────
+// The daemon publishes some progress as a bare "$have / $need" ratio (e.g. the
+// early crime-for-TOR goal). Prepend the computed percentage so every progress
+// line leads with a percent and keeps the ratio in parentheses, e.g.
+// "... ($98.953k / $500.000k)" -> "... 19.79% ($98.953k / $500.000k)".
+
+const MONEY_SUFFIX = { k: 1e3, m: 1e6, b: 1e9, t: 1e12, q: 1e15 };
+
+/** Parse a formatted money string like "$98.953k" into a number. */
+function parseMoney(s) {
+  const mm = /([\d,]*\.?\d+)\s*([kmbtq]?)/i.exec(String(s));
+  if (!mm) return NaN;
+  const n = Number(mm[1].replace(/,/g, ""));
+  return n * (MONEY_SUFFIX[mm[2].toLowerCase()] ?? 1);
+}
+
+/** Prepend "P.PP% " before a "($A / $B)" money ratio, unless one is already there. */
+function withRatioPercent(text) {
+  const re = /\((\$[\d.,]+\s*[kmbtqKMBTQ]?)\s*\/\s*(\$[\d.,]+\s*[kmbtqKMBTQ]?)\)/;
+  const m = re.exec(text);
+  if (!m) return text;
+  const before = text.slice(0, m.index);
+  if (/\d(?:\.\d+)?%\s*$/.test(before)) return text; // a percent already leads it
+  const a = parseMoney(m[1]);
+  const b = parseMoney(m[2]);
+  if (!(b > 0)) return text;
+  const pct = (a / b) * 100;
+  return `${before}${pct.toFixed(2)}% ${m[0]}${text.slice(m.index + m[0].length)}`;
 }
 
 // ── Intention -> sentence ─────────────────────────────────────────────────────
@@ -148,7 +299,7 @@ function narrate(ns, state) {
   const fmt = (n) => ns.format.number(n ?? 0);
   const faction = t?.faction;
   const aug = t?.aug;
-  const repPct = t && t.repReq > 0 ? Math.round((t.rep / t.repReq) * 100) : null;
+  const repPct = t && t.repReq > 0 ? (t.rep / t.repReq) * 100 : null;
 
   // One-off events
   if (a === "Gang Created") {
@@ -201,7 +352,7 @@ function narrate(ns, state) {
   // Crime
   if (a.startsWith("Crime")) {
     const crime = (state.crime ?? "crime").toLowerCase();
-    const chance = state.chance != null ? ` (${Math.round(state.chance * 100)}% success)` : "";
+    const chance = state.chance != null ? ` (${(state.chance * 100).toFixed(2)}% success)` : "";
     if (/gang|karma/i.test(d)) {
       return { key: "crime-karma-gang", text: `Committing ${crime}${chance} to grind karma toward founding a gang.` };
     }
@@ -221,7 +372,7 @@ function narrate(ns, state) {
       return { key: `secondary-${aug}`, text: `Banking spare reputation (${sec}) while saving for ${aug}.` };
     }
     const banking = a.includes("banking");
-    const prog = repPct != null ? ` - ${repPct}% (${fmt(t.rep)}/${fmt(t.repReq)})` : "";
+    const prog = repPct != null ? ` - ${repPct.toFixed(2)}% (${fmt(t.rep)}/${fmt(t.repReq)})` : "";
     return {
       key: `rep-${faction}-${aug}`,
       text: `${banking ? "Banking extra reputation" : "Farming reputation"} at ${faction} for ${aug}${prog}.`,
@@ -273,17 +424,24 @@ function progressLine(ns, state) {
     const b = globalThis.gordGangBootstrap;
     if (b && b.target) {
       const pct = (b.karma / b.target) * 100;
-      return { line: `karma ${fmt(b.karma)} / ${fmt(b.target)} (${Math.round(pct)}% to a gang)`, pct };
+      return { line: `${pct.toFixed(2)}% to a gang (karma ${fmt(b.karma)} / ${fmt(b.target)})`, pct };
     }
   }
 
   if (t && t.repReq > 0 && t.repMissing > 0) {
     const pct = (t.rep / t.repReq) * 100;
-    return { line: `${t.faction} rep ${fmt(t.rep)}/${fmt(t.repReq)} (${Math.round(pct)}%) for ${t.aug}`, pct };
+    return { line: `${t.faction} rep ${pct.toFixed(2)}% (${fmt(t.rep)}/${fmt(t.repReq)}) for ${t.aug}`, pct };
   }
   if (t && t.moneyMissing > 0) {
-    const pct = t.price > 0 ? ((t.price - t.moneyMissing) / t.price) * 100 : null;
-    return { line: `still saving $${fmt(t.moneyMissing)} for ${t.aug}`, pct };
+    const price = t.price ?? 0;
+    const have = Math.max(0, price - t.moneyMissing);
+    const pct = price > 0 ? (have / price) * 100 : null;
+    // The percent is added uniformly by withRatioPercent from the "($have/$price)"
+    // ratio; here we just supply the ratio (and pct for milestone bucketing).
+    const line = price > 0
+      ? `saving ($${fmt(have)} / $${fmt(price)}) for ${t.aug}`
+      : `still saving $${fmt(t.moneyMissing)} for ${t.aug}`;
+    return { line, pct };
   }
   return null;
 }
