@@ -7,6 +7,7 @@
 //   JOURNAL - the plain-text "what am I doing and why" narrative (ui/journal.js).
 //   GANG    - the gang / karma-bootstrap card (ui/bn5.js -> ui/bn2.js).
 //   CORP    - the corporation card (ui/bn3.js).
+//   SLEEVE  - the BN10 duplicate-sleeve roster/status card (ui/bn10.js).
 //
 // The script loop paints the HUD (clearLog + printRaw). A tab click only flips a
 // module variable (activeTab) - it must NOT call any ns function, because calling
@@ -24,6 +25,7 @@ import { COLORS, el, card, label, progressBar, stat, statRow, formatDuration } f
 // panel; bn3's returns the corp card (or a pending/empty placeholder).
 import { extraCards as gangExtraCards } from "./bn5.js";
 import { extraCards as corpExtraCards } from "./bn3.js";
+import { extraCards as sleeveExtraCards } from "./bn10.js";
 import { updateJournal, journalPanel } from "./journal.js";
 
 // Everything below comes from CONFIG.ui / CONFIG.factions - see lib/config.js.
@@ -48,12 +50,13 @@ const BACKDOOR_CHECKLIST = UI.backdoorChecklist;
 // Factions worth joining for aug access - shown as joined / pending
 const FACTION_CHECKLIST = UI.factionChecklist;
 
-// The four HUD tabs.
+// The HUD tabs.
 const TABS = [
   { id: "stats",   label: "STATS" },
   { id: "journal", label: "JOURNAL" },
   { id: "gang",    label: "GANG" },
   { id: "corp",    label: "CORP" },
+  { id: "sleeve",  label: "SLEEVE" },
 ];
 
 // Module UI state. The HUD paints via the script loop (clearLog + printRaw); a
@@ -213,6 +216,7 @@ function activePanel(ns, C) {
     if (activeTab === "journal") return journalPanel(ns, C);
     if (activeTab === "gang")    return wrapCards(gangPanel(ns, C), C, "No gang yet - grinding toward one (watch the karma line in STATS / JOURNAL).");
     if (activeTab === "corp")    return wrapCards(corpPanel(ns, C), C, "No corporation in this BitNode.");
+    if (activeTab === "sleeve")  return wrapCards(sleevePanel(ns, C), C, "No sleeve activity (BN10 only - the manager starts once a host has ~40GB free).");
     if (!statsData) return el("div", { style: { color: C.dim, fontSize: "13px", padding: "8px 2px" } }, "Gathering stats...");
     return el("div", {}, ...statsPanel(ns, C, statsData));
   } catch (e) {
@@ -235,6 +239,11 @@ function gangPanel(ns, C) {
 /** @param {NS} ns */
 function corpPanel(ns, C) {
   try { return corpExtraCards(ns, C) ?? []; } catch { return []; }
+}
+
+/** @param {NS} ns */
+function sleevePanel(ns, C) {
+  try { return sleeveExtraCards(ns, C) ?? []; } catch { return []; }
 }
 
 // ── STATS tab ─────────────────────────────────────────────────────────────────
