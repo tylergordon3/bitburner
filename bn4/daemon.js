@@ -31,6 +31,8 @@ import {
   recordResetSummary,
   consumeResetSummary,
 } from "../lib/daemon-lib.js";
+// Shared corporation orchestration (all corp-viable nodes) - see lib/corp-daemon.js.
+import { maybeSetupCorp, ensureCorpManagers } from "../lib/corp-daemon.js";
 
 // Every tunable value comes from lib/config.js, resolved for this BitNode (see
 // BITNODE there for the per-node overrides).
@@ -405,6 +407,14 @@ export async function main(ns) {
     await buyDarkweb(ns);
     rootEverything(ns);
 
+    // Corporation (now that we have corp API access everywhere): keep the one-shot
+    // creator running until a corp exists (self-funded + affordability-gated), then
+    // keep its managers on the reserved cloud-corp host. Runs first so the corp
+    // host reservation is published before the other helpers pick hosts. Self-gates
+    // on corp.enabled / affordability, so it's a quiet no-op until we can fund it.
+    const corpEvent = maybeSetupCorp(ns);
+    ensureCorpManagers(ns, new Set());
+
     // Launch helpers off-home when possible (keeps scarce home RAM for the
     // daemon). Income manager first, then UI/luxury scripts.
     ensureHelper(ns, CFG.paths.manager);
@@ -418,6 +428,7 @@ export async function main(ns) {
     ensureHelper(ns, ECON_SCRIPT, { optional: true });
 
     globalThis.gordState = await decideNextPriority(ns);
+    if (corpEvent) globalThis.gordState = { ...globalThis.gordState, ...corpEvent };
 
     const bought = buyAugs(ns);
     if (bought?.length) {

@@ -42,6 +42,8 @@ import {
   recordResetSummary,
   consumeResetSummary,
 } from "../lib/daemon-lib.js";
+// Shared corporation orchestration (all corp-viable nodes) - see lib/corp-daemon.js.
+import { maybeSetupCorp, ensureCorpManagers } from "../lib/corp-daemon.js";
 
 // Every tunable value comes from lib/config.js, resolved for BitNode 2 - that's
 // where BN2's gang shortcut (-9 karma instead of -54,000, Slum Snakes, $1M join
@@ -620,6 +622,16 @@ export async function main(ns) {
     // the hacking manager (our main income engine - starts earning on any 16GB
     // server, no port openers needed), then the UI/luxury scripts.
     ensureGangManagerRunning(ns);
+
+    // Corporation (now that we have corp API access everywhere): keep the one-shot
+    // creator running until a corp exists, then keep its managers alive on the
+    // reserved cloud-corp host. ensureGangManagerRunning has just published the
+    // gang reservation this tick; we add the corp host to that same fresh Set.
+    // Both self-gate on corp.enabled / affordability, so this is a quiet no-op
+    // until we can comfortably self-fund the corp.
+    const corpEvent = maybeSetupCorp(ns);
+    ensureCorpManagers(ns, globalThis.gordReservedHosts instanceof Set ? globalThis.gordReservedHosts : new Set());
+
     ensureHelper(ns, CFG.paths.manager);
     ensureHelper(ns, CFG.paths.dashboard);
     ensureHelper(ns, CFG.paths.stocks, { optional: true });
@@ -632,6 +644,7 @@ export async function main(ns) {
     ensureHelper(ns, ECON_SCRIPT, { optional: true, args: [GANG_JOIN_MONEY] });
 
     globalThis.gordState = await decideNextPriority(ns);
+    if (corpEvent) globalThis.gordState = { ...globalThis.gordState, ...corpEvent };
 
     const bought = buyAugs(ns);
     if (bought?.length) {

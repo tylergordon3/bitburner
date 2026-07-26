@@ -4,14 +4,15 @@
 // net, run the hacking botnet + helpers off-home, grind augs/factions, install,
 // finish), with BN3's defining mechanic bolted on: a CORPORATION.
 //
-// The corporation is the income engine here. Corp *creation* is a one-shot
-// (bn3/corp-create.js) the daemon launches while it has no corp; day-to-day play
-// is handed to the corp manager, split into lib/corp-steady.js (small, always-on,
-// on the dedicated cloud-corp host) and lib/corp-build.js (bounded structural
-// buildout, run as a periodic one-shot on borrowed off-home RAM). Both are far
-// too RAM-heavy to co-host with this daemon on home. This daemon likewise keeps
-// its own heaviest calls off home via bn3/backdoor.js (backdoors + finishing the
-// BN) and bn3/econ.js (hacknet + home-RAM spending).
+// The corporation is the income engine here. The whole corp machinery is now
+// shared across every corp-viable node in lib/corp-daemon.js (creation via the
+// one-shot lib/corp-create.js, plus keeping the managers alive): day-to-day play
+// is split into lib/corp-steady.js (small, always-on, on the dedicated cloud-corp
+// host) and lib/corp-build.js (bounded structural buildout, run as a periodic
+// one-shot on borrowed off-home RAM). Both are far too RAM-heavy to co-host with
+// this daemon on home. This daemon likewise keeps its own heaviest calls off home
+// via bn3/backdoor.js (backdoors + finishing the BN) and bn3/econ.js (hacknet +
+// home-RAM spending).
 //
 // Gangs still feature, but unlike BN2 there's no early-gang shortcut: forming
 // one needs -54,000 karma (SF2 lets us do it here at all). We don't grind crime
@@ -46,6 +47,7 @@ import {
   hackingLevel,
   freeRam,
   ensureHelper,
+  placeManager,
   buyDarkweb,
   rootEverything,
   acceptInvites,
@@ -55,6 +57,8 @@ import {
   recordResetSummary,
   consumeResetSummary,
 } from "../lib/daemon-lib.js";
+// Shared corporation orchestration (all corp-viable nodes) - see lib/corp-daemon.js.
+import { maybeSetupCorp, ensureCorpManagers } from "../lib/corp-daemon.js";
 
 // Every tunable value comes from lib/config.js, resolved for BitNode 3. BN3 has
 // no gang shortcut, so gang.karma keeps CONFIG's universal -54,000 gate (see
@@ -62,29 +66,15 @@ import {
 const CFG = forNode(3);
 const AUGS = CFG.augs;
 const GANG = CFG.gang;
-const CORP = CFG.corp;
 const FACTION_REQUIREMENTS = CFG.factions.requirements;
 
 // Off-home helper scripts (shared by every daemon) that keep this daemon's HOME
 // footprint small: each carries the expensive Singularity/Hacknet calls it needs,
 // and running them off-home means those never count against the daemon's RAM.
+// Corp orchestration (create + operate) lives in lib/corp-daemon.js.
 const BACKDOOR_SCRIPT = CFG.paths.backdoor;   // server backdoors + finishing the BN
 const ECON_SCRIPT = CFG.paths.econ;           // hacknet + home-RAM spending
-const CORP_CREATE_SCRIPT = CFG.paths.corpCreate; // one-shot corporation creation (BN3-only)
 const SELF = CFG.paths.daemon;                // this daemon's path (post-reset callback)
-
-// ── Corporation ───────────────────────────────────────────────────────────────
-const CORP_NAME = CORP.name;
-// The corp manager is split in two to shrink its permanently-resident footprint:
-//   - corp-steady.js: small, always-on, lives on the reserved cloud-corp host.
-//   - corp-build.js: large but bounded structural buildout, run as a periodic
-//     one-shot on borrowed off-home RAM (so its RAM is only held transiently).
-const CORP_SCRIPT = CFG.paths.corpSteady;
-const CORP_BUILD_SCRIPT = CFG.paths.corpBuild;
-// Dedicated cloud server for the always-on corp-steady manager. Reserved from the
-// botnet via globalThis.gordReservedHosts; sized to corp-steady (much smaller
-// than the old monolithic corp.js).
-const CORP_HOST = CORP.host;
 
 // ── Gang (late-game, -54k karma) ──────────────────────────────────────────────
 const GANG_KARMA = GANG.karma;
@@ -104,30 +94,7 @@ function inGangSafe(ns) {
   }
 }
 
-// ── Corporation setup ─────────────────────────────────────────────────────────
-
-/**
- * Ensure the corporation gets created, without carrying corporation.create-
- * Corporation (20GB) on home: while we have no corp, keep a one-shot creator
- * (bn3/corp-create.js) running off-home; it creates the corp and exits. Returns
- * a status object the first time a corp appears (surfaced on the dashboard),
- * else null. hasCorporation() itself is free (0GB), so this stays cheap.
- * @param {NS} ns
- */
-function maybeSetupCorp(ns) {
-  if (!ns.corporation.hasCorporation()) {
-    ensureHelper(ns, CORP_CREATE_SCRIPT, { optional: true });
-    globalThis.gordHadCorp = false;
-    return null;
-  }
-
-  // Only surface the event on a genuine 0->1 transition we watched this process
-  // lifetime (gordHadCorp === false). After a soft reset the corp persists but
-  // globalThis is wiped (undefined), so we must NOT report a spurious creation.
-  const surface = globalThis.gordHadCorp === false;
-  globalThis.gordHadCorp = true;
-  return surface ? { action: "Corp Created", detail: CORP_NAME } : null;
-}
+// ── Gang setup ────────────────────────────────────────────────────────────────
 
 /**
  * Found a gang the moment we're eligible: karma past the -54k gate AND already a
@@ -158,118 +125,28 @@ function maybeSetupGang(ns) {
 // ── Cloud-hosted managers (corp + gang) ──────────────────────────────────────
 
 /**
- * Buy/upgrade a dedicated cloud server to at least `needRam` (rounded up to the
- * next power of two, since purchased servers only come in those sizes). Spends
- * conservatively - at most half our cash - so it never starves aug/program buys.
- * Returns true once the host exists at sufficient size.
- * @param {NS} ns
- */
-function provisionCloudHost(ns, name, needRam) {
-  const cloud = ns.cloud;
-  if (cloud.getServerLimit() <= 0) return false;
-
-  const maxRam = cloud.getRamLimit();
-  let size = CFG.cloudHost.minRam;
-  while (size < needRam && size < maxRam) size *= 2;
-  if (size < needRam) return false; // even the largest tier can't hold it
-
-  const exists = ns.serverExists(name);
-  if (exists && ns.getServerMaxRam(name) >= needRam) return true;
-
-  const budget = playerMoney(ns) * CFG.cloudHost.spendFraction;
-
-  if (!exists) {
-    if (cloud.getServerNames().length >= cloud.getServerLimit()) return false;
-    if (cloud.getServerCost(size) > budget) return false;
-    if (cloud.purchaseServer(name, size)) {
-      ns.tprint(`Provisioned ${name} (${ns.format.ram(size)}).`);
-      return true;
-    }
-    return false;
-  }
-
-  const cost = cloud.getServerUpgradeCost(name, size);
-  if (cost < 0 || cost > budget) return false;
-  if (cloud.upgradeServer(name, size)) {
-    ns.tprint(`Upgraded ${name} -> ${ns.format.ram(size)}.`);
-    return true;
-  }
-  return false;
-}
-
-/**
- * Place one big, persistent manager (corp or gang). If it's already running
- * anywhere, just note whether it's on its dedicated host (so we can reserve it
- * from the botnet). Otherwise provision the dedicated cloud host and launch it
- * there, falling back to the roomiest off-home host, then home. Adds the
- * dedicated host to `reserved` whenever the manager lives on it.
- * @param {NS} ns @param {Set<string>} reserved
- */
-function placeManager(ns, script, dedicatedHost, reserved) {
-  const ram = ns.getScriptRam(script, "home");
-
-  const running = allServers(ns).find(h => ns.hasRootAccess(h) && ns.scriptRunning(script, h));
-  if (running) {
-    if (running === dedicatedHost) reserved.add(dedicatedHost);
-    return;
-  }
-
-  provisionCloudHost(ns, dedicatedHost, ram);
-
-  const offHome = allServers(ns)
-    .filter(s => s !== "home" && s !== dedicatedHost && ns.hasRootAccess(s) && ns.getServerMaxRam(s) > 0 && !reserved.has(s))
-    .sort((a, b) => freeRam(ns, b) - freeRam(ns, a));
-
-  const candidates = [];
-  if (ns.serverExists(dedicatedHost)) candidates.push(dedicatedHost);
-  candidates.push(...offHome, "home");
-
-  for (const host of candidates) {
-    const headroom = host === "home" ? CFG.helpers.homeHeadroom : 0;
-    if (freeRam(ns, host) - headroom < ram) continue;
-    if (host !== "home") ns.scp(ns.ls("home", ".js"), host, "home");
-    if (ns.exec(script, host, 1)) {
-      if (host === dedicatedHost) reserved.add(dedicatedHost);
-      ns.print(`Started ${script} on ${host}`);
-      return;
-    }
-  }
-
-  ns.print(`WARN: waiting for ${ns.format.ram(ram)} to place ${script}`);
-}
-
-/**
  * Keep the corp and gang managers running on their dedicated cloud hosts and
  * publish the combined botnet reservation so hacking/manager.js and pserv.js
  * leave those hosts alone. Rebuilt fresh each tick so a reset/relaunch heals it.
+ * Gang is placed first so its host is reserved before ensureCorpManagers looks
+ * for off-home RAM to run the corp-build one-shot; ensureCorpManagers then adds
+ * the corp host and republishes the reservation.
  * @param {NS} ns
  */
 function ensureCloudManagers(ns) {
   const reserved = new Set();
 
-  if (ns.corporation.hasCorporation()) {
-    // Always-on operator on the reserved cloud-corp host.
-    placeManager(ns, CORP_SCRIPT, CORP_HOST, reserved);
-    globalThis.gordCorpPending = !allServers(ns).some(h => ns.hasRootAccess(h) && ns.scriptRunning(CORP_SCRIPT, h));
-  } else {
-    globalThis.gordCorpPending = false;
-  }
-
   if (inGangSafe(ns)) {
     placeManager(ns, GANG_SCRIPT, GANG_HOST, reserved);
   }
-
   globalThis.gordReservedHosts = reserved;
-  globalThis.gordReservedRam = {};
 
-  // Periodic structural buildout as a one-shot on borrowed off-home RAM (never on
-  // a reserved host). It exits after each pass; ensureHelper relaunches it next
-  // tick until buildout converges, then each pass is a quick no-op. optional: it
-  // waits quietly when no off-home host is roomy enough (early game), just like
-  // the old monolithic corp.js waited for its dedicated host.
-  if (ns.corporation.hasCorporation()) {
-    ensureHelper(ns, CORP_BUILD_SCRIPT, { optional: true });
-  }
+  // Corp: places corp-steady on the reserved cloud-corp host (adding it to
+  // `reserved` + republishing) and runs the corp-build one-shot. Self-gates on
+  // corp.enabled / hasCorporation, so it's a no-op before the corp exists.
+  ensureCorpManagers(ns, reserved);
+
+  globalThis.gordReservedRam = {};
 }
 
 // ── Augs / install / infra (same policy as bn4) ──────────────────────────────

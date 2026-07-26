@@ -27,8 +27,11 @@
 // grind never loses ground across resets. Once the gang exists it becomes the
 // primary income + passive faction rep, and we revert to the ordinary aug flow.
 //
-// No corporation: BN5's corp nerf plus the large RAM/complexity cost make it a
-// poor trade against the gang, so this node skips the BN3 corp machinery entirely.
+// Corporation runs alongside the gang: the gang is still the primary engine here
+// (BN5's corp nerf makes a corp a weaker trade), but with corp API access
+// everywhere the corp is now built too, self-funded and affordability-gated so it
+// never stalls the gang/aug grind. The shared machinery lives in
+// lib/corp-daemon.js; flip corp.enabled off in BITNODE[5] to opt back out.
 
 import { managePurchasedServers } from "../lib/pserv.js";
 import {
@@ -64,6 +67,8 @@ import {
   recordResetSummary,
   consumeResetSummary,
 } from "../lib/daemon-lib.js";
+// Shared corporation orchestration (all corp-viable nodes) - see lib/corp-daemon.js.
+import { maybeSetupCorp, ensureCorpManagers } from "../lib/corp-daemon.js";
 
 // Every tunable value comes from lib/config.js, resolved for BitNode 5 - that's
 // where BN5's active-karma-grind flag lives (BITNODE[5].gang.activeKarmaGrind).
@@ -671,6 +676,14 @@ export async function main(ns) {
     // then the botnet income engine and UI/luxury scripts off-home. Gang first
     // so it can reserve cloud-gang from the botnet before the botnet claims it.
     ensureGangManagerRunning(ns);
+
+    // Corporation alongside the gang: keep the one-shot creator running until a
+    // corp exists (self-funded + affordability-gated), then keep its managers on
+    // the reserved cloud-corp host. ensureGangManagerRunning has just published
+    // the gang reservation this tick; we add the corp host to that same fresh Set.
+    const corpEvent = maybeSetupCorp(ns);
+    ensureCorpManagers(ns, globalThis.gordReservedHosts instanceof Set ? globalThis.gordReservedHosts : new Set());
+
     ensureHelper(ns, CFG.paths.manager);
     ensureHelper(ns, CFG.paths.dashboard);
     ensureHelper(ns, CFG.paths.stocks, { optional: true });
@@ -686,6 +699,7 @@ export async function main(ns) {
     ensureHelper(ns, ECON_SCRIPT, { optional: true });
 
     globalThis.gordState = await decideNextPriority(ns);
+    if (corpEvent) globalThis.gordState = { ...globalThis.gordState, ...corpEvent };
 
     const bought = buyAugs(ns);
     if (bought?.length) {

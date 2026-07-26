@@ -53,6 +53,8 @@ import {
   recordResetSummary,
   consumeResetSummary,
 } from "../lib/daemon-lib.js";
+// Shared corporation orchestration (all corp-viable nodes) - see lib/corp-daemon.js.
+import { maybeSetupCorp, ensureCorpManagers } from "../lib/corp-daemon.js";
 
 // Every tunable value comes from lib/config.js, resolved for BitNode 10 (see
 // BITNODE there - BN10 has no multiplier overrides, just its daemon path).
@@ -431,6 +433,13 @@ export async function main(ns) {
     // network (and our cash) have grown enough for sleeves to matter anyway.
     ensureHelper(ns, SLEEVE_SCRIPT);
 
+    // Corporation (now that we have corp API access everywhere): keep the one-shot
+    // creator running until a corp exists (self-funded + affordability-gated), then
+    // keep its managers on the reserved cloud-corp host. Self-gates on
+    // corp.enabled / affordability, so it's a quiet no-op until we can fund it.
+    const corpEvent = maybeSetupCorp(ns);
+    ensureCorpManagers(ns, new Set());
+
     // Botnet income engine, then UI/luxury scripts, all off-home.
     ensureHelper(ns, CFG.paths.manager);
     ensureHelper(ns, CFG.paths.dashboard);
@@ -444,6 +453,7 @@ export async function main(ns) {
     ensureHelper(ns, ECON_SCRIPT, { optional: true });
 
     globalThis.gordState = await decideNextPriority(ns);
+    if (corpEvent) globalThis.gordState = { ...globalThis.gordState, ...corpEvent };
 
     const bought = buyAugs(ns);
     if (bought?.length) {
