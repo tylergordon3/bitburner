@@ -37,6 +37,7 @@ import {
   getNextAugTarget,
   getAllAugCandidates,
   getUnjoinedFactionOpportunities,
+  getMoneyHoardGoal,
 } from "../lib/aug-targets.js";
 import { forNode } from "../lib/config.js";
 // Shared daemon core (identical across bn2/bn3/bn4/bn5/bn10) - see lib/daemon-lib.js.
@@ -68,7 +69,46 @@ const FACTION_REQUIREMENTS = CFG.factions.requirements;
 const BACKDOOR_SCRIPT = CFG.paths.backdoor;   // server backdoors + finishing the BN
 const ECON_SCRIPT = CFG.paths.econ;           // hacknet + home-RAM spending
 const SLEEVE_SCRIPT = CFG.paths.sleeves;      // buy sleeves + memory, keep them working
+const INFIL_SCRIPT = CFG.paths.infiltrate;    // DOM auto-solver for infiltration
+const INFIL = CFG.infiltration;
 const SELF = CFG.paths.daemon;                // this daemon's path (post-reset callback)
+
+/**
+ * True while the infiltration solver (lib/infiltrate.js) is mid-game. It publishes
+ * globalThis.gordInfiltrating; when set we must NOT issue any player action
+ * (gym/crime/faction/travel all cancel the mini-game), so the daemon yields.
+ * @param {NS} ns
+ */
+function isInfiltrating(ns) {
+  return INFIL.enabled && globalThis.gordInfiltrating === true;
+}
+
+/** True once the solver has ticked at least once (so starting a run is safe -
+ * otherwise we'd navigate to an infiltration nothing is there to play). */
+function infilSolverReady() {
+  return typeof globalThis.gordInfiltrating === "boolean";
+}
+
+/**
+ * Park the player on the infiltration location so the solver can click "Infiltrate
+ * Company" and begin the next run. Travels to the target city first if needed.
+ * Only used as an idle/saving activity; returns a status object, or null if we
+ * can't act yet (can't afford the trip, or the solver isn't up).
+ * @param {NS} ns
+ */
+function maybeStartInfiltration(ns) {
+  if (!INFIL.enabled || !INFIL.autoStart || !infilSolverReady()) return null;
+
+  const player = ns.getPlayer();
+  if (player.city !== INFIL.city) {
+    if (player.money < CFG.player.travelCost) return null;
+    ns.singularity.travelToCity(/** @type {any} */ (INFIL.city));
+    return { action: "Infiltrating", detail: `-> ${INFIL.city} for ${INFIL.location}` };
+  }
+  // Navigate to the company page; the solver clicks the Infiltrate button.
+  ns.singularity.goToLocation(/** @type {any} */ (INFIL.location));
+  return { action: "Infiltrating", detail: `${INFIL.location} (reward: ${INFIL.rewardMode})` };
+}
 
 /**
  * The BitNode to enter when lib/backdoor.js destroys w0r1d_d43m0n. Default is the
@@ -90,6 +130,8 @@ function buyAugs(ns) {
   const s = ns.singularity;
   const owned = new Set(s.getOwnedAugmentations(true));
   const joined = ns.getPlayer().factions ?? [];
+  // While hoarding cash for a money-gated invite, never spend below the floor.
+  const floor = globalThis.gordMoneyFloor ?? 0;
 
   const candidates = [];
   const purchases = [];
@@ -116,7 +158,7 @@ function buyAugs(ns) {
   });
 
   for (const c of candidates) {
-    if (canBuyAug(ns, c.faction, c.aug, owned)) {
+    if (canBuyAug(ns, c.faction, c.aug, owned) && playerMoney(ns) - c.price >= floor) {
       if (s.purchaseAugmentation(/** @type {any} */ (c.faction), c.aug)) {
         purchases.push(`${c.aug} from ${c.faction}`);
         owned.add(c.aug);
@@ -147,6 +189,11 @@ function startBestFactionWork(ns, faction) {
 
 /** @param {NS} ns */
 function maybeInstall(ns) {
+  // While hoarding for a money-gated invite, do NOT install: an install soft-resets
+  // and drops our skills below the invite's skill gates (which we've just met), and
+  // the pre-install NeuroFlux dump would spend the cash we're trying to hold.
+  if ((globalThis.gordMoneyFloor ?? 0) > 0) return;
+
   const ownedWithPurchased = ns.singularity.getOwnedAugmentations(true);
   const ownedInstalled = ns.singularity.getOwnedAugmentations(false);
   const queued = ownedWithPurchased.length - ownedInstalled.length;
@@ -210,6 +257,11 @@ function maybeInstall(ns) {
 async function maybeBuyInfra(ns, target) {
   const money = playerMoney(ns);
 
+  // Hoarding for a money-gated invite: hold cash, don't buy servers.
+  if ((globalThis.gordMoneyFloor ?? 0) > 0) {
+    return { action: "Holding Cash", detail: "servers paused - saving for a faction invite" };
+  }
+
   if (!target) {
     return await managePurchasedServers(ns, CFG.infra.noTarget.reserveMoney, CFG.infra.noTarget.spendFraction);
   }
@@ -272,6 +324,13 @@ async function decideNextPriority(ns) {
   const currentTarget = globalThis.gordState?.target;
   if (currentTarget?.faction) updateRepRate(ns, currentTarget.faction);
 
+  // Yield the player entirely while an infiltration mini-game is on screen: any
+  // gym/crime/faction/travel call below would cancel it. The solver handles the
+  // whole run + reward; we resume next tick once gordInfiltrating clears.
+  if (isInfiltrating(ns)) {
+    return { action: "Infiltrating", detail: "solving mini-game (player yielded)", target: null, infra: null };
+  }
+
   const opportunities = getUnjoinedFactionOpportunities(ns);
   globalThis.gordFactionPipeline = opportunities;
 
@@ -292,21 +351,55 @@ async function decideNextPriority(ns) {
   }
 
   const target = getNextAugTarget(ns);
+
+  // Money-gated endgame invites (Daedalus / The Covenant / Illuminati, ...): when
+  // we've met every requirement EXCEPT the big cash gate, hold cash instead of
+  // spending it away before the invite can fire. gordMoneyFloor is respected by
+  // buyAugs, maybeInstall, maybeBuyInfra here and by the sleeve manager off-home.
+  // Only considered when there's no ordinary aug target left (i.e. "out of factions").
+  const hoard = target ? null : getMoneyHoardGoal(ns);
+  globalThis.gordMoneyFloor = hoard ? hoard.money : 0;
+
   const infra  = await maybeBuyInfra(ns, target);
 
   // No aug target
   if (!target) {
+    // Prefix surfacing the money-hoard, if one is active, so it's visible whatever
+    // income activity we run underneath (spending is already blocked by the floor).
+    const held = hoard
+      ? `[holding $${ns.format.number(hoard.money)} for ${hoard.faction} invite, $${ns.format.number(hoard.moneyMissing)} to go] `
+      : "";
+
     const factionPursuit = await maybePursueNextFaction(ns, opportunities, true);
     if (factionPursuit) {
+      // Company Work actually issues workForCompany; doIdleWork's crime would
+      // cancel it (and crime earns no company rep), so return it directly. Other
+      // pursuits (city/combat) are directional - doIdleWork does the real income
+      // work toward them.
+      if (factionPursuit.action === "Company Work") {
+        return { ...factionPursuit, detail: held + factionPursuit.detail, target: null, infra };
+      }
       const moneyGoal = factionPursuit.joinMoneyMissing
         ? playerMoney(ns) + factionPursuit.joinMoneyMissing
         : 0;
       const idle = await doIdleWork(ns, moneyGoal);
-      return { ...factionPursuit, ...idle, target: null, infra };
+      return { ...factionPursuit, ...idle, detail: held + factionPursuit.detail, target: null, infra };
     }
 
-    const idle = await doIdleWork(ns);
-    return { ...idle, target: null, infra };
+    // Genuinely out of faction work -> infiltrate for money (+rep) if enabled,
+    // else fall back to ordinary idle work (crime/study/rep-banking). Both earn
+    // toward the hoard while the money floor stops us spending it away.
+    const infil = maybeStartInfiltration(ns);
+    const base = infil ?? (await doIdleWork(ns));
+    if (hoard) {
+      return {
+        action: "Saving for Faction",
+        detail: `${hoard.faction} invite: hold $${ns.format.number(hoard.money)} (need $${ns.format.number(hoard.moneyMissing)} more) | earning via ${base.action}`,
+        target: null,
+        infra,
+      };
+    }
+    return { ...base, target: null, infra };
   }
 
   // Combat-stat requirements for current faction
@@ -383,8 +476,14 @@ async function decideNextPriority(ns) {
       };
     }
 
-    // Focus mode: crime is the best use of player attention (money + combat +
-    // karma). Sleeves keep criming in the background regardless via lib/sleeves.js.
+    // Focus mode, rep already met - money is the only gate. Infiltration is the
+    // best focused money source here (also faction rep if rewardMode=="rep"), so
+    // prefer it; otherwise crime. Sleeves keep criming in the background either way.
+    const infil = maybeStartInfiltration(ns);
+    if (infil) {
+      return { ...infil, detail: `${infil.detail} | saving for ${target.aug}`, target, infra };
+    }
+
     const crime = await commitBestCrimeIfUseful(ns, `$${ns.format.number(target.moneyMissing)} for ${target.aug}`);
     if (crime) {
       return { ...crime, target, infra };
@@ -433,6 +532,11 @@ export async function main(ns) {
     // network (and our cash) have grown enough for sleeves to matter anyway.
     ensureHelper(ns, SLEEVE_SCRIPT);
 
+    // Infiltration auto-solver (DOM automation). Optional/off-home; it sits idle
+    // until the daemon parks us on a company page (maybeStartInfiltration), then
+    // plays the mini-game and publishes gordInfiltrating so we yield the player.
+    if (INFIL.enabled) ensureHelper(ns, INFIL_SCRIPT, { optional: true });
+
     // Corporation (now that we have corp API access everywhere): keep the one-shot
     // creator running until a corp exists (self-funded + affordability-gated), then
     // keep its managers on the reserved cloud-corp host. Self-gates on
@@ -454,6 +558,13 @@ export async function main(ns) {
 
     globalThis.gordState = await decideNextPriority(ns);
     if (corpEvent) globalThis.gordState = { ...globalThis.gordState, ...corpEvent };
+
+    // Publish the company-grind city intent so maybeAutoTravelForReadyFaction won't
+    // pull us home while we're deliberately parked in a megacorp's city for its rep
+    // (only meaningful when companyWorkNeedsCity is on). Cleared on any other action.
+    globalThis.gordCompanyCity = globalThis.gordState?.action === "Company Work"
+      ? globalThis.gordState.companyCity ?? null
+      : null;
 
     const bought = buyAugs(ns);
     if (bought?.length) {
