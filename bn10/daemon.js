@@ -69,46 +69,7 @@ const FACTION_REQUIREMENTS = CFG.factions.requirements;
 const BACKDOOR_SCRIPT = CFG.paths.backdoor;   // server backdoors + finishing the BN
 const ECON_SCRIPT = CFG.paths.econ;           // hacknet + home-RAM spending
 const SLEEVE_SCRIPT = CFG.paths.sleeves;      // buy sleeves + memory, keep them working
-const INFIL_SCRIPT = CFG.paths.infiltrate;    // DOM auto-solver for infiltration
-const INFIL = CFG.infiltration;
 const SELF = CFG.paths.daemon;                // this daemon's path (post-reset callback)
-
-/**
- * True while the infiltration solver (lib/infiltrate.js) is mid-game. It publishes
- * globalThis.gordInfiltrating; when set we must NOT issue any player action
- * (gym/crime/faction/travel all cancel the mini-game), so the daemon yields.
- * @param {NS} ns
- */
-function isInfiltrating(ns) {
-  return INFIL.enabled && globalThis.gordInfiltrating === true;
-}
-
-/** True once the solver has ticked at least once (so starting a run is safe -
- * otherwise we'd navigate to an infiltration nothing is there to play). */
-function infilSolverReady() {
-  return typeof globalThis.gordInfiltrating === "boolean";
-}
-
-/**
- * Park the player on the infiltration location so the solver can click "Infiltrate
- * Company" and begin the next run. Travels to the target city first if needed.
- * Only used as an idle/saving activity; returns a status object, or null if we
- * can't act yet (can't afford the trip, or the solver isn't up).
- * @param {NS} ns
- */
-function maybeStartInfiltration(ns) {
-  if (!INFIL.enabled || !INFIL.autoStart || !infilSolverReady()) return null;
-
-  const player = ns.getPlayer();
-  if (player.city !== INFIL.city) {
-    if (player.money < CFG.player.travelCost) return null;
-    ns.singularity.travelToCity(/** @type {any} */ (INFIL.city));
-    return { action: "Infiltrating", detail: `-> ${INFIL.city} for ${INFIL.location}` };
-  }
-  // Navigate to the company page; the solver clicks the Infiltrate button.
-  ns.singularity.goToLocation(/** @type {any} */ (INFIL.location));
-  return { action: "Infiltrating", detail: `${INFIL.location} (reward: ${INFIL.rewardMode})` };
-}
 
 /**
  * The BitNode to enter when lib/backdoor.js destroys w0r1d_d43m0n. Default is the
@@ -324,13 +285,6 @@ async function decideNextPriority(ns) {
   const currentTarget = globalThis.gordState?.target;
   if (currentTarget?.faction) updateRepRate(ns, currentTarget.faction);
 
-  // Yield the player entirely while an infiltration mini-game is on screen: any
-  // gym/crime/faction/travel call below would cancel it. The solver handles the
-  // whole run + reward; we resume next tick once gordInfiltrating clears.
-  if (isInfiltrating(ns)) {
-    return { action: "Infiltrating", detail: "solving mini-game (player yielded)", target: null, infra: null };
-  }
-
   const opportunities = getUnjoinedFactionOpportunities(ns);
   globalThis.gordFactionPipeline = opportunities;
 
@@ -386,11 +340,9 @@ async function decideNextPriority(ns) {
       return { ...factionPursuit, ...idle, detail: held + factionPursuit.detail, target: null, infra };
     }
 
-    // Genuinely out of faction work -> infiltrate for money (+rep) if enabled,
-    // else fall back to ordinary idle work (crime/study/rep-banking). Both earn
-    // toward the hoard while the money floor stops us spending it away.
-    const infil = maybeStartInfiltration(ns);
-    const base = infil ?? (await doIdleWork(ns));
+    // Genuinely out of faction work -> ordinary idle work (crime/study/rep-banking).
+    // This still earns toward the hoard while the money floor stops us spending it.
+    const base = await doIdleWork(ns);
     if (hoard) {
       return {
         action: "Saving for Faction",
@@ -476,14 +428,8 @@ async function decideNextPriority(ns) {
       };
     }
 
-    // Focus mode, rep already met - money is the only gate. Infiltration is the
-    // best focused money source here (also faction rep if rewardMode=="rep"), so
-    // prefer it; otherwise crime. Sleeves keep criming in the background either way.
-    const infil = maybeStartInfiltration(ns);
-    if (infil) {
-      return { ...infil, detail: `${infil.detail} | saving for ${target.aug}`, target, infra };
-    }
-
+    // Focus mode, rep already met - money is the only gate. Crime is the best
+    // focused money source; sleeves keep criming in the background too.
     const crime = await commitBestCrimeIfUseful(ns, `$${ns.format.number(target.moneyMissing)} for ${target.aug}`);
     if (crime) {
       return { ...crime, target, infra };
@@ -531,11 +477,6 @@ export async function main(ns) {
     // Early on there may be no host with room - it simply starts later, once the
     // network (and our cash) have grown enough for sleeves to matter anyway.
     ensureHelper(ns, SLEEVE_SCRIPT);
-
-    // Infiltration auto-solver (DOM automation). Optional/off-home; it sits idle
-    // until the daemon parks us on a company page (maybeStartInfiltration), then
-    // plays the mini-game and publishes gordInfiltrating so we yield the player.
-    if (INFIL.enabled) ensureHelper(ns, INFIL_SCRIPT, { optional: true });
 
     // Corporation (now that we have corp API access everywhere): keep the one-shot
     // creator running until a corp exists (self-funded + affordability-gated), then
