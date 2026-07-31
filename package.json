@@ -1,0 +1,13 @@
+{
+  "name": "gordnet-bitburner",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Bitburner automation. Node is used ONLY to unit-test the pure (ns-free) logic modules; the game itself needs no build step.",
+  "scripts": {
+    "test": "node --test tests/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

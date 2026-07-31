@@ -44,3 +44,53 @@ Each bitnode gets a thin `bnX/daemon.js` orchestrator; everything reusable lives
 - `lib/gang.js` — standalone BN-agnostic gang manager (recruit/ascend/equip/tasks/territory);
   reusable in any bitnode with SF2 gang access.
 
+## Capabilities
+
+[`lib/capabilities.js`](lib/capabilities.js) centralizes "which gated API is usable
+this run" into one **0GB** check (it reads `ns.getResetInfo()`, which is free).
+Every Source-File/BitNode-gated API — Singularity, Gang, Corporation, Sleeves,
+Grafting, Bladeburner, Hacknet-Server, Stanek — is available when you're in its
+BitNode *or* hold its Source-File, so this replaces scattered `try/catch` probes
+with `getCapabilities(ns)`. The decision logic is pure (`sourceFileLevel`,
+`hasApiAccess`, `singularityRamMultiplier`, `capabilitiesFromReset`) and unit-tested.
+
+## Coding contracts
+
+[`lib/contracts.js`](lib/contracts.js) is an off-home helper (launched by every
+daemon via `ensureHelper`) that scans the whole network for `.cct` files and solves
+them for money/rep/karma — a universal, node-agnostic income source the botnet
+ignores. The solver set in [`lib/contract-solvers.js`](lib/contract-solvers.js) is
+**pure** (0GB, unit-tested) and covers all 30 current contract types; unknown/future
+types are **skipped without spending a limited attempt**, so it can never destroy a
+contract by guessing.
+
+## Self-test
+
+Since this project can't run `tsc`, [`tools/self-test.js`](tools/self-test.js) is the
+in-game pre-flight check — run it after a sync, before `killall; run /early/driver.js`:
+
+```text
+run tools/self-test.js
+```
+
+It verifies every `CONFIG.paths` script exists, runs `getScriptRam()` over every
+`.js` on home (which parses each file and resolves its whole import closure, so a
+`0` result flags a syntax error or a missing/renamed import — a real compile check),
+reports each script's RAM cost, checks whether the current node's daemon fits home
+(i.e. whether `early/driver.js` will hand off yet), and prints detected API
+capabilities plus contract-solver coverage. It makes no purchases and never resets.
+
+## Testing
+
+The pure (`ns`-free) logic modules — `lib/capabilities.js`, `lib/contract-solvers.js`,
+`lib/grafting-logic.js` — have Node unit tests under [`tests/`](tests/). With Node ≥20:
+
+```bash
+npm test
+```
+
+This runs `node --test tests/*.test.mjs`. The game itself needs no build step; Node
+is only used to test the pure logic. Everything that touches `ns` stays in the
+importing module (e.g. `lib/grafting.js` gathers game data, then delegates the
+graft-vs-crime decision to the pure `lib/grafting-logic.js`).
+

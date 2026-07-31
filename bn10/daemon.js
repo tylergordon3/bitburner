@@ -69,6 +69,7 @@ const FACTION_REQUIREMENTS = CFG.factions.requirements;
 const BACKDOOR_SCRIPT = CFG.paths.backdoor;   // server backdoors + finishing the BN
 const ECON_SCRIPT = CFG.paths.econ;           // hacknet + home-RAM spending
 const SLEEVE_SCRIPT = CFG.paths.sleeves;      // buy sleeves + memory, keep them working
+const GRAFT_SCRIPT = CFG.paths.grafting;      // graft augs (no reset) during idle time
 const SELF = CFG.paths.daemon;                // this daemon's path (post-reset callback)
 
 /**
@@ -285,6 +286,12 @@ async function decideNextPriority(ns) {
   const currentTarget = globalThis.gordState?.target;
   if (currentTarget?.faction) updateRepRate(ns, currentTarget.faction);
 
+  // Default the player slot to "not free for grafting"; only the genuinely-idle
+  // fallback below opts back in. Set every tick so a stale `true` from a prior
+  // idle tick can't let the off-home grafting helper steal the slot once we've
+  // found real work to do. See lib/grafting.js for the coordination contract.
+  globalThis.gordGraftAllow = false;
+
   const opportunities = getUnjoinedFactionOpportunities(ns);
   globalThis.gordFactionPipeline = opportunities;
 
@@ -316,6 +323,23 @@ async function decideNextPriority(ns) {
 
   const infra  = await maybeBuyInfra(ns, target);
 
+  // A graft already in progress (started off-home by lib/grafting.js) OWNS the
+  // player's work slot: yield to it and issue no crime/faction work this tick,
+  // which would cancel it and waste the time already sunk. This runs even when an
+  // aug target has since appeared - the graft finishes first, then we resume. The
+  // "Grafting" action publishes New Tokyo as the stay-city (see main), so the
+  // auto-travel-home loop won't pull us out mid-graft.
+  const graft = globalThis.gordGraftState;
+  if (graft?.active) {
+    const eta = graft.etaMs ? ` (~${ns.format.time(graft.etaMs)} left)` : "";
+    return {
+      action: "Grafting",
+      detail: `${graft.aug}${eta} | Entropy ${graft.entropy}/${graft.entropyCap}`,
+      target,
+      infra,
+    };
+  }
+
   // No aug target
   if (!target) {
     // Prefix surfacing the money-hoard, if one is active, so it's visible whatever
@@ -340,8 +364,27 @@ async function decideNextPriority(ns) {
       return { ...factionPursuit, ...idle, detail: held + factionPursuit.detail, target: null, infra };
     }
 
-    // Genuinely out of faction work -> ordinary idle work (crime/study/rep-banking).
-    // This still earns toward the hoard while the money floor stops us spending it.
+    // Genuinely out of faction work: the player's work slot is now truly idle, so
+    // free it for grafting (the ONLY place we set this true) and let the off-home
+    // grafting helper's cost model decide. It reports `worthwhile` when grafting
+    // the best affordable aug beats idle crime in money-per-player-time (and we're
+    // under the entropy cap); if so, yield the slot to it rather than criming. It
+    // travels to New Tokyo and grafts next tick; "Grafting" sets the stay-city so
+    // auto-travel won't fight it. During a money hoard the spend floor makes
+    // nothing affordable, so `worthwhile` is false and idle crime runs as before.
+    globalThis.gordGraftAllow = true;
+    if (graft?.worthwhile && graft.best) {
+      const b = graft.best;
+      return {
+        action: "Grafting",
+        detail: `${held}starting ${b.aug}: $${ns.format.number(b.price)}, ~${ns.format.time(b.timeMs)} | Entropy ${graft.entropy}/${graft.entropyCap}`,
+        target: null,
+        infra,
+      };
+    }
+
+    // Not grafting -> ordinary idle work (crime/study/rep-banking). This still
+    // earns toward the hoard while the money floor stops us spending it.
     const base = await doIdleWork(ns);
     if (hoard) {
       return {
@@ -478,6 +521,13 @@ export async function main(ns) {
     // network (and our cash) have grown enough for sleeves to matter anyway.
     ensureHelper(ns, SLEEVE_SCRIPT);
 
+    // The grafting manager (VitaLife, New Tokyo): a second RAM-heavy off-home
+    // helper (~20GB of ns.grafting.*). It permanently installs augs WITHOUT a
+    // reset - ideal for BN10's long no-reset run - but only when decideNextPriority
+    // frees the player's work slot (gordGraftAllow) and its own cost model says
+    // grafting beats idle crime. Self-exits where the grafting API is unavailable.
+    ensureHelper(ns, GRAFT_SCRIPT, { optional: true });
+
     // Corporation (now that we have corp API access everywhere): keep the one-shot
     // creator running until a corp exists (self-funded + affordability-gated), then
     // keep its managers on the reserved cloud-corp host. Self-gates on
@@ -489,6 +539,11 @@ export async function main(ns) {
     ensureHelper(ns, CFG.paths.manager);
     ensureHelper(ns, CFG.paths.dashboard);
     ensureHelper(ns, CFG.paths.stocks, { optional: true });
+
+    // Coding-contract solver (universal across all nodes): solves .cct files
+    // network-wide for money/rep/karma, skipping unknown types. Off-home + optional
+    // (waits quietly for RAM), since contracts are rare and non-urgent.
+    ensureHelper(ns, CFG.paths.contracts, { optional: true });
 
     // Off-home helpers carrying this daemon's heaviest calls: backdoors + BN-finish
     // (nextBN defaults to the halt sentinel - see plannedNextBN; no cbScript arg,
@@ -503,8 +558,13 @@ export async function main(ns) {
     // Publish the company-grind city intent so maybeAutoTravelForReadyFaction won't
     // pull us home while we're deliberately parked in a megacorp's city for its rep
     // (only meaningful when companyWorkNeedsCity is on). Cleared on any other action.
+    // Grafting reuses the same stay-city mechanism: while a graft is running (or
+    // about to start), keep the player in New Tokyo so maybeAutoTravelForReadyFaction
+    // doesn't yank us home and cancel/stall it.
     globalThis.gordCompanyCity = globalThis.gordState?.action === "Company Work"
       ? globalThis.gordState.companyCity ?? null
+      : globalThis.gordState?.action === "Grafting"
+      ? CFG.grafting.city
       : null;
 
     const bought = buyAugs(ns);

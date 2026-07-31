@@ -688,6 +688,11 @@ export async function main(ns) {
     ensureHelper(ns, CFG.paths.dashboard);
     ensureHelper(ns, CFG.paths.stocks, { optional: true });
 
+    // Coding-contract solver (universal across all nodes): solves .cct files
+    // network-wide for money/rep/karma, skipping unknown types. Off-home + optional
+    // (waits quietly for RAM), since contracts are rare and non-urgent.
+    ensureHelper(ns, CFG.paths.contracts, { optional: true });
+
     // Off-home helpers carrying this daemon's heaviest calls: backdoors + BN-finish
     // (backdoor.js gets the next BitNode + this daemon's path forwarded), and
     // hacknet/home-RAM spending (econ.js - hacknet is weak in BN5 but it also

@@ -634,7 +634,56 @@ function buildOperationalCards(ns, C, data) {
         )),
       ]);
     })(),
+
+    // ── Coding Contracts ────────────────────────────────────────────────────
+    contractsCard(ns, C),
   ];
+}
+
+/**
+ * Coding-contract solver status. lib/contracts.js publishes
+ * globalThis.gordContractState (cumulative solved/failed, last reward, unknown
+ * types skipped). Universal across BitNodes, so it rides in the STATS tab rather
+ * than a per-node extra. Reads globalThis directly, so it's independent of the
+ * slow statsData refresh.
+ * @param {NS} ns
+ */
+function contractsCard(ns, C) {
+  const s = globalThis.gordContractState;
+  if (!s) {
+    return card(C, "CONTRACTS", [
+      el("div", { style: { color: C.dim, fontSize: "13px" } }, "contracts.js not running"),
+    ]);
+  }
+
+  const failColor = s.failedTotal > 0 ? C.red : C.dim;
+  const children = [
+    el("div", { style: { display: "flex", justifyContent: "space-between", marginBottom: "6px" } },
+      stat(C, "Solved", ns.format.number(s.solvedTotal), C.green),
+      stat(C, "Failed", ns.format.number(s.failedTotal), failColor),
+      stat(C, "Solvers", `${s.supportedCount} types`, C.blue),
+    ),
+    el("div", { style: { display: "flex", justifyContent: "space-between", fontSize: "12px", color: C.dim } },
+      el("span", {}, `Found last scan: ${s.found}`),
+      s.unsupported?.length
+        ? el("span", { style: { color: C.yellow } }, `${s.unsupported.length} unknown type(s) skipped`)
+        : el("span", {}, "all types known"),
+    ),
+  ];
+
+  if (s.lastReward) {
+    children.push(
+      el("div", {
+        style: {
+          marginTop: "6px", fontSize: "12px", color: C.green,
+          padding: "3px 6px", background: C.green + "11", borderRadius: "4px",
+          borderLeft: `3px solid ${C.green}`, wordBreak: "break-word",
+        },
+      }, `Last: ${s.lastReward}`),
+    );
+  }
+
+  return card(C, "CONTRACTS", children);
 }
 
 // Width is fixed to what the card layout was designed for; height tracks the
