@@ -7,12 +7,15 @@
 //                         bot's INTENTION changes (plus periodic progress ticks).
 //   journalPanel(ns, C) - renders that buffer as the HUD's JOURNAL tab.
 //
-// It only reads globalThis.gordState (+ gordGangBootstrap), which the daemon
-// publishes every tick, so it adds no Netscript RAM beyond the base script size.
-// To keep the log a NARRATIVE rather than spam, a new line is emitted only when
-// the intention changes (tracked by a stable key that ignores volatile figures),
-// plus one indented progress line each time a long goal crosses another
-// progressStepPct milestone (CONFIG.ui.journal).
+// It only reads globalThis (gordState, gordGangBootstrap, and the gordEvents bus),
+// which the daemon + helpers publish, so it adds no Netscript RAM beyond the base
+// script size. To keep the log a NARRATIVE rather than spam, an intention line is
+// emitted only when the plan changes (tracked by a stable key that ignores volatile
+// figures), plus one indented progress line each time a long goal crosses another
+// progressStepPct milestone (CONFIG.ui.journal). Interleaved with those are
+// discrete MILESTONE lines drained from globalThis.gordEvents - server buys,
+// faction joins, grafting travel, contracts solved, sleeves bought - which any
+// script records via lib/events.js emitEvent().
 //
 // Output is ASCII-only: the tail renders a plain text stream that does not decode
 // UTF-8, so box-drawing / arrow / check glyphs show up as mojibake. Keep every
@@ -68,6 +71,17 @@ export function updateJournal(ns) {
   if (reset && reset.at && reset.at !== shownResetAt) {
     shownResetAt = reset.at;
     push(resetSummaryText(reset), "sys", { augs: reset.augs ?? [], factions: [] });
+  }
+
+  // Discrete milestones any script pushed via lib/events.js (server buys, faction
+  // joins, grafting travel, contracts solved, sleeves bought). Drained here so they
+  // land in the narrative as they happen, independent of intention changes and even
+  // before the daemon has published a first gordState.
+  const events = globalThis.gordEvents;
+  if (events && events.length) {
+    for (const e of events.splice(0, events.length)) {
+      push(`${clock()}  ${e.text}`, e.kind ?? "event", e.hl);
+    }
   }
 
   const state = globalThis.gordState;
@@ -150,6 +164,8 @@ export function journalPanel(ns, C) {
   const lines = buf.slice(-(J.visibleLines || 100)).reverse();
 
   const colorFor = (k) => k === "buy" ? C.green
+                        : k === "faction" ? C.purple
+                        : k === "travel" ? C.blue
                         : k === "prog" ? C.dim
                         : k === "sys" ? C.blue
                         : "#e2e8f0";

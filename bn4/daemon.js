@@ -1,3 +1,20 @@
+// bn4/daemon.js
+//
+// BN4 ("The Singularity") orchestrator - and the REFERENCE implementation of the
+// shared per-node daemon skeleton that bn2/bn3/bn5/bn10 each specialise. BN4 has no
+// punishing multiplier overrides and no node-specific mechanic to chase, so it's
+// the plain loop the others are built from: accept invites, root the network, run
+// the HGW botnet plus the off-home helpers (backdoor, econ, dashboard, stocks,
+// contracts), grind toward the next augmentation/faction, install in batches, and
+// let lib/backdoor.js finish the node and enter the next one.
+//
+// Everything reusable lives in lib/, so this file holds only BN4's own decision
+// logic (decideNextPriority / maybeInstall / maybeBuyInfra) and the main() wiring;
+// the truly-shared plumbing comes from lib/daemon-lib.js (see the "identical across
+// ..." note on that import). The other daemons are this plus their node's special
+// system: gang in BN2, corp seed in BN3, karma-gang grind in BN5, and buying
+// sleeves + grafting in BN10.
+
 import { managePurchasedServers } from "../lib/pserv.js";
 import {
   trainCombatIfNeeded,

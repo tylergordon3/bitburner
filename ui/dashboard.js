@@ -47,9 +47,6 @@ const COMBAT_STAT_DEFS = UI.combatStats;
 // Servers that need backdoors for faction access / BN progression
 const BACKDOOR_CHECKLIST = UI.backdoorChecklist;
 
-// Factions worth joining for aug access - shown as joined / pending
-const FACTION_CHECKLIST = UI.factionChecklist;
-
 // The HUD tabs.
 const TABS = [
   { id: "stats",   label: "STATS" },
@@ -258,14 +255,18 @@ function statsPanel(ns, C, d) {
 }
 
 /**
- * Cross-BitNode progression: Source-Files, Intelligence, augs, karma/kills, and
- * all-time earnings. These carry across BitNodes (SF, Intelligence) or represent
- * whole-run progress, unlike the per-tick operational cards below.
+ * Progression, split into two side-by-side cards:
+ *   CURRENT RUN - everything scoped to this run / BitNode, reset on an install or
+ *                 on entering a new node (BitNode, karma, kills, run time, augs
+ *                 installed, money earned this install and all-time).
+ *   OVERALL     - what genuinely PERSISTS across BitNodes: today just Intelligence
+ *                 and the owned Source-Files. New persistent stats go here.
  * @param {NS} ns
  */
 function progressionCard(ns, C, d) {
   const fmt = (v) => (v == null ? "-" : ns.format.number(v));
   const rowStyle = { display: "flex", justifyContent: "space-between", marginTop: "6px" };
+  const firstRow = { ...rowStyle, marginTop: 0 };
   const badge = (color) => ({
     fontSize: "11px", padding: "1px 6px", borderRadius: "3px",
     border: `1px solid ${color}55`, color, background: color + "11",
@@ -275,26 +276,36 @@ function progressionCard(ns, C, d) {
     ? d.sf.map(([num, lvl]) => el("span", { key: num, style: badge(C.purple) }, `SF${num}.${lvl}`))
     : [el("span", { style: { color: C.dim, fontSize: "12px" } }, "none yet")];
 
-  return card(C, "PROGRESSION - persists across BitNodes", [
-    el("div", { style: rowStyle },
+  const currentCard = card(C, "CURRENT RUN", [
+    el("div", { style: firstRow },
       stat(C, "BitNode", `${d.node}${d.nodeName ? " " + d.nodeName : ""}`, C.blue),
-      stat(C, "Intelligence", ns.format.number(d.intelligence), C.purple),
-      stat(C, "Augs", `${d.augsInstalled} installed`),
+      stat(C, "Run", d.runDuration, C.yellow),
     ),
     el("div", { style: rowStyle },
       stat(C, "Karma", ns.format.number(d.karma), d.karma < 0 ? C.red : C.dim),
       stat(C, "Kills", d.kills),
-      stat(C, "Run", d.runDuration, C.yellow),
+      stat(C, "Augs", `${d.augsInstalled}`),
+    ),
+    el("div", { style: rowStyle },
+      stat(C, "$ this install", `$${fmt(d.install)}`, C.green),
+      stat(C, "$ all-time", `$${fmt(d.allTime)}`, C.green),
+    ),
+  ]);
+
+  const overallCard = card(C, "OVERALL - persists across BitNodes", [
+    el("div", { style: firstRow },
+      stat(C, "Intelligence", ns.format.number(d.intelligence), C.purple),
     ),
     el("div", { style: { marginTop: "8px" } },
       label(C, "SOURCE-FILES"),
       el("div", { style: { display: "flex", flexWrap: "wrap", gap: "4px" } }, ...sfBadges),
     ),
-    el("div", { style: { ...rowStyle, marginTop: "8px" } },
-      stat(C, "$ all-time", `$${fmt(d.allTime)}`, C.green),
-      stat(C, "$ this install", `$${fmt(d.install)}`, C.green),
-    ),
   ]);
+
+  return el("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px" } },
+    currentCard,
+    overallCard,
+  );
 }
 
 /**
@@ -434,61 +445,20 @@ function buildOperationalCards(ns, C, data) {
       ),
     ]),
 
-    // ── Network Checklist ───────────────────────────────────────────────────
-    card(C, "NETWORK", [
-      el("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "4px 16px" } },
-
-        // Backdoors - compact badge row
-        el("div", {},
-          el("div", { style: { fontSize: "11px", color: C.dim, letterSpacing: "1px", marginBottom: "4px" } }, "BACKDOORS"),
-          el("div", { style: { display: "flex", flexWrap: "wrap", gap: "4px" } },
-            ...network.backdoors.map(b => {
-              const color = b.done ? C.green : !b.exists ? "rgba(255,255,255,0.2)" : !b.rooted ? C.red : C.yellow;
-              return el("span", {
-                key: b.server,
-                style: {
-                  fontSize: "11px",
-                  padding: "1px 6px",
-                  borderRadius: "3px",
-                  border: `1px solid ${color}55`,
-                  color,
-                  background: color + "11",
-                },
-              }, b.label);
-            }),
-          ),
-        ),
-
-        // Factions - compact badge row
-        el("div", {},
-          el("div", { style: { fontSize: "11px", color: C.dim, letterSpacing: "1px", marginBottom: "4px" } }, "FACTIONS"),
-          el("div", { style: { display: "flex", flexWrap: "wrap", gap: "4px" } },
-            ...network.factions.map(f => {
-              const color = f.joined ? C.green : C.dim;
-              return el("span", {
-                key: f.name,
-                style: {
-                  fontSize: "11px",
-                  padding: "1px 6px",
-                  borderRadius: "3px",
-                  border: `1px solid ${color}55`,
-                  color,
-                  background: color + "11",
-                },
-              }, f.name);
-            }),
-          ),
-        ),
-      ),
-
-      // Programs - full-width badge row below the grid
-      el("div", { style: { marginTop: "8px", borderTop: `1px solid ${C.border}`, paddingTop: "6px" } },
-        el("div", { style: { fontSize: "11px", color: C.dim, letterSpacing: "1px", marginBottom: "4px" } }, "PROGRAMS"),
+    // ── Network + Contracts, side by side ───────────────────────────────────
+    // NETWORK (programs over backdoors, split by a rule, no labels) on the left,
+    // CONTRACTS on the right.
+    el("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px" } },
+      card(C, "NETWORK", [
+        // Port-opener programs on top, faction backdoors below, split by a thin rule
+        // (no sub-labels, tight spacing). Colour carries status: programs green when
+        // owned; backdoors green (done) / yellow (ready) / red (rooted, level too
+        // low) / faint (not yet reachable).
         el("div", { style: { display: "flex", flexWrap: "wrap", gap: "4px" } },
           ...network.programs.map(p => {
             const color = p.owned ? C.green : C.dim;
             return el("span", {
-              key: p.name,
+              key: `prog-${p.name}`,
               style: {
                 fontSize: "11px",
                 padding: "1px 6px",
@@ -500,8 +470,26 @@ function buildOperationalCards(ns, C, data) {
             }, p.label);
           }),
         ),
-      ),
-    ]),
+        el("div", { style: { marginTop: "4px", paddingTop: "4px", borderTop: `1px solid ${C.border}`, display: "flex", flexWrap: "wrap", gap: "4px" } },
+          ...network.backdoors.map(b => {
+            const color = b.done ? C.green : !b.exists ? "rgba(255,255,255,0.2)" : !b.rooted ? C.red : C.yellow;
+            return el("span", {
+              key: `bd-${b.server}`,
+              style: {
+                fontSize: "11px",
+                padding: "1px 6px",
+                borderRadius: "3px",
+                border: `1px solid ${color}55`,
+                color,
+                background: color + "11",
+              },
+            }, b.label);
+          }),
+        ),
+      ]),
+
+      contractsCard(ns, C),
+    ),
 
     // ── Aug Pipeline + Faction Pipeline (merged) ────────────────────────────
     card(C, "PIPELINE", [
@@ -634,9 +622,6 @@ function buildOperationalCards(ns, C, data) {
         )),
       ]);
     })(),
-
-    // ── Coding Contracts ────────────────────────────────────────────────────
-    contractsCard(ns, C),
   ];
 }
 
@@ -672,14 +657,20 @@ function contractsCard(ns, C) {
   ];
 
   if (s.lastReward) {
+    // Reward strings can be long (e.g. "... reputation for each of: A, B, C, ...").
+    // The card is now half-width, so truncate to keep it to ~2 lines and expose the
+    // full text as a hover title.
+    const reward = String(s.lastReward);
+    const shortReward = reward.length > 80 ? `${reward.slice(0, 77).trimEnd()}...` : reward;
     children.push(
       el("div", {
+        title: reward,
         style: {
-          marginTop: "6px", fontSize: "12px", color: C.green,
+          marginTop: "6px", fontSize: "11px", color: C.green,
           padding: "3px 6px", background: C.green + "11", borderRadius: "4px",
           borderLeft: `3px solid ${C.green}`, wordBreak: "break-word",
         },
-      }, `Last: ${s.lastReward}`),
+      }, `Last: ${shortReward}`),
     );
   }
 
@@ -784,8 +775,6 @@ const ROOTING_PROGRAMS = CONFIG.programs.portOpeners.map(name => ({
 
 /** @param {NS} ns */
 function getNetworkStatus(ns) {
-  const joinedSet = /** @type {Set<string>} */ (new Set(ns.getPlayer().factions ?? []));
-
   const backdoors = BACKDOOR_CHECKLIST.map(({ server, label }) => {
     const exists = ns.serverExists(server);
     const rooted = exists && ns.hasRootAccess(server);
@@ -793,18 +782,13 @@ function getNetworkStatus(ns) {
     return { server, label, exists, rooted, done };
   });
 
-  const factions = FACTION_CHECKLIST.map(name => ({
-    name,
-    joined: joinedSet.has(name),
-  }));
-
   const programs = ROOTING_PROGRAMS.map(({ name, label }) => ({
     name,
     label,
     owned: ns.fileExists(name, "home"),
   }));
 
-  return { backdoors, factions, programs };
+  return { backdoors, programs };
 }
 
 /** @param {NS} ns */

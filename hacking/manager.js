@@ -1,3 +1,26 @@
+// hacking/manager.js
+//
+// The HGW batching botnet - the daemon's core money engine, run OFF-home (exec'd by
+// each bnX/daemon.js via ensureHelper) so its ~11GB never competes with the daemon
+// for home RAM. globalThis is shared across hosts, so from wherever it lands it
+// drives the whole rooted network.
+//
+// Each loop it: roots every reachable server and scp's the four worker scripts
+// (hack/grow/weaken/share) out to them; reconciles the optional faction-rep SHARE
+// mode (ns.share on a small, capped slice of RAM - see manageShare / CONFIG.share);
+// scores every hackable target and picks the best (targetScore/bestTarget); PREPS
+// it to min-security / max-money (prep: weaken -> grow -> weaken); then launches
+// timed H/W/G/W batches sized to steal the largest money fraction that still fits
+// in free RAM (calcBestFitBatch), landing the four legs batchSpacingMs apart.
+// Leftover RAM is filled with a batch against the second-best target when it's
+// already prepped.
+//
+// Uses lib/formulas.js for exact steal-%, grow-thread and batch-timing math at the
+// prepped (min-sec/max-money) state when Formulas.exe is present, falling back to
+// the approximate ns.* analysis functions otherwise. Publishes
+// globalThis.gordHackState for the dashboard. Pass --reset to kill stale worker
+// scripts across the network before starting.
+
 import { allServers, root } from "../lib/net.js";
 import { CONFIG } from "../lib/config.js";
 import * as F from "../lib/formulas.js";
