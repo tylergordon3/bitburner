@@ -58,6 +58,7 @@ import {
   hackingLevel,
   freeRam,
   ensureHelper,
+  ensureBackdoorHelpers,
   buyDarkweb,
   rootEverything,
   acceptInvites,
@@ -80,7 +81,6 @@ const FACTION_REQUIREMENTS = CFG.factions.requirements;
 // Off-home helper scripts (shared by every daemon) that keep this daemon's HOME
 // footprint small: each carries the expensive Singularity/Hacknet calls it needs,
 // and running them off-home means those never count against the daemon's RAM.
-const BACKDOOR_SCRIPT = CFG.paths.backdoor;   // server backdoors + finishing the BN
 const ECON_SCRIPT = CFG.paths.econ;           // hacknet + home-RAM spending
 const SELF = CFG.paths.daemon;                // this daemon's path (post-reset callback)
 
@@ -111,11 +111,11 @@ function inGangSafe(ns) {
 }
 
 /**
- * The BitNode to enter when lib/backdoor.js destroys w0r1d_d43m0n - encoding the
+ * The BitNode to enter when lib/finish-bn.js destroys w0r1d_d43m0n - encoding the
  * "run BN5.1, then BN5.2, then stop" plan (see [[bitnode-progress]]):
  *   - BN5 with SF-5 level 0 (this is 5.1): re-enter BN5 (return 5) to do 5.2.
  *   - BN5 with SF-5 level >= 1 (5.2 done, or beyond): return 0, the halt sentinel
- *     lib/backdoor.js reads as "backdoor everything but DON'T auto-destroy" - the
+ *     ensureBackdoorHelpers reads as "backdoor everything but DON'T auto-destroy" - the
  *     player then destroys w0r1d_d43m0n manually and picks the next node (BN10).
  * An explicit daemon arg ([0]) always overrides. getResetInfo() is free (0GB).
  * @param {NS} ns
@@ -184,9 +184,11 @@ async function maybeSetupGang(ns) {
     return { ...training, detail: `${training.detail} (toward gang)` };
   }
 
-  // 2. Grind karma via the best available crime (homicide, else mug). This is
-  //    the crux of the BN5 strategy: crime earns karma + combat + money at once.
-  const crime = await commitBestCrimeIfUseful(ns, `karma ${karma.toFixed(0)}/${GANG_KARMA} -> gang`);
+  // 2. Grind karma via the best available crime. This is the crux of the BN5
+  //    strategy: crime earns karma + combat + money at once. Ranked by KARMA per
+  //    ms here rather than money (homicide is 3.0 a hit against mug's 0.25, so it
+  //    takes the lead far earlier than a money ranking would give it).
+  const crime = await commitBestCrimeIfUseful(ns, `karma ${karma.toFixed(0)}/${GANG_KARMA} -> gang`, { metric: "karma" });
   if (crime) return crime;
 
   // Post-bootstrap this shouldn't happen (mug chance is already high), but guard
@@ -672,6 +674,14 @@ export async function main(ns) {
     await buyDarkweb(ns);
     rootEverything(ns);
 
+    // Backdoors FIRST, ahead of every RAM-hungry helper below: CSEC/avmnite-02h/
+    // I.I.I.I/run4theh111z unlock CyberSec, NiteSec, The Black Hand and BitRunners,
+    // and the backdoor loop is only ~9GB now that the 32GB BitNode finisher is its
+    // own script (lib/finish-bn.js, launched by this same call once the world daemon
+    // is backdoored). Launched after the botnet it used to lose that race for RAM
+    // and never install a single backdoor.
+    ensureBackdoorHelpers(ns, plannedNextBN(ns));
+
     // Keep the gang manager alive on its reserved host (once we're in a gang),
     // then the botnet income engine and UI/luxury scripts off-home. Gang first
     // so it can reserve cloud-gang from the botnet before the botnet claims it.
@@ -693,14 +703,9 @@ export async function main(ns) {
     // (waits quietly for RAM), since contracts are rare and non-urgent.
     ensureHelper(ns, CFG.paths.contracts, { optional: true });
 
-    // Off-home helpers carrying this daemon's heaviest calls: backdoors + BN-finish
-    // (backdoor.js gets the next BitNode + this daemon's path forwarded), and
-    // hacknet/home-RAM spending (econ.js - hacknet is weak in BN5 but it also
-    // buys home RAM, which stays valuable).
-    // nextBN follows the 5.1->5.2->halt plan (plannedNextBN); no cbScript arg, so
-    // backdoor.js defaults it to the cold-start driver - the safe entry for a
-    // fresh 32GB node (running the big daemon directly there could fail to fit).
-    ensureHelper(ns, BACKDOOR_SCRIPT, { args: [plannedNextBN(ns)] });
+    // Hacknet/home-RAM spending, off-home (hacknet is weak in BN5 but econ.js also
+    // buys home RAM, which stays valuable). The backdoor helpers went up first,
+    // before the botnet claimed the network's RAM.
     ensureHelper(ns, ECON_SCRIPT, { optional: true });
 
     globalThis.gordState = await decideNextPriority(ns);

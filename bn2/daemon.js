@@ -33,6 +33,7 @@ import {
   hackingLevel,
   freeRam,
   ensureHelper,
+  ensureBackdoorHelpers,
   buyDarkweb,
   rootEverything,
   acceptInvites,
@@ -56,7 +57,6 @@ const FACTION_REQUIREMENTS = CFG.factions.requirements;
 // Off-home helper scripts (shared by every daemon) that keep this daemon's HOME
 // footprint small: each carries the expensive Singularity/Hacknet calls it needs,
 // and running them off-home means those never count against the daemon's RAM.
-const BACKDOOR_SCRIPT = CFG.paths.backdoor;   // server backdoors + finishing the BN
 const ECON_SCRIPT = CFG.paths.econ;           // hacknet + home-RAM spending
 const SELF = CFG.paths.daemon;                // this daemon's path (post-reset callback)
 
@@ -109,7 +109,8 @@ async function maybeSetupGang(ns) {
   // 2. Karma (crime also earns the $1M join money along the way)
   const karma = player.karma ?? 0;
   if (karma > GANG_KARMA) {
-    const crime = await commitBestCrimeIfUseful(ns, `karma ${karma.toFixed(1)}/${GANG_KARMA}`);
+    // Ranked by KARMA per ms, not money: karma is the gate we're grinding here.
+    const crime = await commitBestCrimeIfUseful(ns, `karma ${karma.toFixed(1)}/${GANG_KARMA}`, { metric: "karma" });
     if (crime) return crime;
     return { action: "Gang Blocked", detail: "Crime chance too low for karma grind" };
   }
@@ -617,6 +618,14 @@ export async function main(ns) {
     await buyDarkweb(ns);
     rootEverything(ns);
 
+    // Backdoors FIRST, ahead of every RAM-hungry helper below: CSEC/avmnite-02h/
+    // I.I.I.I/run4theh111z unlock CyberSec, NiteSec, The Black Hand and BitRunners,
+    // and the backdoor loop is only ~9GB now that the 32GB BitNode finisher is its
+    // own script (lib/finish-bn.js, launched by this same call once the world daemon
+    // is backdoored). Launched after the botnet it used to lose that race for RAM
+    // and never install a single backdoor.
+    ensureBackdoorHelpers(ns, Number(ns.args[0] ?? CFG.backdoor.defaultNextBN), SELF);
+
     // Launch helpers off-home (the ~63GB daemon fills home by itself). Order by
     // priority: gang first (it also reserves cloud-gang from the botnet), then
     // the hacking manager (our main income engine - starts earning on any 16GB
@@ -641,11 +650,9 @@ export async function main(ns) {
     // (waits quietly for RAM), since contracts are rare and non-urgent.
     ensureHelper(ns, CFG.paths.contracts, { optional: true });
 
-    // Off-home helpers carrying this daemon's heaviest calls: backdoors + BN-finish
-    // (backdoor.js gets the next BitNode + this daemon's path forwarded), and
-    // hacknet/home-RAM spending (econ.js). econ keeps the gang-join money free
-    // while we're still bootstrapping toward the gang.
-    ensureHelper(ns, BACKDOOR_SCRIPT, { args: [Number(ns.args[0] ?? CFG.backdoor.defaultNextBN), SELF] });
+    // Hacknet/home-RAM spending (econ.js), off-home; it keeps the gang-join money
+    // free while we're still bootstrapping toward the gang. The backdoor helpers
+    // went up first, before the botnet claimed the network's RAM.
     ensureHelper(ns, ECON_SCRIPT, { optional: true, args: [GANG_JOIN_MONEY] });
 
     globalThis.gordState = await decideNextPriority(ns);

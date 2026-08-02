@@ -81,7 +81,8 @@ function rosterCard(ns, C, s) {
     progressBar(memFrac, s.memoryDone ? C.green : C.yellow),
     label(C, s.allProductive
       ? "All sleeves synced + earning"
-      : "Bringing sleeves up (shock -> sync -> crime)"),
+      : `Bringing sleeves up (${s.earning ?? 0}/${s.count} earning)`),
+    ...(s.factionGrind ? [label(C, `Weak sleeves on field work for ${s.factionGrind}`)] : []),
   ]);
 }
 
@@ -89,6 +90,8 @@ function rosterCard(ns, C, s) {
 function sleeveListCard(ns, C, s) {
   const rows = s.sleeves.map(x => {
     const color = x.action.startsWith("Crime") ? C.green
+      : x.action.startsWith("Faction") ? C.purple
+      : x.action.startsWith("Gym") ? C.blue
       : x.action === "Synchronizing" ? C.yellow
       : C.dim;
     const detail = `sh ${x.shock.toFixed(0)} / sy ${x.sync.toFixed(0)} / mem ${x.memory}`;

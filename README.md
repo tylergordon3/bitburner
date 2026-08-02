@@ -83,7 +83,8 @@ capabilities plus contract-solver coverage. It makes no purchases and never rese
 ## Testing
 
 The pure (`ns`-free) logic modules — `lib/capabilities.js`, `lib/contract-solvers.js`,
-`lib/grafting-logic.js` — have Node unit tests under [`tests/`](tests/). With Node ≥20:
+`lib/grafting-logic.js`, `lib/crime-logic.js` — have Node unit tests under
+[`tests/`](tests/). With Node ≥20:
 
 ```bash
 npm test

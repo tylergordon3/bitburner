@@ -47,6 +47,7 @@ import {
   hackingLevel,
   freeRam,
   ensureHelper,
+  ensureBackdoorHelpers,
   placeManager,
   buyDarkweb,
   rootEverything,
@@ -72,7 +73,6 @@ const FACTION_REQUIREMENTS = CFG.factions.requirements;
 // footprint small: each carries the expensive Singularity/Hacknet calls it needs,
 // and running them off-home means those never count against the daemon's RAM.
 // Corp orchestration (create + operate) lives in lib/corp-daemon.js.
-const BACKDOOR_SCRIPT = CFG.paths.backdoor;   // server backdoors + finishing the BN
 const ECON_SCRIPT = CFG.paths.econ;           // hacknet + home-RAM spending
 const SELF = CFG.paths.daemon;                // this daemon's path (post-reset callback)
 
@@ -504,6 +504,14 @@ export async function main(ns) {
     await buyDarkweb(ns);
     rootEverything(ns);
 
+    // Backdoors FIRST, ahead of every RAM-hungry helper below: CSEC/avmnite-02h/
+    // I.I.I.I/run4theh111z unlock CyberSec, NiteSec, The Black Hand and BitRunners,
+    // and the backdoor loop is only ~9GB now that the 32GB BitNode finisher is its
+    // own script (lib/finish-bn.js, launched by this same call once the world daemon
+    // is backdoored). Launched after the botnet it used to lose that race for RAM
+    // and never install a single backdoor.
+    ensureBackdoorHelpers(ns, Number(ns.args[0] ?? CFG.backdoor.defaultNextBN), SELF);
+
     // BN3 setup: create the corp (one free call), and snap up a gang if karma
     // has crossed the -54k gate. Both are quick, idempotent no-ops afterward.
     const corpEvent = maybeSetupCorp(ns);
@@ -521,11 +529,8 @@ export async function main(ns) {
     // (waits quietly for RAM), since contracts are rare and non-urgent.
     ensureHelper(ns, CFG.paths.contracts, { optional: true });
 
-    // Off-home helpers that carry this daemon's heaviest calls (see their file
-    // headers): backdoors + BN-finish, and hacknet/home-RAM spending. backdoor.js
-    // gets the next BitNode forwarded (the driver launches us with no args, so
-    // this defaults to 1 - same as the old in-daemon behaviour).
-    ensureHelper(ns, BACKDOOR_SCRIPT, { args: [Number(ns.args[0] ?? CFG.backdoor.defaultNextBN), SELF] });
+    // Hacknet/home-RAM spending, off-home (see its file header). The backdoor
+    // helpers went up first, before the botnet claimed the network's RAM.
     ensureHelper(ns, ECON_SCRIPT, { optional: true });
 
     globalThis.gordState = await decideNextPriority(ns);

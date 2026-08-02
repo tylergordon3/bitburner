@@ -32,6 +32,8 @@ import {
   estimateIncomeRate,
   updateRepRate,
   doIdleWork,
+  recordFactionWork,
+  clearFactionWork,
 } from "../lib/player-actions.js";
 import {
   getNextAugTarget,
@@ -45,6 +47,7 @@ import {
   playerMoney,
   hackingLevel,
   ensureHelper,
+  ensureBackdoorHelpers,
   buyDarkweb,
   rootEverything,
   acceptInvites,
@@ -66,16 +69,16 @@ const FACTION_REQUIREMENTS = CFG.factions.requirements;
 // Off-home helper scripts (shared by every daemon) that keep this daemon's HOME
 // footprint small: each carries the expensive Singularity/Hacknet/Sleeve calls it
 // needs, and running them off-home means those never count against the daemon's RAM.
-const BACKDOOR_SCRIPT = CFG.paths.backdoor;   // server backdoors + finishing the BN
 const ECON_SCRIPT = CFG.paths.econ;           // hacknet + home-RAM spending
 const SLEEVE_SCRIPT = CFG.paths.sleeves;      // buy sleeves + memory, keep them working
 const GRAFT_SCRIPT = CFG.paths.grafting;      // graft augs (no reset) during idle time
 const SELF = CFG.paths.daemon;                // this daemon's path (post-reset callback)
 
 /**
- * The BitNode to enter when lib/backdoor.js destroys w0r1d_d43m0n. Default is the
- * HALT sentinel (<= 0), which backdoor.js reads as "backdoor everything but DON'T
- * auto-destroy". That's the whole BN10 strategy: buying every sleeve + maxing
+ * The BitNode to enter when lib/finish-bn.js destroys w0r1d_d43m0n. Default is the
+ * HALT sentinel (<= 0), which ensureBackdoorHelpers reads as "backdoor everything
+ * but DON'T auto-destroy" (it never launches the finisher, and announces once
+ * instead). That's the whole BN10 strategy: buying every sleeve + maxing
  * memory only happens in this node and takes a full run, so we stay and shop
  * rather than smashing the node and leaving. Finish manually once the SLEEVE tab
  * shows the roster complete. An explicit daemon arg ([0]) overrides (e.g.
@@ -133,7 +136,12 @@ function buyAugs(ns) {
 
 const INSTALL_PRIORITY_AUGS = AUGS.installPriority;
 
-/** @param {NS} ns */
+/**
+ * Start the best available faction work, and publish which faction we're grinding
+ * (recordFactionWork) so the off-home sleeve manager can put its too-weak-to-crime
+ * sleeves on FIELD WORK for the same faction - see lib/sleeves.js.
+ * @param {NS} ns
+ */
 function startBestFactionWork(ns, faction) {
   const types = CFG.player.factionWorkTypes;
 
@@ -143,7 +151,10 @@ function startBestFactionWork(ns, faction) {
       /** @type {any} */ (type),
       shouldFocus(ns)
     );
-    if (ok) return type;
+    if (ok) {
+      recordFactionWork(faction, type);
+      return type;
+    }
   }
 
   return null;
@@ -291,6 +302,12 @@ async function decideNextPriority(ns) {
   // idle tick can't let the off-home grafting helper steal the slot once we've
   // found real work to do. See lib/grafting.js for the coordination contract.
   globalThis.gordGraftAllow = false;
+
+  // Same idea for the faction grind the sleeve manager shadows: clear it here and
+  // let whichever path actually issues faction work this tick re-publish it, so a
+  // tick that moves on to crime/grafting can't leave sleeves working a stale
+  // faction. See recordFactionWork in lib/player-actions.js.
+  clearFactionWork();
 
   const opportunities = getUnjoinedFactionOpportunities(ns);
   globalThis.gordFactionPipeline = opportunities;
@@ -513,6 +530,14 @@ export async function main(ns) {
     await buyDarkweb(ns);
     rootEverything(ns);
 
+    // Backdoors FIRST, ahead of every RAM-hungry helper below. CSEC/avmnite-02h/
+    // I.I.I.I/run4theh111z are what unlock CyberSec, NiteSec, The Black Hand and
+    // BitRunners, and the backdoor loop only needs ~9GB now that the 32GB BitNode
+    // finisher is its own script (lib/finish-bn.js, launched by this same call once
+    // the world daemon is backdoored). Launched after the botnet it used to lose the
+    // race for RAM and never install a single backdoor.
+    ensureBackdoorHelpers(ns, plannedNextBN(ns));
+
     // The BN10 headline act: the sleeve manager (buy every sleeve + max memory +
     // keep them working). It's ~40GB of ns.sleeve.* calls, so it runs off-home
     // like the gang manager; ensureHelper places it on the roomiest rooted host.
@@ -545,11 +570,7 @@ export async function main(ns) {
     // (waits quietly for RAM), since contracts are rare and non-urgent.
     ensureHelper(ns, CFG.paths.contracts, { optional: true });
 
-    // Off-home helpers carrying this daemon's heaviest calls: backdoors + BN-finish
-    // (nextBN defaults to the halt sentinel - see plannedNextBN; no cbScript arg,
-    // so backdoor.js defaults it to the cold-start driver), and hacknet/home-RAM
-    // spending (econ.js).
-    ensureHelper(ns, BACKDOOR_SCRIPT, { args: [plannedNextBN(ns)] });
+    // Hacknet + home-RAM spending, off-home (the backdoor helpers went up first).
     ensureHelper(ns, ECON_SCRIPT, { optional: true });
 
     globalThis.gordState = await decideNextPriority(ns);
