@@ -70,10 +70,18 @@ function rosterCard(ns, C, s) {
   const costColor = s.maxed ? C.green : C.yellow;
   const costText = s.maxed ? "roster maxed" : `$${ns.format.number(s.nextCost)}`;
 
+  // Augs still on offer across the roster - 0 means every sleeve is fully
+  // augmented (or still shedding shock, which is what gates buying them).
+  const augText = s.augsAvailable
+    ? `${s.augsAvailable} available${s.augsThisTick ? ` (+${s.augsThisTick} this tick)` : ""}`
+    : "all bought";
+  const augColor = s.augsAvailable ? C.yellow : C.green;
+
   return card(C, "SLEEVES", [
     el("div", { style: { display: "flex", justifyContent: "space-between", marginBottom: "6px" } },
       stat(C, "Owned", String(s.count), C.blue),
       stat(C, "Next sleeve", costText, costColor),
+      stat(C, "Augs", augText, augColor),
     ),
     label(C, s.memoryDone
       ? "Memory maxed on all sleeves"
