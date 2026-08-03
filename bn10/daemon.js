@@ -14,12 +14,20 @@
 // each. That work is delegated to lib/sleeves.js, launched off-home here (it's
 // ~40GB of ns.sleeve.* calls, far too heavy for home) and left running.
 //
-// Because that's a long, one-time shopping spree, this daemon deliberately does
-// NOT auto-destroy w0r1d_d43m0n (plannedNextBN returns the halt sentinel):
+// The other persistent engines run alongside it: a CORPORATION, and - once karma
+// crosses the universal -54,000 gate while we're in a criminal faction - a GANG.
+// Neither is BN10-specific (both just need their Source-File), and both are pure
+// passive income + faction rep across a long run that never resets, so this daemon
+// founds them when they're free to found and keeps their managers alive on
+// dedicated, botnet-reserved cloud hosts (ensureCloudManagers).
+//
+// Because the sleeve spree is a long, one-time shopping trip, this daemon
+// deliberately does NOT auto-destroy w0r1d_d43m0n (plannedNextBN returns the halt sentinel):
 // backdoor.js still backdoors everything, but you finish manually once the sleeve
 // roster is complete (watch the SLEEVE dashboard tab). Pass a node number as
 // arg[0] to override and auto-progress.
 
+import { allServers } from "../lib/net.js";
 import { managePurchasedServers } from "../lib/pserv.js";
 import {
   trainCombatIfNeeded,
@@ -48,6 +56,7 @@ import {
   hackingLevel,
   ensureHelper,
   ensureBackdoorHelpers,
+  placeManager,
   buyDarkweb,
   rootEverything,
   acceptInvites,
@@ -64,6 +73,7 @@ import { maybeSetupCorp, ensureCorpManagers } from "../lib/corp-daemon.js";
 // BITNODE there - BN10 has no multiplier overrides, just its daemon path).
 const CFG = forNode(10);
 const AUGS = CFG.augs;
+const GANG = CFG.gang;
 const FACTION_REQUIREMENTS = CFG.factions.requirements;
 
 // Off-home helper scripts (shared by every daemon) that keep this daemon's HOME
@@ -72,7 +82,107 @@ const FACTION_REQUIREMENTS = CFG.factions.requirements;
 const ECON_SCRIPT = CFG.paths.econ;           // hacknet + home-RAM spending
 const SLEEVE_SCRIPT = CFG.paths.sleeves;      // buy sleeves + memory, keep them working
 const GRAFT_SCRIPT = CFG.paths.grafting;      // graft augs (no reset) during idle time
+const GANG_SCRIPT = CFG.paths.gang;           // gang management (~36GB), off-home
 const SELF = CFG.paths.daemon;                // this daemon's path (post-reset callback)
+
+// ── Gang ─────────────────────────────────────────────────────────────────────
+// A gang is available in ANY node once SF2 is owned, not just BN2/BN3/BN5 - and
+// it's a strong, wholly passive income + faction-rep engine here, where a run
+// lasts a long time and never resets. BN10 keeps CONFIG's universal -54,000 karma
+// gate and never grinds toward it (activeKarmaGrind is off): the crime the daemon
+// and every sleeve already commit sinks karma anyway, and when it crosses the gate
+// we found a gang for free. Founding also works if the player did it by hand -
+// maybeSetupGang is a no-op then, and the manager is launched either way.
+const GANG_HOST = GANG.host;
+// Criminal factions that can found a gang; whichever we're already in gets used.
+// Cast to any[] so its elements don't trip checkJs against FactionName - see
+// [[bitburner-enum-string-casts]].
+const CRIMINAL_FACTIONS = /** @type {any[]} */ (GANG.criminalFactions);
+
+/**
+ * The faction our gang belongs to, or null when we have no gang. Read from the
+ * state lib/gang.js publishes, so it costs nothing and is empty until the manager
+ * is up - callers just treat that as "no gang" for a tick or two.
+ * @param {NS} ns
+ */
+function gangFaction(ns) {
+  return inGangSafe(ns) ? globalThis.gordGangState?.faction ?? null : null;
+}
+
+/** @param {NS} ns - true if we're in a gang; false (not just missing API) otherwise. */
+function inGangSafe(ns) {
+  try {
+    return ns.gang.inGang();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Found a gang the moment we're eligible: karma past the gate AND already a member
+ * of a criminal faction (acceptInvites joins those on the normal aug path). We
+ * never grind toward it here - crime done for money sinks karma over a long run,
+ * and this snaps the gang up when it crosses. Returns a status object worth
+ * reporting, or null.
+ * @param {NS} ns
+ */
+function maybeSetupGang(ns) {
+  if (inGangSafe(ns)) return null;
+
+  const player = ns.getPlayer();
+  if ((player.karma ?? 0) > GANG.karma) return null; // not eligible yet
+
+  const joined = player.factions ?? [];
+  const faction = CRIMINAL_FACTIONS.find(f => joined.includes(f));
+  if (!faction) {
+    return { action: "Gang (karma ready)", detail: "Awaiting a criminal faction invite" };
+  }
+
+  try {
+    if (ns.gang.createGang(/** @type {any} */ (faction))) {
+      ns.tprint(`Created gang with ${faction}!`);
+      return { action: "Gang Created", detail: faction };
+    }
+  } catch { /* no SF2 in this run - nothing to found */ }
+
+  return null;
+}
+
+/**
+ * Keep the cloud-hosted managers (gang, corp) alive on their dedicated hosts and
+ * publish the botnet reservation so hacking/manager.js and lib/pserv.js leave
+ * those hosts alone. Rebuilt fresh each tick so a kill/relaunch heals it.
+ *
+ * Gang goes first so cloud-gang is reserved before ensureCorpManagers goes looking
+ * for off-home RAM. lib/gang.js is ~36GB - without a dedicated host it loses every
+ * race against the botnet, which is exactly how a hand-created gang ends up with
+ * no manager running at all.
+ * @param {NS} ns
+ */
+function ensureCloudManagers(ns) {
+  const reserved = new Set();
+
+  if (inGangSafe(ns)) {
+    // While the manager ISN'T up yet, carve its RAM out of home (the botnet
+    // honours globalThis.gordReservedRam and vacates within a batch or two). By
+    // this point in a BN10 run the botnet has usually filled every host including
+    // home, so without this the ~36GB manager can wait forever for a gap - which
+    // is how a hand-created gang ends up with nothing managing it. Cleared again
+    // the moment it's running, so the botnet gets the space back.
+    const ram = ns.getScriptRam(GANG_SCRIPT, CFG.paths.home);
+    const running = allServers(ns).some(h => ns.hasRootAccess(h) && ns.scriptRunning(GANG_SCRIPT, h));
+    globalThis.gordReservedRam = running ? {} : { home: ram + GANG.homeReserveSlack };
+
+    placeManager(ns, GANG_SCRIPT, GANG_HOST, reserved);
+  } else {
+    globalThis.gordReservedRam = {};
+  }
+  globalThis.gordReservedHosts = reserved;
+
+  // Corp: places corp-steady on the reserved cloud-corp host (adding it to
+  // `reserved` + republishing) and runs the corp-build one-shot.
+  ensureCorpManagers(ns, reserved);
+}
 
 /**
  * The BitNode to enter when lib/finish-bn.js destroys w0r1d_d43m0n. Default is the
@@ -267,9 +377,11 @@ function maybeDoSecondaryFactionWork(ns, primaryFaction) {
   const s = ns.singularity;
   const owned = new Set(s.getOwnedAugmentations(true));
   const joined = ns.getPlayer().factions ?? [];
+  const ourGangFaction = gangFaction(ns);
 
   for (const factionName of joined) {
     if (factionName === primaryFaction) continue;
+    if (factionName === ourGangFaction) continue; // gang rep is passive (from respect)
 
     const augs = s.getAugmentationsFromFaction(/** @type {any} */ (factionName));
     const currentRep = s.getFactionRep(/** @type {any} */ (factionName));
@@ -423,6 +535,20 @@ async function decideNextPriority(ns) {
 
   // Rep still needed
   if (target.repMissing > 0) {
+    // A gang faction's rep accrues passively from gang respect, and workForFaction
+    // isn't even offered for it - so spend the player's attention elsewhere and let
+    // the gang do the work.
+    if (target.faction === gangFaction(ns)) {
+      const secondary = maybeDoSecondaryFactionWork(ns, target.faction);
+      const extra = secondary ?? (await doIdleWork(ns))?.detail;
+      return {
+        action: "Gang Rep (passive)",
+        detail: `${target.faction} respect -> ${target.aug}${extra ? ` | ${extra}` : ""}`,
+        target,
+        infra,
+      };
+    }
+
     const workType = startBestFactionWork(ns, target.faction);
     return {
       action: "Faction Rep",
@@ -436,6 +562,7 @@ async function decideNextPriority(ns) {
   if (target.moneyMissing > 0) {
     if (!shouldFocus(ns)) {
       const factionHasMoreRepWork = (() => {
+        if (target.faction === gangFaction(ns)) return false; // passive rep, see above
         const s = ns.singularity;
         const owned = new Set(s.getOwnedAugmentations(true));
         const currentRep = s.getFactionRep(/** @type {any} */ (target.faction));
@@ -553,12 +680,15 @@ export async function main(ns) {
     // grafting beats idle crime. Self-exits where the grafting API is unavailable.
     ensureHelper(ns, GRAFT_SCRIPT, { optional: true });
 
-    // Corporation (now that we have corp API access everywhere): keep the one-shot
-    // creator running until a corp exists (self-funded + affordability-gated), then
-    // keep its managers on the reserved cloud-corp host. Self-gates on
-    // corp.enabled / affordability, so it's a quiet no-op until we can fund it.
+    // Gang + corporation, both persistent passive engines here. maybeSetupGang
+    // founds a gang the moment karma + a criminal faction line up (and is a no-op
+    // if you founded one by hand); maybeSetupCorp does the same for the corp,
+    // self-gated on corp.enabled / affordability. ensureCloudManagers then keeps
+    // BOTH managers alive on their dedicated, botnet-reserved cloud hosts - the
+    // gang first, since lib/gang.js is ~36GB and loses any race for shared RAM.
+    const gangEvent = maybeSetupGang(ns);
     const corpEvent = maybeSetupCorp(ns);
-    ensureCorpManagers(ns, new Set());
+    ensureCloudManagers(ns);
 
     // Botnet income engine, then UI/luxury scripts, all off-home.
     ensureHelper(ns, CFG.paths.manager);
@@ -574,7 +704,9 @@ export async function main(ns) {
     ensureHelper(ns, ECON_SCRIPT, { optional: true });
 
     globalThis.gordState = await decideNextPriority(ns);
+    // Surface a fresh corp/gang creation over the routine priority.
     if (corpEvent) globalThis.gordState = { ...globalThis.gordState, ...corpEvent };
+    else if (gangEvent?.action === "Gang Created") globalThis.gordState = { ...globalThis.gordState, ...gangEvent };
 
     // Publish the company-grind city intent so maybeAutoTravelForReadyFaction won't
     // pull us home while we're deliberately parked in a megacorp's city for its rep
@@ -601,8 +733,10 @@ export async function main(ns) {
     const sleeveNote = sleeves
       ? ` | Sleeves: ${sleeves.count}${sleeves.maxed ? " (max)" : ""}`
       : "";
+    const gang = globalThis.gordGangState;
+    const gangNote = gang ? ` | Gang: ${gang.members}/${gang.maxMembers} (${gang.faction})` : "";
     ns.print(
-      `Money: ${ns.format.number(playerMoney(ns))} | Hack: ${hackingLevel(ns)}${sleeveNote}`
+      `Money: ${ns.format.number(playerMoney(ns))} | Hack: ${hackingLevel(ns)}${sleeveNote}${gangNote}`
     );
     await ns.sleep(CFG.daemon.tickMs);
   }
