@@ -14,8 +14,12 @@
 // figures), plus one indented progress line each time a long goal crosses another
 // progressStepPct milestone (CONFIG.ui.journal). Interleaved with those are
 // discrete MILESTONE lines drained from globalThis.gordEvents - server buys,
-// faction joins, grafting travel, contracts solved, sleeves bought - which any
-// script records via lib/events.js emitEvent().
+// faction joins, grafting travel, contracts solved, sleeves bought, gang recruits
+// / ascensions / warfare toggles, and corp divisions / unlocks / investment
+// rounds - which any script records via lib/events.js emitEvent().
+//
+// Gang and corp lines get their own colours ("gang" red, "corp" yellow) so the
+// two passive engines read apart from the hacking narrative they interleave with.
 //
 // Output is ASCII-only: the tail renders a plain text stream that does not decode
 // UTF-8, so box-drawing / arrow / check glyphs show up as mojibake. Keep every
@@ -168,6 +172,8 @@ export function journalPanel(ns, C) {
                         : k === "travel" ? C.blue
                         : k === "prog" ? C.dim
                         : k === "sys" ? C.blue
+                        : k === "corp" ? C.yellow
+                        : k === "gang" ? C.red
                         : "#e2e8f0";
 
   return el("div", {
