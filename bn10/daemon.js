@@ -12,7 +12,15 @@
 // this daemon encodes) is: build a THICK income stream the normal way, then buy
 // EVERY sleeve The Covenant sells (the last costs ~1e20) and max memory (100) on
 // each. That work is delegated to lib/sleeves.js, launched off-home here (it's
-// ~40GB of ns.sleeve.* calls, far too heavy for home) and left running.
+// ~72GB of ns.sleeve.* calls, far too heavy for home) and left running.
+//
+// BITNODE[10].sleeves in lib/config.js turns the shop budgets up for exactly this
+// reason: everywhere else a sleeve purchase is capped at a slice of cash, but here
+// sleeves and memory are the point of the node - a sleeve bought now earns for the
+// rest of a run that never resets, and memory is the ONE upgrade that carries into
+// every future BitNode - so the manager buys at ~1.1x the price rather than waiting
+// for 2x. lib/sleeves.js announces (once) when the shop is bought out; that's the
+// cue to finish the node, since this daemon never does it on its own.
 //
 // The other persistent engines run alongside it: a CORPORATION, and - once karma
 // crosses the universal -54,000 gate while we're in a criminal faction - a GANG.
@@ -27,8 +35,6 @@
 // roster is complete (watch the SLEEVE dashboard tab). Pass a node number as
 // arg[0] to override and auto-progress.
 
-import { allServers } from "../lib/net.js";
-import { managePurchasedServers } from "../lib/pserv.js";
 import {
   trainCombatIfNeeded,
   commitBestCrimeIfUseful,
@@ -40,7 +46,6 @@ import {
   estimateIncomeRate,
   updateRepRate,
   doIdleWork,
-  recordFactionWork,
   clearFactionWork,
 } from "../lib/player-actions.js";
 import {
@@ -50,20 +55,26 @@ import {
   getMoneyHoardGoal,
 } from "../lib/aug-targets.js";
 import { forNode } from "../lib/config.js";
-// Shared daemon core (identical across bn2/bn3/bn4/bn5/bn10) - see lib/daemon-lib.js.
+// Shared daemon core - see lib/daemon-lib.js for what is shared and what each
+// daemon still owns.
 import {
   playerMoney,
   hackingLevel,
   ensureHelper,
   ensureBackdoorHelpers,
-  placeManager,
+  ensureGangManager,
+  inGangSafe,
+  gangFactionName,
+  buyAugs,
+  maybeInstall,
+  maybeBuyInfra,
+  startBestFactionWork,
+  maybeDoSecondaryFactionWork,
   buyDarkweb,
   rootEverything,
   acceptInvites,
-  canBuyAug,
   readLastResetTime,
   writeResetTime,
-  recordResetSummary,
   consumeResetSummary,
 } from "../lib/daemon-lib.js";
 // Shared corporation orchestration (all corp-viable nodes) - see lib/corp-daemon.js.
@@ -82,41 +93,11 @@ const FACTION_REQUIREMENTS = CFG.factions.requirements;
 const ECON_SCRIPT = CFG.paths.econ;           // hacknet + home-RAM spending
 const SLEEVE_SCRIPT = CFG.paths.sleeves;      // buy sleeves + memory, keep them working
 const GRAFT_SCRIPT = CFG.paths.grafting;      // graft augs (no reset) during idle time
-const GANG_SCRIPT = CFG.paths.gang;           // gang management (~36GB), off-home
 const SELF = CFG.paths.daemon;                // this daemon's path (post-reset callback)
-
-// ── Gang ─────────────────────────────────────────────────────────────────────
-// A gang is available in ANY node once SF2 is owned, not just BN2/BN3/BN5 - and
-// it's a strong, wholly passive income + faction-rep engine here, where a run
-// lasts a long time and never resets. BN10 keeps CONFIG's universal -54,000 karma
-// gate and never grinds toward it (activeKarmaGrind is off): the crime the daemon
-// and every sleeve already commit sinks karma anyway, and when it crosses the gate
-// we found a gang for free. Founding also works if the player did it by hand -
-// maybeSetupGang is a no-op then, and the manager is launched either way.
-const GANG_HOST = GANG.host;
 // Criminal factions that can found a gang; whichever we're already in gets used.
 // Cast to any[] so its elements don't trip checkJs against FactionName - see
 // [[bitburner-enum-string-casts]].
 const CRIMINAL_FACTIONS = /** @type {any[]} */ (GANG.criminalFactions);
-
-/**
- * The faction our gang belongs to, or null when we have no gang. Read from the
- * state lib/gang.js publishes, so it costs nothing and is empty until the manager
- * is up - callers just treat that as "no gang" for a tick or two.
- * @param {NS} ns
- */
-function gangFaction(ns) {
-  return inGangSafe(ns) ? globalThis.gordGangState?.faction ?? null : null;
-}
-
-/** @param {NS} ns - true if we're in a gang; false (not just missing API) otherwise. */
-function inGangSafe(ns) {
-  try {
-    return ns.gang.inGang();
-  } catch {
-    return false;
-  }
-}
 
 /**
  * Found a gang the moment we're eligible: karma past the gate AND already a member
@@ -162,25 +143,14 @@ function maybeSetupGang(ns) {
 function ensureCloudManagers(ns) {
   const reserved = new Set();
 
-  if (inGangSafe(ns)) {
-    // While the manager ISN'T up yet, carve its RAM out of home (the botnet
-    // honours globalThis.gordReservedRam and vacates within a batch or two). By
-    // this point in a BN10 run the botnet has usually filled every host including
-    // home, so without this the ~36GB manager can wait forever for a gap - which
-    // is how a hand-created gang ends up with nothing managing it. Cleared again
-    // the moment it's running, so the botnet gets the space back.
-    const ram = ns.getScriptRam(GANG_SCRIPT, CFG.paths.home);
-    const running = allServers(ns).some(h => ns.hasRootAccess(h) && ns.scriptRunning(GANG_SCRIPT, h));
-    globalThis.gordReservedRam = running ? {} : { home: ram + GANG.homeReserveSlack };
-
-    placeManager(ns, GANG_SCRIPT, GANG_HOST, reserved);
-  } else {
-    globalThis.gordReservedRam = {};
-  }
+  // Gang first: lib/gang.js is ~36GB and loses any race for shared RAM, so its host
+  // has to be reserved before the corp goes looking for somewhere to run.
+  ensureGangManager(ns, reserved);
   globalThis.gordReservedHosts = reserved;
 
   // Corp: places corp-steady on the reserved cloud-corp host (adding it to
-  // `reserved` + republishing) and runs the corp-build one-shot.
+  // `reserved` + republishing) and rotates the build phases. Self-gates on
+  // corp.enabled / hasCorporation, so it's a no-op before the corp exists.
   ensureCorpManagers(ns, reserved);
 }
 
@@ -198,209 +168,6 @@ function ensureCloudManagers(ns) {
 function plannedNextBN(ns) {
   if (ns.args[0] != null) return Number(ns.args[0]);
   return 0; // halt: let the player finish manually after the sleeve shopping spree
-}
-
-/** @param {NS} ns */
-function buyAugs(ns) {
-  const s = ns.singularity;
-  const owned = new Set(s.getOwnedAugmentations(true));
-  const joined = ns.getPlayer().factions ?? [];
-  // While hoarding cash for a money-gated invite, never spend below the floor.
-  const floor = globalThis.gordMoneyFloor ?? 0;
-
-  const candidates = [];
-  const purchases = [];
-
-  for (const faction of joined) {
-    for (const aug of s.getAugmentationsFromFaction(/** @type {any} */ (faction))) {
-      if (canBuyAug(ns, faction, aug, owned)) {
-        candidates.push({
-          faction,
-          aug,
-          price: s.getAugmentationPrice(aug),
-          rep: s.getAugmentationRepReq(aug),
-        });
-      }
-    }
-  }
-
-  // Buy cheapest first; NeuroFlux Governor always last.
-  candidates.sort((a, b) => {
-    const aNFG = a.aug === AUGS.neuroFlux ? 1 : 0;
-    const bNFG = b.aug === AUGS.neuroFlux ? 1 : 0;
-    if (aNFG !== bNFG) return aNFG - bNFG;
-    return a.price - b.price;
-  });
-
-  for (const c of candidates) {
-    if (canBuyAug(ns, c.faction, c.aug, owned) && playerMoney(ns) - c.price >= floor) {
-      if (s.purchaseAugmentation(/** @type {any} */ (c.faction), c.aug)) {
-        purchases.push(`${c.aug} from ${c.faction}`);
-        owned.add(c.aug);
-      }
-    }
-  }
-
-  return purchases;
-}
-
-const INSTALL_PRIORITY_AUGS = AUGS.installPriority;
-
-/**
- * Start the best available faction work, and publish which faction we're grinding
- * (recordFactionWork) so the off-home sleeve manager can put its too-weak-to-crime
- * sleeves on FIELD WORK for the same faction - see lib/sleeves.js.
- * @param {NS} ns
- */
-function startBestFactionWork(ns, faction) {
-  const types = CFG.player.factionWorkTypes;
-
-  for (const type of types) {
-    const ok = ns.singularity.workForFaction(
-      /** @type {any} */ (faction),
-      /** @type {any} */ (type),
-      shouldFocus(ns)
-    );
-    if (ok) {
-      recordFactionWork(faction, type);
-      return type;
-    }
-  }
-
-  return null;
-}
-
-/** @param {NS} ns */
-function maybeInstall(ns) {
-  // While hoarding for a money-gated invite, do NOT install: an install soft-resets
-  // and drops our skills below the invite's skill gates (which we've just met), and
-  // the pre-install NeuroFlux dump would spend the cash we're trying to hold.
-  if ((globalThis.gordMoneyFloor ?? 0) > 0) return;
-
-  const ownedWithPurchased = ns.singularity.getOwnedAugmentations(true);
-  const ownedInstalled = ns.singularity.getOwnedAugmentations(false);
-  const queued = ownedWithPurchased.length - ownedInstalled.length;
-
-  const hasRedPill = ownedWithPurchased.includes(AUGS.redPill);
-  const hasPriorityAug = INSTALL_PRIORITY_AUGS.some(
-    a => ownedWithPurchased.includes(a) && !ownedInstalled.includes(a)
-  );
-
-  // All priority augs already installed — any single new aug is worth a reset
-  // (price multiplier resets, so next aug is cheaper to sequence from scratch).
-  const allPriorityDone = INSTALL_PRIORITY_AUGS.every(a => ownedInstalled.includes(a));
-  const aggressiveInstall = allPriorityDone && queued >= AUGS.install.minQueued;
-
-  const lastReset = readLastResetTime(ns);
-  const elapsed = Date.now() - lastReset;
-  const TIME_TRIGGER_MS = AUGS.install.timeTriggerMs;
-  const timeTriggered = queued >= AUGS.install.minQueued && elapsed >= TIME_TRIGGER_MS;
-
-  if (hasRedPill || queued >= AUGS.install.queuedThreshold || (queued >= AUGS.install.priorityQueuedThreshold && hasPriorityAug) || aggressiveInstall || timeTriggered) {
-    if (timeTriggered) {
-      const hours = (elapsed / 3_600_000).toFixed(1);
-      ns.tprint(`Time-triggered install after ${hours}h with ${queued} aug(s) queued.`);
-    }
-    if (aggressiveInstall) {
-      ns.tprint(`Aggressive install: all priority augs done, resetting with ${queued} queued.`);
-    }
-
-    // Dump remaining cash into NeuroFlux Governor right before resetting.
-    const s = ns.singularity;
-    const nfgFaction = (ns.getPlayer().factions ?? []).find(f =>
-      s.getFactionRep(/** @type {any} */ (f)) >= s.getAugmentationRepReq(AUGS.neuroFlux)
-    ) ?? null;
-    if (nfgFaction) {
-      let bought = true;
-      while (bought) {
-        const price = s.getAugmentationPrice(AUGS.neuroFlux);
-        if (playerMoney(ns) < price) break;
-        bought = s.purchaseAugmentation(/** @type {any} */ (nfgFaction), AUGS.neuroFlux);
-      }
-    }
-
-    // Record what this reset installs + how long the run lasted, for the next
-    // boot's journal. Computed AFTER the NeuroFlux buys above and BEFORE
-    // writeResetTime (which overwrites the old timestamp we need for the
-    // duration). Guarded: a summary failure must never block the install.
-    try {
-      const installedSet = new Set(s.getOwnedAugmentations(false));
-      const installing = s.getOwnedAugmentations(true).filter(a => !installedSet.has(a));
-      recordResetSummary(ns, installing, Date.now() - readLastResetTime(ns));
-    } catch (e) {
-      ns.print(`reset summary failed: ${String(e)}`);
-    }
-
-    writeResetTime(ns);
-    ns.singularity.installAugmentations(SELF);
-  }
-}
-
-/** @param {NS} ns @param {any} target */
-async function maybeBuyInfra(ns, target) {
-  const money = playerMoney(ns);
-
-  // Hoarding for a money-gated invite: hold cash, don't buy servers.
-  if ((globalThis.gordMoneyFloor ?? 0) > 0) {
-    return { action: "Holding Cash", detail: "servers paused - saving for a faction invite" };
-  }
-
-  if (!target) {
-    return await managePurchasedServers(ns, CFG.infra.noTarget.reserveMoney, CFG.infra.noTarget.spendFraction);
-  }
-
-  const { price, moneyMissing = 0, repMissing = 0 } = target;
-
-  if (repMissing > 0) {
-    const hardCap = money > price ? money - price : money * CFG.infra.repPending.fallbackCapFraction;
-    return await managePurchasedServers(ns, CFG.infra.repPending.reserveMoney, CFG.infra.repPending.spendFraction, hardCap);
-  }
-
-  const tinyBudget = moneyMissing * CFG.infra.savingBudgetFraction;
-  if (tinyBudget < CFG.infra.minBudget) {
-    return {
-      action: "Saving for Aug",
-      detail: `${target.aug}: need $${ns.format.number(moneyMissing)}`,
-    };
-  }
-  return await managePurchasedServers(ns, price, CFG.infra.savingSpendFraction, tinyBudget);
-}
-
-/**
- * When our primary goal doesn't need player focus, optionally bank rep with a
- * secondary faction that has augs we'll want later.
- * @param {NS} ns @param {string} primaryFaction - skip this faction (already working it)
- */
-function maybeDoSecondaryFactionWork(ns, primaryFaction) {
-  if (shouldFocus(ns)) return null; // can't background work
-
-  const s = ns.singularity;
-  const owned = new Set(s.getOwnedAugmentations(true));
-  const joined = ns.getPlayer().factions ?? [];
-  const ourGangFaction = gangFaction(ns);
-
-  for (const factionName of joined) {
-    if (factionName === primaryFaction) continue;
-    if (factionName === ourGangFaction) continue; // gang rep is passive (from respect)
-
-    const augs = s.getAugmentationsFromFaction(/** @type {any} */ (factionName));
-    const currentRep = s.getFactionRep(/** @type {any} */ (factionName));
-
-    const hasUsefulWork = augs.some(aug => {
-      if (aug === AUGS.neuroFlux) return false;
-      if (owned.has(aug)) return false;
-      const prereqs = s.getAugmentationPrereq(aug);
-      if (!prereqs.every(a => owned.has(a))) return false;
-      return s.getAugmentationRepReq(aug) > currentRep;
-    });
-
-    if (!hasUsefulWork) continue;
-
-    const workType = startBestFactionWork(ns, factionName);
-    if (workType) return `Secondary: ${factionName} (${workType})`;
-  }
-
-  return null;
 }
 
 /** @param {NS} ns */
@@ -538,7 +305,7 @@ async function decideNextPriority(ns) {
     // A gang faction's rep accrues passively from gang respect, and workForFaction
     // isn't even offered for it - so spend the player's attention elsewhere and let
     // the gang do the work.
-    if (target.faction === gangFaction(ns)) {
+    if (target.faction === gangFactionName(ns)) {
       const secondary = maybeDoSecondaryFactionWork(ns, target.faction);
       const extra = secondary ?? (await doIdleWork(ns))?.detail;
       return {
@@ -562,7 +329,7 @@ async function decideNextPriority(ns) {
   if (target.moneyMissing > 0) {
     if (!shouldFocus(ns)) {
       const factionHasMoreRepWork = (() => {
-        if (target.faction === gangFaction(ns)) return false; // passive rep, see above
+        if (target.faction === gangFactionName(ns)) return false; // passive rep, see above
         const s = ns.singularity;
         const owned = new Set(s.getOwnedAugmentations(true));
         const currentRep = s.getFactionRep(/** @type {any} */ (target.faction));
@@ -666,7 +433,7 @@ export async function main(ns) {
     ensureBackdoorHelpers(ns, plannedNextBN(ns));
 
     // The BN10 headline act: the sleeve manager (buy every sleeve + max memory +
-    // keep them working). It's ~40GB of ns.sleeve.* calls, so it runs off-home
+    // keep them working). It's ~72GB of ns.sleeve.* calls, so it runs off-home
     // like the gang manager; ensureHelper places it on the roomiest rooted host.
     // Launched first so it can claim RAM before the botnet fills the network.
     // Early on there may be no host with room - it simply starts later, once the
@@ -727,11 +494,15 @@ export async function main(ns) {
 
     globalThis.gordAugPipeline = getAllAugCandidates(ns).slice(0, AUGS.pipelineSize);
 
-    maybeInstall(ns);
+    maybeInstall(ns, SELF);
 
+    // Sleeve shopping progress - the thing this whole node is being played for, so
+    // it gets the roster size, the next sleeve's price and the outstanding memory.
     const sleeves = globalThis.gordSleeveState;
     const sleeveNote = sleeves
-      ? ` | Sleeves: ${sleeves.count}${sleeves.maxed ? " (max)" : ""}`
+      ? ` | Sleeves: ${sleeves.count}` +
+        (sleeves.maxed ? " (max)" : ` (next $${ns.format.number(sleeves.nextCost)})`) +
+        (sleeves.memoryDone ? " mem MAX" : ` mem -${sleeves.memoryRemainingLevels}`)
       : "";
     const gang = globalThis.gordGangState;
     const gangNote = gang ? ` | Gang: ${gang.members}/${gang.maxMembers} (${gang.faction})` : "";

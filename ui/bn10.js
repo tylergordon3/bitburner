@@ -1,13 +1,20 @@
 // ui/bn10.js
 //
-// BitNode-10 ("Digital Carbon") dashboard extras: the SLEEVE and GRAFTING cards.
-// SLEEVE reads globalThis.gordSleeveState (published each tick by lib/sleeves.js)
-// and shows roster size + next-sleeve cost, a memory-completion bar, and a
-// per-sleeve status line (shock -> sync -> crime). GRAFTING reads
-// globalThis.gordGraftState (published by lib/grafting.js) and shows the entropy
-// budget, the active graft (aug + progress), and the current graft-vs-crime
-// decision. Returns [] when neither state exists (not BN10, or the managers
-// haven't started yet) so the tab shows its placeholder.
+// The SLEEVE and GRAFTING dashboard cards.
+//
+// SLEEVE reads globalThis.gordSleeveState (published each tick by lib/sleeves.js,
+// which every daemon now runs) and shows the roster, what mode it's in - criming
+// toward the gang karma gate, or mirroring the player - and a per-sleeve status
+// line. The Covenant's sleeve/memory shop only exists in BitNode 10, so the
+// next-sleeve cost and memory rows are shown only when state.shopOpen says so.
+//
+// GRAFTING reads globalThis.gordGraftState (published by lib/grafting.js) and shows
+// the entropy budget, the active graft (aug + progress), and the current
+// graft-vs-crime decision; that one really is BN10-shaped, since it depends on a
+// long no-reset run.
+//
+// Returns [] when neither state exists (the managers haven't started yet, or this
+// run has no sleeves) so the tab shows its placeholder.
 
 import { card, stat, label, progressBar, statRow, el } from "./dashboard-lib.js";
 
@@ -62,14 +69,6 @@ function graftCard(ns, C, g) {
 
 /** @param {NS} ns */
 function rosterCard(ns, C, s) {
-  // Fraction of sleeves at max memory (the "buy 99 memory for each" goal).
-  const memFrac = s.sleeves?.length
-    ? s.sleeves.filter(x => x.memory >= s.memoryMax).length / s.sleeves.length
-    : 0;
-
-  const costColor = s.maxed ? C.green : C.yellow;
-  const costText = s.maxed ? "roster maxed" : `$${ns.format.number(s.nextCost)}`;
-
   // Augs still on offer across the roster - 0 means every sleeve is fully
   // augmented (or still shedding shock, which is what gates buying them).
   const augText = s.augsAvailable
@@ -77,32 +76,83 @@ function rosterCard(ns, C, s) {
     : "all bought";
   const augColor = s.augsAvailable ? C.yellow : C.green;
 
-  return card(C, "SLEEVES", [
-    el("div", { style: { display: "flex", justifyContent: "space-between", marginBottom: "6px" } },
-      stat(C, "Owned", String(s.count), C.blue),
-      stat(C, "Next sleeve", costText, costColor),
-      stat(C, "Augs", augText, augColor),
-    ),
-    label(C, s.memoryDone
-      ? "Memory maxed on all sleeves"
-      : `Memory maxed: ${Math.round(memFrac * 100)}% of sleeves`),
-    progressBar(memFrac, s.memoryDone ? C.green : C.yellow),
-    label(C, s.allProductive
-      ? "All sleeves synced + earning"
-      : `Bringing sleeves up (${s.earning ?? 0}/${s.count} earning)`),
-    ...(s.factionGrind ? [label(C, `Weak sleeves on field work for ${s.factionGrind}`)] : []),
-  ]);
+  const header = [
+    stat(C, "Owned", String(s.count), C.blue),
+    stat(C, "Augs", augText, augColor),
+  ];
+  // Only BitNode 10's Covenant sells sleeves, so elsewhere a price would just be a
+  // number for a purchase that can never happen.
+  if (s.shopOpen) {
+    header.splice(1, 0, stat(C, "Next sleeve",
+      s.maxed ? "roster maxed" : `$${ns.format.number(s.nextCost)}`,
+      s.maxed ? C.green : C.yellow));
+  }
+
+  const children = [
+    el("div", { style: { display: "flex", justifyContent: "space-between", marginBottom: "6px" } }, ...header),
+    modeLine(C, s),
+  ];
+
+  if (s.shopOpen) {
+    // Progress by LEVELS, not by sleeves-at-100: buying out the shop means 100 memory
+    // on every sleeve, and a roster sitting at 60 each would otherwise read as 0%.
+    const total = (s.sleeves?.length ?? 0) * (s.memoryMax || 1);
+    const memFrac = total > 0 ? Math.max(0, total - (s.memoryRemainingLevels ?? 0)) / total : 0;
+
+    const memNote = s.memoryDone ? "Memory maxed on all sleeves"
+      : s.savingForSleeve ? `Memory on hold: ${s.memoryRemainingLevels} levels left, saving for the next sleeve first`
+      : `Memory: ${s.memoryRemainingLevels} levels left (~$${ns.format.number(s.memoryRemainingCost)})`;
+
+    children.push(
+      label(C, memNote),
+      progressBar(memFrac, s.memoryDone ? C.green : s.savingForSleeve ? C.dim : C.yellow),
+    );
+  }
+
+  if (s.shoppingDone) {
+    children.push(label(C, "Shop bought out - nothing left to buy in BN10, safe to finish the node."));
+  }
+
+  children.push(label(C, s.allProductive
+    ? "All sleeves synced + earning"
+    : `Bringing sleeves up (${s.earning ?? 0}/${s.count} earning)`));
+  if (s.factionGrind) children.push(label(C, `Weak sleeves on field work for ${s.factionGrind}`));
+
+  return card(C, "SLEEVES", children);
 }
+
+/**
+ * The one line that says what the roster is FOR right now: grinding karma toward
+ * founding a gang (with a bar showing how far along), or shadowing the player.
+ */
+function modeLine(C, s) {
+  if (s.mode === "gang") {
+    const frac = s.karmaGate ? Math.min(1, (s.karma ?? 0) / s.karmaGate) : 0;
+    return el("div", {},
+      label(C, `Gang bootstrap - ${s.modeDetail ?? "criming for karma"}`),
+      progressBar(frac, frac >= 1 ? C.green : C.red),
+    );
+  }
+  return label(C, s.modeDetail ?? "Mirroring the player");
+}
+
+// Status colour per assignment kind, so the list doesn't have to parse the
+// human-readable action string.
+const KIND_COLORS = {
+  crime: "green",
+  faction: "purple",
+  company: "purple",
+  class: "blue",
+  gym: "blue",
+  sync: "yellow",
+  shock: "red",
+};
 
 /** @param {NS} ns */
 function sleeveListCard(ns, C, s) {
   const rows = s.sleeves.map(x => {
-    const color = x.action.startsWith("Crime") ? C.green
-      : x.action.startsWith("Faction") ? C.purple
-      : x.action.startsWith("Gym") ? C.blue
-      : x.action === "Synchronizing" ? C.yellow
-      : C.dim;
-    const detail = `sh ${x.shock.toFixed(0)} / sy ${x.sync.toFixed(0)} / mem ${x.memory}`;
+    const color = C[KIND_COLORS[x.kind]] ?? C.dim;
+    const detail = `sh ${x.shock.toFixed(0)} / sy ${x.sync.toFixed(0)}${s.shopOpen ? ` / mem ${x.memory}` : ""}`;
     return statRow(C, `#${x.index}`, x.action, detail, color);
   });
   return card(C, "SLEEVE STATUS", rows);

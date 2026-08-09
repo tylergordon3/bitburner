@@ -33,6 +33,7 @@ export async function main(ns) {
   const caps = getCapabilities(ns);
   const node = caps.currentNode;
   const cfg = forNode(node);
+  const daemonPath = cfg.paths.daemon;
 
   ns.tprint("");
   ns.tprint(`=== GORDNET self-test (BitNode ${node}) ===`);
@@ -53,6 +54,37 @@ export async function main(ns) {
   ns.tprint(`Compile/import check: ${allJs.length - broken.length}/${allJs.length} scripts analysed OK`);
   for (const f of broken) ns.tprint(`  BROKEN (parse/import error): ${f}`);
 
+  // 2b. Source fingerprint - "is the game actually running the code I just edited?"
+  //     Everything else here validates whatever happens to be ON HOME, which is
+  //     silently useless if the file sync didn't land: a stale tree passes every
+  //     check and reports OK. Character counts make that visible at a glance -
+  //     ns.read is 0GB, so this is free.
+  //
+  //     COMPARING AGAINST THE WORKING COPY: the number to match is the file's BYTE
+  //     count minus its CR count, not its character count. The file-sync transfers
+  //     raw bytes and the game reads each one as a char, so a UTF-8 multi-byte
+  //     character on disk (the box-drawing runs in these headers) counts as 2-3 here
+  //     while CRLF line endings are normalised away. In other words:
+  //         python3 -c "d=open('bn3/daemon.js','rb').read(); print(len(d)-d.count(b'\r'))"
+  //     Getting that wrong is how a perfectly good sync gets misdiagnosed as stale.
+  //
+  //     That byte-for-char behaviour is also why nothing in this codebase may use a
+  //     literal non-ASCII character in CODE (comments are fine - the mojibake is
+  //     invisible). See the Vigenere key in lib/contract-solvers.js for what that
+  //     silently breaks, and the unicode escape that fixes it.
+  let chars = 0;
+  let charsNoCr = 0;
+  for (const f of allJs) {
+    const text = ns.read(f);
+    chars += text.length;
+    charsNoCr += text.replace(/\r/g, "").length;
+  }
+  ns.tprint(`Source fingerprint: ${allJs.length} files, ${chars} chars (${charsNoCr} without CR)`);
+  if (daemonPath && ns.fileExists(daemonPath, HOME)) {
+    const d = ns.read(daemonPath);
+    ns.tprint(`  ${daemonPath}: ${d.length} chars (${d.replace(/\r/g, "").length} without CR)`);
+  }
+
   // 3. RAM cost of the config-referenced scripts, largest first.
   const sized = referenced
     .filter(f => ns.fileExists(f, HOME))
@@ -64,7 +96,7 @@ export async function main(ns) {
   // 4. Will early/driver.js hand off? It waits until home holds the node's daemon
   //    plus workerHeadroom. Informational (not a failure - the driver just grows
   //    home until it fits).
-  const daemon = cfg.paths.daemon;
+  const daemon = daemonPath;
   if (daemon && ns.fileExists(daemon, HOME)) {
     const dram = safeRam(ns, daemon);
     const homeMax = ns.getServerMaxRam(HOME);

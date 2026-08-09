@@ -26,7 +26,7 @@
 // PRINTED / pushed string to ASCII (comments are fine as-is).
 
 import { CONFIG } from "../lib/config.js";
-import { el, formatDuration } from "./dashboard-lib.js";
+import { el, formatDuration, shortenAugNames } from "./dashboard-lib.js";
 
 const J = CONFIG.ui.journal;
 const STEP = J.progressStepPct || 10;
@@ -50,10 +50,17 @@ let shownResetAt = 0;     // gordLastReset.at we've already reported (report onc
  * `hl` is an optional list of exact substrings (augmentation / faction names) the
  * renderer should emphasise; percentages and $ amounts are highlighted
  * automatically regardless.
+ *
+ * This is the single funnel every journal line passes through, so it's where the
+ * display-only aug-name shortening happens ("Cranial Signal Processors - Gen II"
+ * -> "Cranial Signal Processors II") - emitters keep the exact in-game names. The
+ * hl.augs tokens get the SAME transform, or the renderer's exact-substring
+ * highlight matching would stop finding them in the shortened text.
  */
 function push(text, kind, hl) {
   const buf = globalThis.gordJournal ?? (globalThis.gordJournal = []);
-  buf.push({ text, kind, at: Date.now(), hl });
+  const shortHl = hl?.augs?.length ? { ...hl, augs: hl.augs.map(shortenAugNames) } : hl;
+  buf.push({ text: shortenAugNames(text), kind, at: Date.now(), hl: shortHl });
   const max = J.bufferSize || 400;
   if (buf.length > max) buf.splice(0, buf.length - max);
 }
@@ -374,11 +381,18 @@ function narrate(ns, state) {
   // Crime
   if (a.startsWith("Crime")) {
     const crime = (state.crime ?? "crime").toLowerCase();
-    const chance = state.chance != null ? ` (${(state.chance * 100).toFixed(2)}% success)` : "";
+    // The success chance is only worth words while it's imperfect - "(100.00%
+    // success)" after every homicide is noise. Omitted whenever it would FORMAT
+    // as 100.00, so 99.996 doesn't sneak through as a printed "100.00%".
+    const pctText = state.chance != null ? (state.chance * 100).toFixed(2) : null;
+    const chance = pctText != null && pctText !== "100.00" ? ` (${pctText}% success)` : "";
     if (/gang|karma/i.test(d)) {
       return { key: "crime-karma-gang", text: `Committing ${crime}${chance} to grind karma toward founding a gang.` };
     }
-    const reason = d.replace(/^\w+ for /, "").replace(/\s*\(\d+%\)\s*$/, "").trim();
+    // Strip the detail's own trailing "(100%, 1.23x Mug)" qualifier - the chance
+    // is already handled above (or deliberately omitted), so keeping the paren
+    // duplicated the percentage on every crime line.
+    const reason = d.replace(/^\w+ for /, "").replace(/\s*\(\d[^)]*\)\s*$/, "").trim();
     return { key: `crime-${aug ?? "money"}`, text: `Committing ${crime}${chance} to earn ${reason || "money"}.` };
   }
 

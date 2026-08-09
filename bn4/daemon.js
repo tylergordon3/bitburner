@@ -9,13 +9,12 @@
 // let lib/backdoor.js finish the node and enter the next one.
 //
 // Everything reusable lives in lib/, so this file holds only BN4's own decision
-// logic (decideNextPriority / maybeInstall / maybeBuyInfra) and the main() wiring;
-// the truly-shared plumbing comes from lib/daemon-lib.js (see the "identical across
-// ..." note on that import). The other daemons are this plus their node's special
-// system: gang in BN2, corp seed in BN3, karma-gang grind in BN5, and buying
-// sleeves + grafting in BN10.
+// logic (decideNextPriority) and the main() wiring; buying augs, the install policy,
+// the server budget, faction work and helper placement all come from
+// lib/daemon-lib.js. The other daemons are this plus their node's special system:
+// gang in BN2, corp seed in BN3, karma-gang grind in BN5, and buying sleeves +
+// grafting in BN10 - which is why BN4 is the shortest of the five.
 
-import { managePurchasedServers } from "../lib/pserv.js";
 import {
   trainCombatIfNeeded,
   commitBestCrimeIfUseful,
@@ -34,19 +33,23 @@ import {
   getUnjoinedFactionOpportunities,
 } from "../lib/aug-targets.js";
 import { forNode } from "../lib/config.js";
-// Shared daemon core (identical across bn2/bn3/bn4) - see lib/daemon-lib.js.
+// Shared daemon core - see lib/daemon-lib.js for what is shared and what each
+// daemon still owns.
 import {
   playerMoney,
   hackingLevel,
   ensureHelper,
   ensureBackdoorHelpers,
+  buyAugs,
+  maybeInstall,
+  maybeBuyInfra,
+  startBestFactionWork,
+  maybeDoSecondaryFactionWork,
   buyDarkweb,
   rootEverything,
   acceptInvites,
-  canBuyAug,
   readLastResetTime,
   writeResetTime,
-  recordResetSummary,
   consumeResetSummary,
 } from "../lib/daemon-lib.js";
 // Shared corporation orchestration (all corp-viable nodes) - see lib/corp-daemon.js.
@@ -63,192 +66,6 @@ const FACTION_REQUIREMENTS = CFG.factions.requirements;
 // and running them off-home means those never count against the daemon's RAM.
 const ECON_SCRIPT = CFG.paths.econ;           // hacknet + home-RAM spending
 const SELF = CFG.paths.daemon;                // this daemon's path (post-reset callback)
-
-/** @param {NS} ns */
-function buyAugs(ns) {
-  const s = ns.singularity;
-  const owned = new Set(s.getOwnedAugmentations(true));
-  const joined = ns.getPlayer().factions ?? [];
-
-  const candidates = [];
-  const purchases = [];
-
-  for (const faction of joined) {
-    for (const aug of s.getAugmentationsFromFaction(/** @type {any} */ (faction))) {
-      if (canBuyAug(ns, faction, aug, owned)) {
-        candidates.push({
-          faction,
-          aug,
-          price: s.getAugmentationPrice(aug),
-          rep: s.getAugmentationRepReq(aug),
-        });
-      }
-    }
-  }
-
-  // Buy cheapest first; NeuroFlux Governor always last.
-  candidates.sort((a, b) => {
-    const aNFG = a.aug === AUGS.neuroFlux ? 1 : 0;
-    const bNFG = b.aug === AUGS.neuroFlux ? 1 : 0;
-    if (aNFG !== bNFG) return aNFG - bNFG;
-    return a.price - b.price;
-  });
-
-  for (const c of candidates) {
-    if (canBuyAug(ns, c.faction, c.aug, owned)) {
-      if (s.purchaseAugmentation(/** @type {any} */ (c.faction), c.aug)) {
-        purchases.push(`${c.aug} from ${c.faction}`);
-        owned.add(c.aug);
-      }
-    }
-  }
-
-  return purchases;
-}
-
-const INSTALL_PRIORITY_AUGS = AUGS.installPriority;
-
-/** @param {NS} ns */
-function startBestFactionWork(ns, faction) {
-  const types = CFG.player.factionWorkTypes;
-
-  for (const type of types) {
-    const ok = ns.singularity.workForFaction(
-      /** @type {any} */ (faction),
-      /** @type {any} */ (type),
-      shouldFocus(ns)
-    );
-    if (ok) return type;
-  }
-
-  return null;
-}
-
-/** @param {NS} ns */
-function maybeInstall(ns) {
-  const ownedWithPurchased = ns.singularity.getOwnedAugmentations(true);
-  const ownedInstalled = ns.singularity.getOwnedAugmentations(false);
-  const queued = ownedWithPurchased.length - ownedInstalled.length;
-
-  const hasRedPill = ownedWithPurchased.includes(AUGS.redPill);
-  const hasPriorityAug = INSTALL_PRIORITY_AUGS.some(
-    a => ownedWithPurchased.includes(a) && !ownedInstalled.includes(a)
-  );
-
-  // All priority augs already installed — any single new aug is worth a reset
-  // (price multiplier resets, so next aug is cheaper to sequence from scratch).
-  const allPriorityDone = INSTALL_PRIORITY_AUGS.every(a => ownedInstalled.includes(a));
-  const aggressiveInstall = allPriorityDone && queued >= AUGS.install.minQueued;
-
-  const lastReset = readLastResetTime(ns);
-  const elapsed = Date.now() - lastReset;
-  // Reduced from 16h → 8h: late-game aug prices compound fast, sooner resets win
-  const TIME_TRIGGER_MS = AUGS.install.timeTriggerMs;
-  const timeTriggered = queued >= AUGS.install.minQueued && elapsed >= TIME_TRIGGER_MS;
-
-  if (hasRedPill || queued >= AUGS.install.queuedThreshold || (queued >= AUGS.install.priorityQueuedThreshold && hasPriorityAug) || aggressiveInstall || timeTriggered) {
-    if (timeTriggered) {
-      const hours = (elapsed / 3_600_000).toFixed(1);
-      ns.tprint(`Time-triggered install after ${hours}h with ${queued} aug(s) queued.`);
-    }
-    if (aggressiveInstall) {
-      ns.tprint(`Aggressive install: all priority augs done, resetting with ${queued} queued.`);
-    }
-
-    // Dump remaining cash into NeuroFlux Governor right before resetting.
-    const s = ns.singularity;
-    const nfgFaction = (ns.getPlayer().factions ?? []).find(f =>
-      s.getFactionRep(/** @type {any} */ (f)) >= s.getAugmentationRepReq(AUGS.neuroFlux)
-    ) ?? null;
-    if (nfgFaction) {
-      let bought = true;
-      while (bought) {
-        const price = s.getAugmentationPrice(AUGS.neuroFlux);
-        if (playerMoney(ns) < price) break;
-        bought = s.purchaseAugmentation(/** @type {any} */ (nfgFaction), AUGS.neuroFlux);
-      }
-    }
-
-    // Record what this reset installs + how long the run lasted, for the next
-    // boot's journal. Computed AFTER the NeuroFlux buys above and BEFORE
-    // writeResetTime (which overwrites the old timestamp we need for the
-    // duration). Guarded: a summary failure must never block the install.
-    try {
-      const installedSet = new Set(s.getOwnedAugmentations(false));
-      const installing = s.getOwnedAugmentations(true).filter(a => !installedSet.has(a));
-      recordResetSummary(ns, installing, Date.now() - readLastResetTime(ns));
-    } catch (e) {
-      ns.print(`reset summary failed: ${String(e)}`);
-    }
-
-    writeResetTime(ns);
-    ns.singularity.installAugmentations(SELF);
-  }
-}
-
-/** @param {NS} ns @param {any} target */
-async function maybeBuyInfra(ns, target) {
-  const money = playerMoney(ns);
-
-  if (!target) {
-    return await managePurchasedServers(ns, CFG.infra.noTarget.reserveMoney, CFG.infra.noTarget.spendFraction);
-  }
-
-  const { price, moneyMissing = 0, repMissing = 0 } = target;
-
-  if (repMissing > 0) {
-    const hardCap = money > price ? money - price : money * CFG.infra.repPending.fallbackCapFraction;
-    return await managePurchasedServers(ns, CFG.infra.repPending.reserveMoney, CFG.infra.repPending.spendFraction, hardCap);
-  }
-
-  const tinyBudget = moneyMissing * CFG.infra.savingBudgetFraction;
-  if (tinyBudget < CFG.infra.minBudget) {
-    return {
-      action: "Saving for Aug",
-      detail: `${target.aug}: need $${ns.format.number(moneyMissing)}`,
-    };
-  }
-  return await managePurchasedServers(ns, price, CFG.infra.savingSpendFraction, tinyBudget);
-}
-
-/**
- * When our primary goal doesn't need player focus, optionally bank rep with a
- * secondary faction that has augs we'll want later.
- * Returns a detail string if we started secondary work, null otherwise.
- * @param {NS} ns
- * @param {string} primaryFaction  - skip this faction (already working it)
- */
-function maybeDoSecondaryFactionWork(ns, primaryFaction) {
-  if (shouldFocus(ns)) return null; // can't background work
-
-  const s = ns.singularity;
-  const owned = new Set(s.getOwnedAugmentations(true));
-  const joined = ns.getPlayer().factions ?? [];
-
-  // Find a joined faction (other than primary) that still has augs we want,
-  // and where we're missing rep. Prefer higher-priority factions.
-  for (const factionName of joined) {
-    if (factionName === primaryFaction) continue;
-
-    const augs = s.getAugmentationsFromFaction(/** @type {any} */ (factionName));
-    const currentRep = s.getFactionRep(/** @type {any} */ (factionName));
-
-    const hasUsefulWork = augs.some(aug => {
-      if (aug === AUGS.neuroFlux) return false;
-      if (owned.has(aug)) return false;
-      const prereqs = s.getAugmentationPrereq(aug);
-      if (!prereqs.every(a => owned.has(a))) return false;
-      return s.getAugmentationRepReq(aug) > currentRep;
-    });
-
-    if (!hasUsefulWork) continue;
-
-    const workType = startBestFactionWork(ns, factionName);
-    if (workType) return `Secondary: ${factionName} (${workType})`;
-  }
-
-  return null;
-}
 
 /** @param {NS} ns */
 async function decideNextPriority(ns) {
@@ -442,6 +259,15 @@ export async function main(ns) {
 
     // Launch helpers off-home when possible (keeps scarce home RAM for the
     // daemon). Income manager first, then UI/luxury scripts.
+    // Duplicate sleeves (BN10 or SF10). ~72GB of ns.sleeve.* calls, so it runs
+    // off-home like the gang manager, and BEFORE the botnet so it can claim RAM
+    // before workers fill the network. Optional: early on no host has room, and it
+    // simply starts later. lib/sleeves.js self-exits where sleeves are unavailable,
+    // and until we have a gang it points the whole roster at crime for KARMA -
+    // sleeve karma counts for the player, so the roster is our fastest route to
+    // founding one. After that each sleeve mirrors the player's own work.
+    ensureHelper(ns, CFG.paths.sleeves, { optional: true });
+
     ensureHelper(ns, CFG.paths.manager);
     ensureHelper(ns, CFG.paths.dashboard);
     ensureHelper(ns, CFG.paths.stocks, { optional: true });
@@ -466,7 +292,7 @@ export async function main(ns) {
     // Expose the full sorted candidate list for the dashboard's "pipeline" view.
     globalThis.gordAugPipeline = getAllAugCandidates(ns).slice(0, AUGS.pipelineSize);
 
-    maybeInstall(ns);
+    maybeInstall(ns, SELF);
 
     ns.print(
       `Money: ${ns.format.number(playerMoney(ns))} | Hack: ${hackingLevel(ns)}`

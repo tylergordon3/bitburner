@@ -6,7 +6,7 @@
 // the corporation, so we surface a CORP card fed by globalThis.gordCorpState
 // (published by lib/corp-steady.js). Mirrors ui/bn2.js's gang card.
 
-import { card, stat, label, progressBar, el } from "./dashboard-lib.js";
+import { card, stat, el } from "./dashboard-lib.js";
 
 /**
  * Cards specific to BN3. Returns an array so the template can spread them in.
@@ -72,5 +72,26 @@ function corpCard(ns, C) {
     el("div", { style: { color: C.dim, fontSize: "11px", marginTop: "6px", wordBreak: "break-word" } },
       divisions || "no divisions yet"
     ),
+    upkeepLine(ns, C),
   ]);
+}
+
+/**
+ * One line on the tea/party loop (lib/corp-upkeep.js) - the piece that must stay
+ * alive even when the corp is being managed by hand, so its absence is worth
+ * surfacing louder than the rest of the manager's.
+ * @param {NS} ns
+ */
+function upkeepLine(ns, C) {
+  const u = globalThis.gordCorpUpkeep;
+  const stale = !u || Date.now() - (u.updatedAt ?? 0) > 60_000;
+  if (stale) {
+    return el("div", { style: { color: C.red, fontSize: "11px", marginTop: "4px" } },
+      "[!] tea/party loop not running (corp-upkeep.js) - energy/morale will decay");
+  }
+  const text = u.allTopped
+    ? `Tea/party: all ${u.offices} office(s) at max energy/morale`
+    : `Tea/party: ${u.teasThisCycle} tea, ${u.partiesThisCycle} parties ` +
+      `($${ns.format.number(u.spendThisCycle)}) across ${u.offices} office(s)`;
+  return el("div", { style: { color: u.allTopped ? C.green : C.yellow, fontSize: "11px", marginTop: "4px" } }, text);
 }

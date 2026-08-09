@@ -7,7 +7,13 @@
 //   JOURNAL - the plain-text "what am I doing and why" narrative (ui/journal.js).
 //   GANG    - the gang / karma-bootstrap card (ui/bn5.js -> ui/bn2.js).
 //   CORP    - the corporation card (ui/bn3.js).
-//   SLEEVE  - the BN10 duplicate-sleeve roster/status card (ui/bn10.js).
+//   SLEEVE  - the duplicate-sleeve roster/status card (ui/bn10.js), on any node
+//             with BN10/SF10 sleeves.
+//
+// The header also carries the two switches (TOGGLES / toggleButton) - the only
+// controls in here that change what the BOT does rather than what the HUD shows:
+// AUTO-FOCUS (lib/player-actions.js focusFlag) and AUTO-FINISH
+// (lib/daemon-lib.js ensureBackdoorHelpers). lib/toggles.js persists both.
 //
 // The script loop paints the HUD (clearLog + printRaw). A tab click only flips a
 // module variable (activeTab) - it must NOT call any ns function, because calling
@@ -18,7 +24,7 @@
 // one tail replaces the old separate dashboard + journal windows.
 
 import { CONFIG, forNode } from "../lib/config.js";
-import { COLORS, el, card, label, progressBar, stat, statRow, formatDuration } from "./dashboard-lib.js";
+import { COLORS, el, card, label, progressBar, stat, statRow, formatDuration, shortenAugNames } from "./dashboard-lib.js";
 // Gang + corp panels reuse the existing per-node card modules. bn5's extraCards
 // already composes the running-gang card (via bn2.js) with the BN5 karma
 // bootstrap card and returns [] elsewhere, so it doubles as a universal gang
@@ -73,6 +79,9 @@ let lastRenderedTab = null;
 let lastRenderAt = 0;
 let renderAgain = false;   // one extra paint after a tab switch, for fitTail sizing
 let lastStatsAt = 0;
+// Set by a header toggle's onClick so the next poll repaints immediately - a switch
+// has to feel like a switch, not like something that responds a second later.
+let forceRender = false;
 
 // ── Trend state ─────────────────────────────────────────────────────────────
 let lastHackLevel = 0;
@@ -112,7 +121,8 @@ export async function main(ns) {
 
     // Repaint on a tab switch (snappy) or when the refresh interval elapses.
     const tabChanged = activeTab !== lastRenderedTab;
-    if (tabChanged || renderAgain || now - lastRenderAt >= HUD.uiRefreshMs) {
+    if (tabChanged || renderAgain || forceRender || now - lastRenderAt >= HUD.uiRefreshMs) {
+      forceRender = false;
       renderHud(ns);
       lastRenderAt = now;
       lastRenderedTab = activeTab;
@@ -171,9 +181,63 @@ function headerBar(ns, C) {
     el("div", { style: { display: "flex", gap: "14px", alignItems: "baseline" } },
       el("span", { style: { fontSize: "13px", color: C.blue } }, `BN${node}${name ? " " + name : ""}`),
       el("span", { style: { fontSize: "13px", color: C.yellow } }, `run ${getRunDuration(ns)}`),
+      ...TOGGLES.map(t => toggleButton(C, t)),
       el("span", { style: { fontSize: "13px", color: C.dim } }, new Date().toLocaleTimeString()),
     ),
   );
+}
+
+/**
+ * The header switches. Each is a globalThis boolean the daemon reads and
+ * lib/toggles.js persists; the HUD only ever assigns to it, because any ns call from
+ * a DOM event handler stops the script (same constraint as the tab handlers).
+ *
+ * Both default ON, i.e. to the behaviour the bot had before they existed.
+ */
+const TOGGLES = [
+  {
+    key: "gordAutoFocus",
+    on: "FOCUS: AUTO",
+    off: "FOCUS: OFF",
+    // Focused work pins the game to its work screen and the daemon re-issues that
+    // work every tick, so hand-managing the corp or the gang is impossible while
+    // the bot is focus-working. Read by lib/player-actions.js (focusFlag), which
+    // also drops focus on the work already running so the effect is immediate.
+    onTitle: "Auto-focus ON - the bot focuses its work (full rate). Click to release the UI so you can manage the corp/gang by hand.",
+    offTitle: "Auto-focus OFF - the bot works unfocused (-20% rate without the Neuroreceptor implant) and leaves the UI alone. Click to resume focusing.",
+  },
+  {
+    key: "gordAutoFinish",
+    on: "FINISH: AUTO",
+    off: "FINISH: OFF",
+    // Read by lib/daemon-lib.js (ensureBackdoorHelpers). Off changes nothing except
+    // the one irreversible step: everything still runs, w0r1d_d43m0n still gets
+    // backdoored, we just don't destroy it.
+    onTitle: "Auto-finish ON - the bot destroys w0r1d_d43m0n and enters the next BitNode once it can. Click to stay in this node.",
+    offTitle: "Auto-finish OFF - the daemon runs as normal and still backdoors w0r1d_d43m0n, but won't beat the BitNode. Click to let it finish.",
+  },
+];
+
+function toggleButton(C, t) {
+  const on = globalThis[t.key] !== false;
+  const color = on ? C.green : C.yellow;
+  return el("span", {
+    key: t.key,
+    onClick: () => { globalThis[t.key] = !on; forceRender = true; },
+    title: on ? t.onTitle : t.offTitle,
+    style: {
+      cursor: "pointer",
+      userSelect: "none",
+      fontSize: "12px",
+      fontWeight: "bold",
+      letterSpacing: "1px",
+      padding: "1px 8px",
+      borderRadius: "4px",
+      color,
+      background: color + "18",
+      border: `1px solid ${color}55`,
+    },
+  }, on ? t.on : t.off);
 }
 
 /**
@@ -213,7 +277,7 @@ function activePanel(ns, C) {
     if (activeTab === "journal") return journalPanel(ns, C);
     if (activeTab === "gang")    return wrapCards(gangPanel(ns, C), C, "No gang yet - grinding toward one (watch the karma line in STATS / JOURNAL).");
     if (activeTab === "corp")    return wrapCards(corpPanel(ns, C), C, "No corporation in this BitNode.");
-    if (activeTab === "sleeve")  return wrapCards(sleevePanel(ns, C), C, "No sleeve activity (BN10 only - the manager starts once a host has ~40GB free).");
+    if (activeTab === "sleeve")  return wrapCards(sleevePanel(ns, C), C, "No sleeve activity (needs BN10 or SF10, and a host with ~72GB free for the manager).");
     if (!statsData) return el("div", { style: { color: C.dim, fontSize: "13px", padding: "8px 2px" } }, "Gathering stats...");
     return el("div", {}, ...statsPanel(ns, C, statsData));
   } catch (e) {
@@ -519,7 +583,7 @@ function buildOperationalCards(ns, C, data) {
               },
             },
               el("span", { style: { color: i === 0 ? "#e2e8f0" : C.dim, fontWeight: i === 0 ? "bold" : "normal", flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } },
-                `${i === 0 ? "> " : "  "}${a.aug}`
+                `${i === 0 ? "> " : "  "}${shortenAugNames(a.aug)}`
               ),
               el("span", { style: { color, fontWeight: "bold", flexShrink: 0, marginLeft: "8px", whiteSpace: "nowrap" } }, etaStr),
             );

@@ -8,7 +8,6 @@
 // 30s -> crime to -9 karma + $1M -> join Slum Snakes -> createGang, then hand
 // day-to-day gang management to /lib/gang.js (run wherever RAM allows).
 
-import { managePurchasedServers } from "../lib/pserv.js";
 import {
   trainCombatIfNeeded,
   commitBestCrimeIfUseful,
@@ -27,20 +26,25 @@ import {
   getUnjoinedFactionOpportunities,
 } from "../lib/aug-targets.js";
 import { forNode } from "../lib/config.js";
-// Shared daemon core (identical across bn2/bn3/bn4) - see lib/daemon-lib.js.
+// Shared daemon core - see lib/daemon-lib.js for what is shared and what each
+// daemon still owns.
 import {
   playerMoney,
   hackingLevel,
-  freeRam,
   ensureHelper,
   ensureBackdoorHelpers,
+  ensureGangManager,
+  gangFactionName,
+  buyAugs,
+  maybeInstall,
+  maybeBuyInfra,
+  startBestFactionWork,
+  maybeDoSecondaryFactionWork,
   buyDarkweb,
   rootEverything,
   acceptInvites,
-  canBuyAug,
   readLastResetTime,
   writeResetTime,
-  recordResetSummary,
   consumeResetSummary,
 } from "../lib/daemon-lib.js";
 // Shared corporation orchestration (all corp-viable nodes) - see lib/corp-daemon.js.
@@ -68,14 +72,6 @@ const SELF = CFG.paths.daemon;                // this daemon's path (post-reset 
 const GANG_FACTION = /** @type {any} */ (GANG.faction);
 const GANG_KARMA = GANG.karma;
 const GANG_JOIN_MONEY = GANG.joinMoney;
-const GANG_SCRIPT = CFG.paths.gang;
-// Dedicated cloud server for the gang manager, used only when home is too small
-// to host it. Reserved from the botnet (via globalThis.gordReservedHosts,
-// honoured by hacking/manager.js and lib/pserv.js) so its ~36GB stays free.
-const GANG_HOST = GANG.host;
-// Home must have at least (gang RAM + this) to host the gang itself, leaving
-// room for the ~63GB daemon, the manager's reserve, and some botnet workers.
-const HOME_GANG_HEADROOM = GANG.homeHeadroom;
 
 // ── Gang ─────────────────────────────────────────────────────────────────────
 
@@ -127,311 +123,7 @@ async function maybeSetupGang(ns) {
   return { action: "Awaiting Invite", detail: `${GANG_FACTION} (requirements met)` };
 }
 
-/**
- * Ensure a dedicated cloud server (GANG_HOST) exists and is big enough to hold
- * the gang manager. Purchased servers only come in powers of two, so we buy/
- * upgrade to the smallest power-of-two >= the gang's RAM. Spends conservatively
- * and never dips below the gang join-money floor. Returns true once GANG_HOST
- * exists at sufficient size.
- * @param {NS} ns @param {number} needRam
- */
-function provisionGangHost(ns, needRam) {
-  const cloud = ns.cloud;
-  if (cloud.getServerLimit() <= 0) return false;
-
-  const maxRam = cloud.getRamLimit();
-  let size = CFG.cloudHost.minRam;
-  while (size < needRam && size < maxRam) size *= 2;
-  if (size < needRam) return false; // even the largest tier can't hold the gang
-
-  const exists = ns.serverExists(GANG_HOST);
-  if (exists && ns.getServerMaxRam(GANG_HOST) >= needRam) return true;
-
-  // This only runs once we're already in a gang, so don't reserve the gang
-  // join-money here (that floor would keep us from ever buying the host at low
-  // balances). Cap spend at half our cash so we don't drain funds needed for
-  // augs/programs - the host gets bought as soon as it's comfortably affordable.
-  const affordable = playerMoney(ns) * CFG.cloudHost.spendFraction;
-
-  if (!exists) {
-    // Need a free slot to add a dedicated host.
-    if (cloud.getServerNames().length >= cloud.getServerLimit()) return false;
-    if (cloud.getServerCost(size) > affordable) return false;
-    if (cloud.purchaseServer(GANG_HOST, size)) {
-      ns.tprint(`Provisioned dedicated gang host ${GANG_HOST} (${ns.format.ram(size)}).`);
-      return true;
-    }
-    return false;
-  }
-
-  // Exists but too small - upgrade toward the required size.
-  const cost = cloud.getServerUpgradeCost(GANG_HOST, size);
-  if (cost < 0 || cost > affordable) return false;
-  if (cloud.upgradeServer(GANG_HOST, size)) {
-    ns.tprint(`Upgraded gang host ${GANG_HOST} -> ${ns.format.ram(size)}.`);
-    return true;
-  }
-  return false;
-}
-
-/**
- * Keep /lib/gang.js (~36GB) running somewhere. Two strategies depending on home
- * size:
- *   - Home is big enough: reserve the gang's RAM out of home (the botnet honours
- *     globalThis.gordReservedRam and vacates that space within a batch or two),
- *     then run it on home. Free and immediate - no cloud server to buy.
- *   - Home is too small: provision a dedicated cloud server (GANG_HOST), reserve
- *     it whole from the botnet, and run it there.
- * Publishes globalThis.gordGangPending so the dashboard can show a "starting"
- * card during the short wait before it lands.
- * @param {NS} ns
- */
-function ensureGangManagerRunning(ns) {
-  if (!ns.gang.inGang()) {
-    globalThis.gordReservedRam = {};
-    globalThis.gordReservedHosts = new Set();
-    globalThis.gordGangPending = false;
-    return;
-  }
-
-  const ram = ns.getScriptRam(GANG_SCRIPT, "home");
-  const cloudNames = ns.cloud.getServerNames();
-
-  // Already running somewhere? Sync the reservation to where it lives and stop.
-  const running = ["home", GANG_HOST, ...cloudNames].find(
-    h => ns.serverExists(h) && ns.scriptRunning(GANG_SCRIPT, h)
-  );
-  if (running) {
-    globalThis.gordGangPending = false;
-    // Only keep a whole-host reservation for the dedicated cloud server; when it
-    // runs on home/a shared server its RAM already shows as "used".
-    globalThis.gordReservedHosts = running === GANG_HOST ? new Set([GANG_HOST]) : new Set();
-    globalThis.gordReservedRam = {};
-    return;
-  }
-
-  // Not running yet - pick a strategy and carve out room.
-  const homeCanHost = ns.getServerMaxRam("home") >= ram + HOME_GANG_HEADROOM;
-  let hosts;
-  if (homeCanHost) {
-    // Reserve room on home so the botnet frees space for the gang there.
-    globalThis.gordReservedRam = { home: ram + GANG.homeReserveSlack };
-    globalThis.gordReservedHosts = new Set();
-    hosts = ["home", ...cloudNames];
-  } else {
-    globalThis.gordReservedRam = {};
-    provisionGangHost(ns, ram);
-    globalThis.gordReservedHosts = ns.serverExists(GANG_HOST) ? new Set([GANG_HOST]) : new Set();
-    hosts = [GANG_HOST, ...cloudNames.filter(h => h !== GANG_HOST), "home"];
-  }
-
-  for (const host of hosts) {
-    if (!ns.serverExists(host)) continue;
-    const headroom = host === "home" ? CFG.helpers.homeHeadroom : 0; // leave room for daemon children
-    if (freeRam(ns, host) - headroom < ram) continue;
-    // Copy the whole source tree, not just gang.js: it imports lib/config.js,
-    // and Bitburner resolves a script's imports from the host it runs on.
-    if (host !== "home") ns.scp(ns.ls("home", ".js"), host, "home");
-    if (ns.exec(GANG_SCRIPT, host, 1)) {
-      ns.tprint(`Started ${GANG_SCRIPT} on ${host}`);
-      globalThis.gordGangPending = false;
-      return;
-    }
-  }
-
-  // Couldn't place it this tick - usually just waiting for the botnet's current
-  // batches to finish and free the RAM we reserved on home.
-  globalThis.gordGangPending = true;
-  ns.print(`WARN: waiting for ${ns.format.ram(ram)} to free for ${GANG_SCRIPT} (home ${ns.format.ram(freeRam(ns, "home"))} free)`);
-}
-
 // ── Augs / install / infra (same as bn4) ─────────────────────────────────────
-
-/** @param {NS} ns */
-function buyAugs(ns) {
-  const s = ns.singularity;
-  const owned = new Set(s.getOwnedAugmentations(true));
-  const joined = ns.getPlayer().factions ?? [];
-
-  const candidates = [];
-  const purchases = [];
-
-  for (const faction of joined) {
-    for (const aug of s.getAugmentationsFromFaction(/** @type {any} */ (faction))) {
-      if (canBuyAug(ns, faction, aug, owned)) {
-        candidates.push({
-          faction,
-          aug,
-          price: s.getAugmentationPrice(aug),
-          rep: s.getAugmentationRepReq(aug),
-        });
-      }
-    }
-  }
-
-  // Buy cheapest first; NeuroFlux Governor always last.
-  candidates.sort((a, b) => {
-    const aNFG = a.aug === AUGS.neuroFlux ? 1 : 0;
-    const bNFG = b.aug === AUGS.neuroFlux ? 1 : 0;
-    if (aNFG !== bNFG) return aNFG - bNFG;
-    return a.price - b.price;
-  });
-
-  for (const c of candidates) {
-    if (canBuyAug(ns, c.faction, c.aug, owned)) {
-      if (s.purchaseAugmentation(/** @type {any} */ (c.faction), c.aug)) {
-        purchases.push(`${c.aug} from ${c.faction}`);
-        owned.add(c.aug);
-      }
-    }
-  }
-
-  return purchases;
-}
-
-const INSTALL_PRIORITY_AUGS = AUGS.installPriority;
-
-/** @param {NS} ns */
-function startBestFactionWork(ns, faction) {
-  const types = CFG.player.factionWorkTypes;
-
-  for (const type of types) {
-    const ok = ns.singularity.workForFaction(
-      /** @type {any} */ (faction),
-      /** @type {any} */ (type),
-      shouldFocus(ns)
-    );
-    if (ok) return type;
-  }
-
-  return null;
-}
-
-/**
- * Same install policy as bn4. Resets are extra cheap in BN2 because the gang
- * (members, respect, territory) persists through augmentation installs - the
- * daemon just relaunches /lib/gang.js after boot.
- * @param {NS} ns
- */
-function maybeInstall(ns) {
-  const ownedWithPurchased = ns.singularity.getOwnedAugmentations(true);
-  const ownedInstalled = ns.singularity.getOwnedAugmentations(false);
-  const queued = ownedWithPurchased.length - ownedInstalled.length;
-
-  const hasRedPill = ownedWithPurchased.includes(AUGS.redPill);
-  const hasPriorityAug = INSTALL_PRIORITY_AUGS.some(
-    a => ownedWithPurchased.includes(a) && !ownedInstalled.includes(a)
-  );
-
-  const allPriorityDone = INSTALL_PRIORITY_AUGS.every(a => ownedInstalled.includes(a));
-  const aggressiveInstall = allPriorityDone && queued >= AUGS.install.minQueued;
-
-  const lastReset = readLastResetTime(ns);
-  const elapsed = Date.now() - lastReset;
-  const TIME_TRIGGER_MS = AUGS.install.timeTriggerMs;
-  const timeTriggered = queued >= AUGS.install.minQueued && elapsed >= TIME_TRIGGER_MS;
-
-  if (hasRedPill || queued >= AUGS.install.queuedThreshold || (queued >= AUGS.install.priorityQueuedThreshold && hasPriorityAug) || aggressiveInstall || timeTriggered) {
-    if (timeTriggered) {
-      const hours = (elapsed / 3_600_000).toFixed(1);
-      ns.tprint(`Time-triggered install after ${hours}h with ${queued} aug(s) queued.`);
-    }
-    if (aggressiveInstall) {
-      ns.tprint(`Aggressive install: all priority augs done, resetting with ${queued} queued.`);
-    }
-
-    // Dump remaining cash into NeuroFlux Governor right before resetting.
-    const s = ns.singularity;
-    const nfgFaction = (ns.getPlayer().factions ?? []).find(f =>
-      s.getFactionRep(/** @type {any} */ (f)) >= s.getAugmentationRepReq(AUGS.neuroFlux)
-    ) ?? null;
-    if (nfgFaction) {
-      let bought = true;
-      while (bought) {
-        const price = s.getAugmentationPrice(AUGS.neuroFlux);
-        if (playerMoney(ns) < price) break;
-        bought = s.purchaseAugmentation(/** @type {any} */ (nfgFaction), AUGS.neuroFlux);
-      }
-    }
-
-    // Record what this reset installs + how long the run lasted, for the next
-    // boot's journal. Computed AFTER the NeuroFlux buys above and BEFORE
-    // writeResetTime (which overwrites the old timestamp we need for the
-    // duration). Guarded: a summary failure must never block the install.
-    try {
-      const installedSet = new Set(s.getOwnedAugmentations(false));
-      const installing = s.getOwnedAugmentations(true).filter(a => !installedSet.has(a));
-      recordResetSummary(ns, installing, Date.now() - readLastResetTime(ns));
-    } catch (e) {
-      ns.print(`reset summary failed: ${String(e)}`);
-    }
-
-    writeResetTime(ns);
-    ns.singularity.installAugmentations(SELF);
-  }
-}
-
-/** @param {NS} ns @param {any} target */
-async function maybeBuyInfra(ns, target) {
-  const money = playerMoney(ns);
-
-  if (!target) {
-    return await managePurchasedServers(ns, CFG.infra.noTarget.reserveMoney, CFG.infra.noTarget.spendFraction);
-  }
-
-  const { price, moneyMissing = 0, repMissing = 0 } = target;
-
-  if (repMissing > 0) {
-    const hardCap = money > price ? money - price : money * CFG.infra.repPending.fallbackCapFraction;
-    return await managePurchasedServers(ns, CFG.infra.repPending.reserveMoney, CFG.infra.repPending.spendFraction, hardCap);
-  }
-
-  const tinyBudget = moneyMissing * CFG.infra.savingBudgetFraction;
-  if (tinyBudget < CFG.infra.minBudget) {
-    return {
-      action: "Saving for Aug",
-      detail: `${target.aug}: need $${ns.format.number(moneyMissing)}`,
-    };
-  }
-  return await managePurchasedServers(ns, price, CFG.infra.savingSpendFraction, tinyBudget);
-}
-
-/**
- * When our primary goal doesn't need player focus, optionally bank rep with a
- * secondary faction that has augs we'll want later.
- * @param {NS} ns
- * @param {string} primaryFaction
- */
-function maybeDoSecondaryFactionWork(ns, primaryFaction) {
-  if (shouldFocus(ns)) return null;
-
-  const s = ns.singularity;
-  const owned = new Set(s.getOwnedAugmentations(true));
-  const joined = ns.getPlayer().factions ?? [];
-
-  for (const factionName of joined) {
-    if (factionName === primaryFaction) continue;
-    if (factionName === GANG_FACTION) continue; // gang rep is passive
-
-    const augs = s.getAugmentationsFromFaction(/** @type {any} */ (factionName));
-    const currentRep = s.getFactionRep(/** @type {any} */ (factionName));
-
-    const hasUsefulWork = augs.some(aug => {
-      if (aug === AUGS.neuroFlux) return false;
-      if (owned.has(aug)) return false;
-      const prereqs = s.getAugmentationPrereq(aug);
-      if (!prereqs.every(a => owned.has(a))) return false;
-      return s.getAugmentationRepReq(aug) > currentRep;
-    });
-
-    if (!hasUsefulWork) continue;
-
-    const workType = startBestFactionWork(ns, factionName);
-    if (workType) return `Secondary: ${factionName} (${workType})`;
-  }
-
-  return null;
-}
 
 /** @param {NS} ns */
 async function decideNextPriority(ns) {
@@ -497,8 +189,7 @@ async function decideNextPriority(ns) {
   if (target.repMissing > 0) {
     // Gang faction rep accrues passively from gang respect - workForFaction
     // doesn't even apply to it. Spend player attention elsewhere.
-    const gangFaction = globalThis.gordGangState?.faction ?? GANG_FACTION;
-    if (ns.gang.inGang() && target.faction === gangFaction) {
+    if (target.faction === gangFactionName(ns)) {
       const secondary = maybeDoSecondaryFactionWork(ns, target.faction);
       const extra = secondary ?? (await doIdleWork(ns))?.detail;
       return {
@@ -626,20 +317,31 @@ export async function main(ns) {
     // and never install a single backdoor.
     ensureBackdoorHelpers(ns, Number(ns.args[0] ?? CFG.backdoor.defaultNextBN), SELF);
 
-    // Launch helpers off-home (the ~63GB daemon fills home by itself). Order by
-    // priority: gang first (it also reserves cloud-gang from the botnet), then
-    // the hacking manager (our main income engine - starts earning on any 16GB
-    // server, no port openers needed), then the UI/luxury scripts.
-    ensureGangManagerRunning(ns);
+    // Gang first: it reserves cloud-gang from the botnet before anything else goes
+    // looking for off-home RAM, and lib/gang.js is ~36GB - big enough to lose every
+    // race for a shared host. Then the hacking manager (our main income engine -
+    // starts earning on any 16GB server, no port openers needed), then UI/luxury.
+    const reserved = new Set();
+    ensureGangManager(ns, reserved);
+    globalThis.gordReservedHosts = reserved;
 
     // Corporation (now that we have corp API access everywhere): keep the one-shot
     // creator running until a corp exists, then keep its managers alive on the
-    // reserved cloud-corp host. ensureGangManagerRunning has just published the
+    // reserved cloud-corp host. ensureGangManager has just published the
     // gang reservation this tick; we add the corp host to that same fresh Set.
     // Both self-gate on corp.enabled / affordability, so this is a quiet no-op
     // until we can comfortably self-fund the corp.
     const corpEvent = maybeSetupCorp(ns);
-    ensureCorpManagers(ns, globalThis.gordReservedHosts instanceof Set ? globalThis.gordReservedHosts : new Set());
+    ensureCorpManagers(ns, reserved);
+
+    // Duplicate sleeves (BN10 or SF10). ~72GB of ns.sleeve.* calls, so it runs
+    // off-home like the gang manager, and BEFORE the botnet so it can claim RAM
+    // before workers fill the network. Optional: early on no host has room, and it
+    // simply starts later. lib/sleeves.js self-exits where sleeves are unavailable,
+    // and until we have a gang it points the whole roster at crime for KARMA -
+    // sleeve karma counts for the player, so the roster is our fastest route to
+    // founding one. After that each sleeve mirrors the player's own work.
+    ensureHelper(ns, CFG.paths.sleeves, { optional: true });
 
     ensureHelper(ns, CFG.paths.manager);
     ensureHelper(ns, CFG.paths.dashboard);
@@ -665,7 +367,7 @@ export async function main(ns) {
 
     globalThis.gordAugPipeline = getAllAugCandidates(ns).slice(0, AUGS.pipelineSize);
 
-    maybeInstall(ns);
+    maybeInstall(ns, SELF);
 
     ns.print(
       `Money: ${ns.format.number(playerMoney(ns))} | Hack: ${hackingLevel(ns)} | Karma: ${(ns.getPlayer().karma ?? 0).toFixed(0)}`

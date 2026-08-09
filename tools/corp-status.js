@@ -102,8 +102,9 @@ export async function main(ns) {
       ns.tprint(`        buildout can't staff or expand it. Corp holds ${$(corp.funds)}. Until then the`);
       ns.tprint("        script only buys input materials and sells output - everything else waits.");
     }
-    ns.tprint(`structure done this round: ${globalThis.gordCorpStructureDone ? "yes" : "no"} ` +
-      `| corp-build round published: ${globalThis.gordCorpRound ?? "(not run yet)"}`);
+    ns.tprint(`capacity built: ${globalThis.gordCorpExpandDone ? "yes" : "no"} ` +
+      `| offices built: ${globalThis.gordCorpOfficeDone ? "yes" : "no"} ` +
+      `| round published: ${globalThis.gordCorpRound ?? "(corp-invest not run yet)"}`);
   }
   ns.tprint("=".repeat(66));
 }

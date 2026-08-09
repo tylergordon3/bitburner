@@ -98,6 +98,51 @@ export function stat(C, label_, value, color) {
 
 // ── Formatting ────────────────────────────────────────────────────────────────
 
+// Display shortenings for the game's most long-winded augmentation names, so
+// journal lines and the AUGS pipeline column stay readable. DISPLAY-ONLY: every
+// API call and config entry keeps the exact in-game name - these are applied at
+// render time (ui/journal.js push, ui/dashboard.js pipeline), never at emit time.
+//
+// Ordered longest-first WITHIN each family so a base name ("Embedded Netburner
+// Module") can't pre-empt its longer variants ("... Core V2 Upgrade") - the
+// replacement walks this list top to bottom.
+const AUG_SHORT_NAMES = [
+  ["Embedded Netburner Module Direct Memory Access Upgrade", "ENM DMA"],
+  ["Embedded Netburner Module Core V3 Upgrade", "ENM Core V3"],
+  ["Embedded Netburner Module Core V2 Upgrade", "ENM Core V2"],
+  ["Embedded Netburner Module Core Implant", "ENM Core"],
+  ["Embedded Netburner Module Analyze Engine", "ENM Analyze Engine"],
+  ["Embedded Netburner Module", "ENM"],
+  ["Hacknet Node CPU Architecture Neural-Upload", "Hacknet CPU Upload"],
+  ["Hacknet Node Cache Architecture Neural-Upload", "Hacknet Cache Upload"],
+  ["Hacknet Node NIC Architecture Neural-Upload", "Hacknet NIC Upload"],
+  ["Hacknet Node Kernel Direct-Access Upload", "Hacknet Kernel Upload"],
+  ["Hacknet Node Core Direct-Access Upload", "Hacknet Core Upload"],
+  ["PC Direct-Neural Interface Optimization Submodule", "PCDNI Optimization"],
+  ["PC Direct-Neural Interface NeuroNet Injector", "PCDNI NeuroNet"],
+  ["PC Direct-Neural Interface", "PCDNI"],
+  ["Artificial Bio-neural Network Implant", "Bio-neural Network"],
+  ["Nuoptimal Nootropic Injector Implant", "Nuoptimal Injector"],
+  ["Neuroreceptor Management Implant", "Neuroreceptor Mgmt"],
+  ["Enhanced Social Interaction Implant", "Social Interaction Implant"],
+  ["NeuroFlux Governor", "NeuroFlux"],
+];
+
+/**
+ * Shorten known aug names anywhere in `text` (works on a bare name or a whole
+ * composed line), plus the generic "X - Gen II" -> "X II" rule that covers the
+ * Cranial Signal Processors family. Pure string work - safe on any journal line.
+ */
+export function shortenAugNames(text) {
+  let out = String(text);
+  for (const [long, short] of AUG_SHORT_NAMES) {
+    if (out.includes(long)) out = out.split(long).join(short);
+  }
+  // " - Gen II" -> " II", only when a roman numeral follows, so ordinary " - "
+  // separators in narration lines are never touched.
+  return out.replace(/ - Gen (?=[IVXL]+\b)/g, " ");
+}
+
 export function formatDuration(ms) {
   if (!Number.isFinite(ms) || ms < 0) return "-";
   const sec = Math.floor(ms / 1000);

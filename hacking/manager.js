@@ -213,7 +213,7 @@ function manageShare(ns) {
   if (key !== _lastShareHosts) {
     _lastShareHosts = key;
     if (key) {
-      ns.print(`[share] ${servers.length} server(s), ${threads} threads → faction rep ×${bonus.toFixed(3)} (+${((bonus - 1) * 100).toFixed(1)}%)`);
+      ns.print(`[share] ${servers.length} server(s), ${threads} threads -> faction rep x${bonus.toFixed(3)} (+${((bonus - 1) * 100).toFixed(1)}%)`);
     } else {
       ns.print("[share] off (not farming faction rep)");
     }
@@ -239,7 +239,7 @@ function targetScore(ns, server) {
   if (maxMoney <= 0) return 0;
 
   // With Formulas, rank by expected steady-state yield at the prepped state a
-  // batch actually farms: money × (steal % per thread) × (success chance) per
+  // batch actually farms: money x (steal % per thread) x (success chance) per
   // unit cycle time (weakenTime bounds a batch). This picks genuinely richer
   // targets than the current-security heuristic below.
   if (F.hasFormulas(ns)) {
@@ -253,13 +253,6 @@ function targetScore(ns, server) {
   const hackTime = ns.getHackTime(server);
   if (hackTime <= 0) return 0;
   return maxMoney / minSec / hackTime;
-}
-
-/** @param {NS} ns */
-function bestTarget(ns) {
-  const targets = validTargets(ns);
-  targets.sort((a, b) => targetScore(ns, b) - targetScore(ns, a));
-  return targets[0] ?? H.defaultTarget;
 }
 
 /** @param {NS} ns */
