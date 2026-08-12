@@ -143,12 +143,19 @@ The old single builder reached ~30 (~490GB); it's now:
 
 Manual-derived behaviour worth knowing: boost/input materials use **`buyMaterial`
 per-second orders, not `bulkPurchase`** — orders may take the corp into debt, which
-is the intended end-of-round shape; rounds 1–2 hold everyone on **R&D until the RP
-gates** (55, then Agri ~700 / Chem ~390) and round 2's offer can't be accepted
-before them; research starts **round 4**, capped per purchase to a fraction of the
-RP pool (½ lab/TA, ⅕ stat, ⅒ production); **dummy Restaurant divisions** (6 cities,
-6 warehouses, nothing else) multiply the offer ~1.1× each via the valuation
-exponent; product design invest is 1% of funds (it scales as x^0.1).
+is the intended end-of-round shape; boost quantities are the manual's **closed-form
+Lagrange optimum** (`optimalBoostQuantities` in `lib/corp-lib.js`, unit-tested
+against the manual's own tables), not a factor-proportional split; export routes
+use the optimal string `(IPROD+IINV/10)*(-1)`; rounds 1–2 hold everyone on **R&D
+until the RP gates** (55, then Agri ~700 / Chem ~390), round 2's offer can't be
+accepted before them, and corp-wide upgrades are restricted to Smart
+Storage/Factories until round 3; research starts **round 4**, capped per purchase
+to a fraction of the RP pool (½ lab/TA, ⅕ stat, ⅒ production); **dummy Restaurant
+divisions** (6 cities, 6 warehouses, nothing else) multiply the offer ~1.1× each
+via the valuation exponent; product design invest is 1% of funds (it scales as
+x^0.1), the lowest-rated product is recycled once slots are full, and Advert's
+funds share steps up from 20% to 50% past ~1e18/s profit (the manual's
+"threshold of focusing on Advert").
 
 ## HUD toggles
 
