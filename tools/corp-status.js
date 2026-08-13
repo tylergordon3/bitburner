@@ -105,6 +105,11 @@ export async function main(ns) {
     ns.tprint(`capacity built: ${globalThis.gordCorpExpandDone ? "yes" : "no"} ` +
       `| offices built: ${globalThis.gordCorpOfficeDone ? "yes" : "no"} ` +
       `| round published: ${globalThis.gordCorpRound ?? "(corp-invest not run yet)"}`);
+    const saving = globalThis.gordCorpSavingFor ?? 0;
+    if (saving > 0) {
+      ns.tprint(`SAVING for a division founding: ${$(corp.funds)} / ${$(saving)} banked - ` +
+        "advert + warehouse/upgrade spending is paused until then (office seats still grow).");
+    }
   }
   ns.tprint("=".repeat(66));
 }
