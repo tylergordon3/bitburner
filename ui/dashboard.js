@@ -181,7 +181,7 @@ function headerBar(ns, C) {
     el("div", { style: { display: "flex", gap: "14px", alignItems: "baseline" } },
       el("span", { style: { fontSize: "13px", color: C.blue } }, `BN${node}${name ? " " + name : ""}`),
       el("span", { style: { fontSize: "13px", color: C.yellow } }, `run ${getRunDuration(ns)}`),
-      ...TOGGLES.map(t => toggleButton(C, t)),
+      ...TOGGLES.map(t => toggleButton(ns, C, t)),
       el("span", { style: { fontSize: "13px", color: C.dim } }, new Date().toLocaleTimeString()),
     ),
   );
@@ -197,6 +197,7 @@ function headerBar(ns, C) {
 const TOGGLES = [
   {
     key: "gordAutoFocus",
+    file: CONFIG.paths.focusFile,
     on: "FOCUS: AUTO",
     off: "FOCUS: OFF",
     // Focused work pins the game to its work screen and the daemon re-issues that
@@ -208,6 +209,7 @@ const TOGGLES = [
   },
   {
     key: "gordAutoFinish",
+    file: CONFIG.paths.autoFinishFile,
     on: "FINISH: AUTO",
     off: "FINISH: OFF",
     // Read by lib/daemon-lib.js (ensureBackdoorHelpers). Off changes nothing except
@@ -218,8 +220,28 @@ const TOGGLES = [
   },
 ];
 
-function toggleButton(C, t) {
-  const on = globalThis[t.key] !== false;
+/**
+ * Displayed state of a toggle. globalThis is the live value the daemon acts on, but
+ * a page load wipes it while the persisted file survives - so between a reload and
+ * the daemon's first tick the header used to paint FINISH: AUTO over a deliberate
+ * "off", which is the last thing this switch should ever misreport. Seed the display
+ * from disk in that window.
+ *
+ * One-directional on purpose: we only ever seed OFF, never ON. ns.read sees the LOCAL
+ * host's files and this HUD is usually placed off-home (ensureHelper), where the file
+ * simply is not present - an absent file must not read as "on" and clobber a real
+ * "off" for lib/toggles.js to then persist.
+ * @param {NS} ns
+ */
+function toggleState(ns, t) {
+  if (globalThis[t.key] === undefined && String(ns.read(t.file)).trim() === "off") {
+    globalThis[t.key] = false;
+  }
+  return globalThis[t.key] !== false;
+}
+
+function toggleButton(ns, C, t) {
+  const on = toggleState(ns, t);
   const color = on ? C.green : C.yellow;
   return el("span", {
     key: t.key,
