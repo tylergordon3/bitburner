@@ -216,7 +216,7 @@ const TOGGLES = [
     // the one irreversible step: everything still runs, w0r1d_d43m0n still gets
     // backdoored, we just don't destroy it.
     onTitle: "Auto-finish ON - the bot destroys w0r1d_d43m0n and enters the next BitNode once it can. Click to stay in this node.",
-    offTitle: "Auto-finish OFF - the daemon runs as normal and still backdoors w0r1d_d43m0n, but won't beat the BitNode. Click to let it finish.",
+    offTitle: "Auto-finish OFF - the daemon runs as normal and still backdoors everything this node allows, but won't beat the BitNode. Click to let it finish.",
   },
 ];
 

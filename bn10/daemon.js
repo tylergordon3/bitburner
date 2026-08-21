@@ -29,11 +29,18 @@
 // founds them when they're free to found and keeps their managers alive on
 // dedicated, botnet-reserved cloud hosts (ensureCloudManagers).
 //
-// Because the sleeve spree is a long, one-time shopping trip, this daemon
-// deliberately does NOT auto-destroy w0r1d_d43m0n (plannedNextBN returns the halt sentinel):
-// backdoor.js still backdoors everything, but you finish manually once the sleeve
-// roster is complete (watch the SLEEVE dashboard tab). Pass a node number as
-// arg[0] to override and auto-progress.
+// Because the sleeve spree is a long, one-time shopping trip, this daemon CANNOT end
+// the BitNode - that is the player's call alone, made by backdooring w0r1d_d43m0n by
+// hand once the sleeve roster is complete (watch the SLEEVE dashboard tab). Two locks,
+// both needed:
+//   1. plannedNextBN always returns the halt sentinel, so lib/finish-bn.js is never
+//      launched (and it refuses to run here even if launched by hand). No arg override.
+//   2. BITNODE[10].backdoor.skipFinalHost keeps lib/backdoor.js off w0r1d_d43m0n for
+//      the whole node. Lock 1 alone was not enough: the backdoor helper installs the
+//      backdoor the moment hacking level allows, and on the world daemon that backdoor
+//      IS the finish - it opens the BitVerse exactly like the terminal command.
+// Everything else (CSEC, avmnite-02h, I.I.I.I, run4theh111z, The-Cave) is still
+// backdoored normally, so the hacking factions unlock as usual.
 
 import {
   trainCombatIfNeeded,
@@ -155,19 +162,24 @@ function ensureCloudManagers(ns) {
 }
 
 /**
- * The BitNode to enter when lib/finish-bn.js destroys w0r1d_d43m0n. Default is the
- * HALT sentinel (<= 0), which ensureBackdoorHelpers reads as "backdoor everything
- * but DON'T auto-destroy" (it never launches the finisher, and announces once
- * instead). That's the whole BN10 strategy: buying every sleeve + maxing
- * memory only happens in this node and takes a full run, so we stay and shop
- * rather than smashing the node and leaving. Finish manually once the SLEEVE tab
- * shows the roster complete. An explicit daemon arg ([0]) overrides (e.g.
- * `run bn10/daemon.js 10` to auto-re-enter BN10). getResetInfo() is free (0GB).
+ * Always the HALT sentinel (<= 0), which ensureBackdoorHelpers reads as "do everything
+ * else, but never launch the finisher". That is the whole BN10 strategy: buying every
+ * sleeve + maxing memory only happens in this node and takes a full run, so we stay
+ * and shop rather than smashing the node and leaving.
+ *
+ * There is deliberately NO arg override here (other daemons take one): BN10 ends only
+ * when the PLAYER backdoors w0r1d_d43m0n by hand. The other half of that guarantee is
+ * BITNODE[10].backdoor.skipFinalHost, which keeps lib/backdoor.js away from the world
+ * daemon entirely - without it the halt sentinel alone would not have held, since the
+ * backdoor helper would have installed the backdoor that ends the node as soon as
+ * hacking level allowed.
  * @param {NS} ns
  */
 function plannedNextBN(ns) {
-  if (ns.args[0] != null) return Number(ns.args[0]);
-  return 0; // halt: let the player finish manually after the sleeve shopping spree
+  if (ns.args[0] != null) {
+    ns.tprint(`WARN: ignoring next-BitNode arg ${ns.args[0]} - BN10 is manual-finish only (BITNODE[10].backdoor.skipFinalHost). Backdoor w0r1d_d43m0n yourself to leave.`);
+  }
+  return 0; // halt: the player finishes manually, after the sleeve shopping spree
 }
 
 /** @param {NS} ns */
