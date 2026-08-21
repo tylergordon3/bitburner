@@ -11,7 +11,11 @@
 // After syncing a change to either, run this BEFORE restarting the daemon.
 //
 //   run /tools/kill-helpers.js        - the two BitNode-ending helpers (default)
-//   run /tools/kill-helpers.js all    - those plus sleeves/gang/corp/grafting
+//   run /tools/kill-helpers.js all    - those plus the botnet manager, sleeves/gang/corp/grafting
+//
+// The botnet manager (hacking/manager.js) is on the `all` list for the same
+// reason: it runs off-home, so `killall` on home leaves the OLD manager running
+// and ensureHelper then sees it "already running" and never starts the new code.
 //
 // ensureHelper re-places whatever the node still needs on the next daemon tick,
 // from the freshly-synced files.
@@ -25,7 +29,7 @@ const P = CONFIG.paths;
 export async function main(ns) {
   const all = String(ns.args[0] ?? "") === "all";
   const scripts = all
-    ? [P.backdoor, P.finishBn, P.sleeves, P.gang, P.grafting, P.corpSteady, P.corpUpkeep]
+    ? [P.backdoor, P.finishBn, P.manager, P.sleeves, P.gang, P.grafting, P.corpSteady, P.corpUpkeep]
     : [P.backdoor, P.finishBn];
 
   let killed = 0;

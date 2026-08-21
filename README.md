@@ -34,6 +34,41 @@ batch actually farms — exact steal-%, exact grow threads, and min-security bat
 timings — instead of the target's current-security state. `lib/gang.js`'s replicas
 and `lib/econ.js`'s hacknet buys remain candidates for the same treatment.
 
+## HGW batcher
+
+[`hacking/manager.js`](hacking/manager.js) is the Netscript I/O shell; every
+sizing and scheduling decision is the pure, unit-tested
+[`lib/batch-logic.js`](lib/batch-logic.js). It is a **continuous scheduler**, not
+a "launch the largest batch that fits, every tick" loop:
+
+- The four legs land `H, W1, G, W2` around the weaken time (`legSchedule`), and
+  launches are spaced by that landing span plus `hacking.launchMarginMs`. That
+  guarantees batch N+1's first landing follows batch N's last — the whole
+  correctness condition, since each batch restores the prepped state before the
+  next one's hack lands. (The old loop launched every 200 ms, so every hack after
+  the first landed on an already-hacked server, and the first landing hack
+  tripped a re-prep that blocked launching for a grow-time.)
+- Timing then fixes how many batches are in flight (`batchDepth`, capped by
+  `hacking.maxDepth`), and the money fraction per batch is the largest in
+  `hacking.moneyFractions` that lets that many batches share the botnet's RAM
+  (`planCycle`). A batch is allocated across hosts as a whole and launched
+  entirely or not at all (`allocate`).
+- Targets are ranked by **$ per GB-second** (`targetScore`), which is what a
+  RAM-bound botnet maximises; the old `maxMoney / minSec / hackTime` ignored what
+  a batch costs.
+- Prep is one joint weaken+grow pass sized so the weaken also covers the grow's
+  own security (`prepPlan`), and it does **not** block the loop: the manager keeps
+  ticking (share, runner-up prep) and simply doesn't launch until the legs land.
+- While batches fly, the target is checked against the worst case one open batch
+  can explain (`driftDetected`); real drift stops launching, the window drains in
+  a weaken-time, and the target is re-prepped.
+- One network snapshot per tick; rooting, script copies and target re-ranking are
+  throttled (`networkRescanMs`, `rootRetryMs`, `targetRescoreMs`).
+
+After syncing a change to the manager, run `run /tools/kill-helpers.js all` before
+restarting: the manager runs off-home, so `killall` on home leaves the old copy
+running and the daemon never launches the new one.
+
 ## BitNode entry points
 
 Each bitnode gets a thin `bnX/daemon.js` orchestrator; everything reusable lives in `lib/`.
@@ -45,15 +80,22 @@ Each bitnode gets a thin `bnX/daemon.js` orchestrator; everything reusable lives
 - `lib/gang.js` — standalone BN-agnostic gang manager (recruit/ascend/equip/tasks/territory);
   reusable in any bitnode with SF2 gang access.
 
-[`lib/daemon-lib.js`](lib/daemon-lib.js) holds everything that was identical across
-all five: rooting, darkweb buys, accepting invites, off-home helper placement, the
-gang manager's placement, faction work, `buyAugs`, the install policy, and the
-purchased-server budget. Each daemon still owns what genuinely differs —
-`decideNextPriority` (the node's strategy), `maybeSetupGang` (BN2's -9 shortcut vs
-BN5's active karma grind vs everyone else's passive snap-up), `plannedNextBN`, and
-`main()`'s wiring. Note this is a *maintainability* win, not a RAM one: Bitburner
-sums a script's cost over its whole import closure either way. RAM savings come from
-moving work into off-home helpers, which is why `lib/` is full of them.
+[`lib/daemon-lib.js`](lib/daemon-lib.js) holds the building blocks that are
+identical across all five: rooting, darkweb buys, accepting invites, off-home helper
+placement, the gang manager's placement, faction work, `buyAugs`, the install policy,
+and the purchased-server budget. [`lib/daemon-core.js`](lib/daemon-core.js) holds
+the skeleton built from them: `runDaemon(ns, hooks)` is `main()` (the tick loop and
+the helper launch order), and `decidePrelude` / `decideNoTarget` / `decideAugFlow`
+are the parts of `decideNextPriority` every node shares (train → rep → money → buy).
+A node's daemon is then just its strategy prefix plus hooks: `maybeSetupGang` (BN2's
+-9 shortcut vs BN5's active karma grind vs everyone else's passive snap-up),
+`plannedNextBN`, extra helpers, the status line. `bn2`/`bn3`/`bn4` are on the core;
+`bn5`/`bn10` still carry the older inline copy and migrate next.
+`lib/aug-targets.js`'s `factionRepStillUseful` is the one predicate behind every
+"should the work slot go to this faction?" decision. Note this is a *maintainability*
+win, not a RAM one: Bitburner charges the API calls of every function reached from
+`main` either way. RAM savings come from moving work into off-home helpers, which is
+why `lib/` is full of them.
 
 ## Capabilities
 
@@ -205,7 +247,7 @@ capabilities plus contract-solver coverage. It makes no purchases and never rese
 ## Testing
 
 The pure (`ns`-free) logic modules — `lib/capabilities.js`, `lib/contract-solvers.js`,
-`lib/grafting-logic.js`, `lib/crime-logic.js` — have Node unit tests under
+`lib/grafting-logic.js`, `lib/crime-logic.js`, `lib/batch-logic.js` — have Node unit tests under
 [`tests/`](tests/). With Node ≥20:
 
 ```bash

@@ -516,15 +516,17 @@ function killOldHackScripts(ns) {
 export async function main(ns) {
   ns.disableLog("ALL");
 
-  RAM.hack = ns.getScriptRam(HACK) || RAM.hack;
-  RAM.grow = ns.getScriptRam(GROW) || RAM.grow;
-  RAM.weaken = ns.getScriptRam(WEAKEN) || RAM.weaken;
-  _shareThreadRam = ns.getScriptRam(SHARE) || _shareThreadRam;
+  // Read from HOME explicitly: this script usually runs off-home, on a host
+  // that may not hold the worker files yet (they're copied in buildSnapshot).
+  RAM.hack = ns.getScriptRam(HACK, HOME) || RAM.hack;
+  RAM.grow = ns.getScriptRam(GROW, HOME) || RAM.grow;
+  RAM.weaken = ns.getScriptRam(WEAKEN, HOME) || RAM.weaken;
+  _shareThreadRam = ns.getScriptRam(SHARE, HOME) || _shareThreadRam;
 
   if (ns.args.includes("--reset")) killOldHackScripts(ns);
 
   /** Batches whose legs haven't all landed yet (any target). */
-  let inFlight = /** @type {ReturnType<typeof launchBatch>[]} */ ([]);
+  let inFlight = /** @type {any[]} */ ([]);
   /** target -> time its prep legs will have landed. */
   const prepUntil = new Map();
   let nextLaunchAt = 0;

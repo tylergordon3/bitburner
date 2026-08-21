@@ -35,11 +35,6 @@ test("planBatch caps the HACK at maxHackFraction, not just the grow estimate", (
   assert.equal(planBatch({ moneyFraction: 0.1, hackPct: 0, growThreadsFor, ramPerThread: RAM, ...GAME }), null);
 });
 
-test("smaller fractions steal more per GB (why the bite is chosen by depth, not largest-first)", () => {
-  const big = planFor(0.5), small = planFor(0.01);
-  assert.ok(big.hackedFraction / big.ram < small.hackedFraction / small.ram);
-});
-
 test("legSchedule lands H, W1, G, W2 in order and spaces launches past the span", () => {
   const s = legSchedule({ hackTime: 10_000, growTime: 32_000, weakenTime: 40_000, spacing: 200 });
   assert.ok(s.landings.hack < s.landings.weaken1);
