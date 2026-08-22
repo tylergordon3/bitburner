@@ -238,10 +238,10 @@ function buildRanges(text, hl) {
   };
   addTokens(hl?.augs, "aug");
   addTokens(hl?.factions, "faction");
+  // matchAll, not RegExp.exec: Bitburner's RAM analyzer bills identifiers by
+  // name, so a `.exec(` on a RegExp is charged as ns.exec (1.3GB).
   for (const re of NUM_PATTERNS) {
-    re.lastIndex = 0;
-    let m;
-    while ((m = re.exec(text)) !== null) {
+    for (const m of text.matchAll(re)) {
       ranges.push({ start: m.index, end: m.index + m[0].length, cls: "num" });
     }
   }
@@ -290,7 +290,7 @@ const MONEY_SUFFIX = { k: 1e3, m: 1e6, b: 1e9, t: 1e12, q: 1e15 };
 
 /** Parse a formatted money string like "$98.953k" into a number. */
 function parseMoney(s) {
-  const mm = /([\d,]*\.?\d+)\s*([kmbtq]?)/i.exec(String(s));
+  const mm = String(s).match(/([\d,]*\.?\d+)\s*([kmbtq]?)/i);
   if (!mm) return NaN;
   const n = Number(mm[1].replace(/,/g, ""));
   return n * (MONEY_SUFFIX[mm[2].toLowerCase()] ?? 1);
@@ -299,7 +299,7 @@ function parseMoney(s) {
 /** Prepend "P.PP% " before a "($A / $B)" money ratio, unless one is already there. */
 function withRatioPercent(text) {
   const re = /\((\$[\d.,]+\s*[kmbtqKMBTQ]?)\s*\/\s*(\$[\d.,]+\s*[kmbtqKMBTQ]?)\)/;
-  const m = re.exec(text);
+  const m = text.match(re);
   if (!m) return text;
   const before = text.slice(0, m.index);
   if (/\d(?:\.\d+)?%\s*$/.test(before)) return text; // a percent already leads it

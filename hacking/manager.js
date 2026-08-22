@@ -47,6 +47,7 @@
 
 import { allServers, root } from "../lib/net.js";
 import { CONFIG } from "../lib/config.js";
+import { reservedHosts } from "../lib/ns-utils.js";
 import * as F from "../lib/formulas.js";
 import * as B from "../lib/batch-logic.js";
 
@@ -76,16 +77,6 @@ function reservedRamFor(server) {
   const m = globalThis.gordReservedRam;
   const v = m && m[server];
   return typeof v === "number" && v > 0 ? v : 0;
-}
-
-/**
- * Hosts the botnet must leave alone, published by the node daemon on the shared
- * globalThis (e.g. a cloud server dedicated to /lib/gang.js). Undefined for
- * nodes with no reservations, in which case nothing is excluded.
- */
-function reservedHosts() {
-  const r = globalThis.gordReservedHosts;
-  return r instanceof Set ? r : new Set(r ?? []);
 }
 
 let _netAt = 0;

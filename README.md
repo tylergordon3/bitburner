@@ -89,10 +89,19 @@ the helper launch order), and `decidePrelude` / `decideNoTarget` / `decideAugFlo
 are the parts of `decideNextPriority` every node shares (train → rep → money → buy).
 A node's daemon is then just its strategy prefix plus hooks: `maybeSetupGang` (BN2's
 -9 shortcut vs BN5's active karma grind vs everyone else's passive snap-up),
-`plannedNextBN`, extra helpers, the status line. `bn2`/`bn3`/`bn4` are on the core;
-`bn5`/`bn10` still carry the older inline copy and migrate next.
+`plannedNextBN`, extra helpers, the status line. All five daemons are on the core;
+`bn10/daemon.js` is the fullest example of the hooks (required sleeve manager,
+grafting as an extra helper, a stay-city publish after the decision, its own
+no-target branch for the money hoard and grafting).
 `lib/aug-targets.js`'s `factionRepStillUseful` is the one predicate behind every
-"should the work slot go to this faction?" decision. Note this is a *maintainability*
+"should the work slot go to this faction?" decision. Megacorp-faction grinding
+(`factions.pursueCompanyFactions`, BN10) lives in
+[`lib/company-work.js`](lib/company-work.js), which only an opted-in daemon imports
+and hands to the core as `hooks.companyWork` — so the other daemons don't carry its
+`workForCompany`/`applyToCompany`/`getCompanyRep` calls (7GB) for a branch they never
+take. Small shared wrappers (`playerMoney`, `hackingLevel`, `inGangSafe`,
+`spendableMoney`, `reservedHosts`, `freeRam`) are in
+[`lib/ns-utils.js`](lib/ns-utils.js). Note this is a *maintainability*
 win, not a RAM one: Bitburner charges the API calls of every function reached from
 `main` either way. RAM savings come from moving work into off-home helpers, which is
 why `lib/` is full of them.
@@ -142,7 +151,17 @@ earns. What "earns" means depends on the gang:
 
 **Augmentations** are bought everywhere, cheapest-first across the roster, once cash
 clears `sleeves.augMinMoney`. **Buying sleeves and memory** only works in BitNode 10,
-where The Covenant sells them, so those steps are gated on `sleeves.shopBitNode`.
+where The Covenant sells them, so that shop is its own helper,
+[`lib/sleeve-shop.js`](lib/sleeve-shop.js) (~26GB), launched by the daemon core only
+in `sleeves.shopBitNode`: its four `ns.sleeve.*` shop calls are 4GB each and would
+otherwise be charged to the manager on every node (the manager is ~55GB without
+them). The shop publishes `gordSleeveShop`, which the manager folds into
+`gordSleeveState`, so the SLEEVE tab is unchanged.
+
+Helpers that only need the current node number take it as an exec arg from the
+daemon (`lib/backdoor.js`, `lib/sleeves.js`, `lib/sleeve-shop.js`,
+`lib/corp-create.js`): `ns.getResetInfo()` costs 1GB, which the daemon pays once
+anyway and a small helper shouldn't pay again for one integer.
 
 In BN10 buying that shop out *is* the node, so `BITNODE[10].sleeves` turns the
 budgets up (buy a sleeve at ~1.1x its price rather than waiting for 2x, and push

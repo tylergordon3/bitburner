@@ -15,6 +15,7 @@
 // Read-only: it buys nothing and changes nothing.
 
 import { CONFIG } from "../lib/config.js";
+import { safe } from "../lib/corp-lib.js";
 
 const CO = CONFIG.corp;
 
@@ -112,12 +113,4 @@ export async function main(ns) {
     }
   }
   ns.tprint("=".repeat(66));
-}
-
-function safe(fn) {
-  try {
-    return fn();
-  } catch {
-    return undefined;
-  }
 }

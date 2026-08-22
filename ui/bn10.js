@@ -84,8 +84,8 @@ function rosterCard(ns, C, s) {
   // number for a purchase that can never happen.
   if (s.shopOpen) {
     header.splice(1, 0, stat(C, "Next sleeve",
-      s.maxed ? "roster maxed" : `$${ns.format.number(s.nextCost)}`,
-      s.maxed ? C.green : C.yellow));
+      s.maxed ? "roster maxed" : s.shopLive === false ? "shop helper starting" : `$${ns.format.number(s.nextCost)}`,
+      s.maxed ? C.green : s.shopLive === false ? C.dim : C.yellow));
   }
 
   const children = [

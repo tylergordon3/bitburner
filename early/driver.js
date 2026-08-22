@@ -15,6 +15,7 @@
 
 import { allServers, root } from "../lib/net.js";
 import { CONFIG, forNode } from "../lib/config.js";
+import { inGangSafe } from "../lib/ns-utils.js";
 
 const P = CONFIG.paths;
 const D = CONFIG.driver;
@@ -95,15 +96,6 @@ function stopMoneyEngine(ns) {
     for (const p of ns.ps(server)) {
       if ([P.hack, P.grow, P.weaken, P.worker].includes(p.filename)) ns.kill(p.pid);
     }
-  }
-}
-
-/** @param {NS} ns - true if we're in a gang; false (not just missing API) otherwise. */
-function inGangSafe(ns) {
-  try {
-    return ns.gang.inGang();
-  } catch {
-    return false;
   }
 }
 

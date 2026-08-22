@@ -84,21 +84,43 @@ let lastStatsAt = 0;
 let forceRender = false;
 
 // ── Trend state ─────────────────────────────────────────────────────────────
-let lastHackLevel = 0;
-let lastHackTime  = Date.now();
-let hackLevelsPerHour = 0;
 
-let lastFactionRep  = 0;
-let lastFactionTime = Date.now();
-let factionRepPerHour = 0;
+/**
+ * An hourly-rate tracker: feed it a sampled value, get back an EMA of the
+ * per-hour gain (only positive gains count - a reset, a spend, or a sample
+ * going backwards just holds the last rate). One closure replaces the four
+ * copies of last-value / last-time / per-hour module state this file used to
+ * carry for hack level, faction rep, money and RAM.
+ * @param {number} [alpha] weight of the newest sample
+ */
+function makeTrend(alpha = 0.2) {
+  let last = 0;
+  let lastAt = Date.now();
+  let perHour = 0;
+  return {
+    /** @param {number} value @returns {number} the smoothed per-hour rate */
+    update(value) {
+      const now = Date.now();
+      if (last > 0 && now > lastAt) {
+        const gain = value - last;
+        const hours = (now - lastAt) / 3_600_000;
+        if (gain > 0 && hours > 0) {
+          const instant = gain / hours;
+          perHour = perHour === 0 ? instant : perHour * (1 - alpha) + instant * alpha;
+        }
+      }
+      last = value;
+      lastAt = now;
+      return perHour;
+    },
+    get rate() { return perHour; },
+  };
+}
 
-let lastMoney     = 0;
-let lastMoneyTime = Date.now();
-let moneyPerHour  = 0;
-
-let lastRamTotal = 0;
-let lastRamTime  = Date.now();
-let ramPerHour   = 0;
+const hackTrend = makeTrend();
+const repTrend = makeTrend();
+const moneyTrend = makeTrend();
+const ramTrend = makeTrend();
 
 // ── Entry point ──────────────────────────────────────────────────────────────
 /** @param {NS} ns */
@@ -837,7 +859,9 @@ function gatherStats(ns) {
     network:     getNetworkStatus(ns),
     stocks:      globalThis.gordStockState ?? null,
     combat:      getCombatStats(ns),
-    augsOwned:   ns.singularity.getOwnedAugmentations(true).length,
+    // From the daemon's aug snapshot (lib/daemon-lib.js maybeInstall) rather than
+    // getOwnedAugmentations here - 5GB the HUD doesn't need to carry.
+    augsOwned:   globalThis.gordAugSnapshot?.owned?.length ?? 0,
 
     // Persistent-across-BitNodes progression
     node:          reset.currentNode,
@@ -861,10 +885,13 @@ const ROOTING_PROGRAMS = CONFIG.programs.portOpeners.map(name => ({
 
 /** @param {NS} ns */
 function getNetworkStatus(ns) {
+  // Backdoor status comes from lib/backdoor.js's published state, not from
+  // ns.getServer (2GB): the helper is what installs them, so it's the authority.
+  const backdoored = new Set(globalThis.gordBackdoorState?.done ?? []);
   const backdoors = BACKDOOR_CHECKLIST.map(({ server, label }) => {
     const exists = ns.serverExists(server);
     const rooted = exists && ns.hasRootAccess(server);
-    const done   = exists && ns.getServer(server).backdoorInstalled;
+    const done   = exists && backdoored.has(server);
     return { server, label, exists, rooted, done };
   });
 
@@ -953,20 +980,7 @@ function getHackTargetEstimate(ns, host) {
   const required = ns.getServerRequiredHackingLevel(host);
   const current  = ns.getPlayer().skills.hacking;
   const missing  = Math.max(0, required - current);
-  const now      = Date.now();
-
-  if (lastHackLevel > 0 && now > lastHackTime) {
-    const gain  = current - lastHackLevel;
-    const hours = (now - lastHackTime) / 3_600_000;
-    if (gain > 0 && hours > 0) {
-      const instant = gain / hours;
-      hackLevelsPerHour = hackLevelsPerHour === 0
-        ? instant
-        : hackLevelsPerHour * 0.8 + instant * 0.2;
-    }
-  }
-  lastHackLevel = current;
-  lastHackTime  = now;
+  const hackLevelsPerHour = hackTrend.update(current);
 
   const eta = missing <= 0           ? "ready now"
             : hackLevelsPerHour > 0  ? formatDuration((missing / hackLevelsPerHour) * 3_600_000)
@@ -979,21 +993,10 @@ function getHackTargetEstimate(ns, host) {
 function getGoalEstimate(ns, target) {
   if (!target?.faction) return { rate: 0, eta: "-" };
 
-  const currentRep = ns.singularity.getFactionRep(/** @type {any} */ (target.faction));
-  const now        = Date.now();
-
-  if (lastFactionRep > 0 && now > lastFactionTime) {
-    const gained = currentRep - lastFactionRep;
-    const hours  = (now - lastFactionTime) / 3_600_000;
-    if (gained > 0 && hours > 0) {
-      const instant = gained / hours;
-      factionRepPerHour = factionRepPerHour === 0
-        ? instant
-        : factionRepPerHour * 0.8 + instant * 0.2;
-    }
-  }
-  lastFactionRep  = currentRep;
-  lastFactionTime = now;
+  // The daemon refreshes target.rep every tick (getAllAugCandidates), which is
+  // plenty for an hourly-rate EMA - no getFactionRep (1GB) needed here.
+  const currentRep = Number(target.rep ?? 0);
+  const factionRepPerHour = repTrend.update(currentRep);
 
   const eta = (target.repMissing ?? 0) <= 0  ? "complete"
             : factionRepPerHour > 0           ? formatDuration((target.repMissing / factionRepPerHour) * 3_600_000)
@@ -1004,44 +1007,20 @@ function getGoalEstimate(ns, target) {
 
 /** @param {NS} ns */
 function updateMoneyTrend(ns) {
-  const money = ns.getPlayer().money;
-  const now   = Date.now();
-  if (lastMoney > 0 && now > lastMoneyTime) {
-    const gained = money - lastMoney;
-    const hours  = (now - lastMoneyTime) / 3_600_000;
-    if (gained > 0 && hours > 0) {
-      const instant = gained / hours;
-      moneyPerHour = moneyPerHour === 0 ? instant : moneyPerHour * 0.8 + instant * 0.2;
-    }
-  }
-  lastMoney     = money;
-  lastMoneyTime = now;
-  return moneyPerHour;
+  return moneyTrend.update(ns.getPlayer().money);
 }
 
 /** @param {NS} ns */
 function updateRamTrend(ns, totalRam) {
-  const now = Date.now();
-  if (lastRamTotal > 0 && now > lastRamTime) {
-    const gained = totalRam - lastRamTotal;
-    const hours  = (now - lastRamTime) / 3_600_000;
-    if (gained > 0 && hours > 0) {
-      const instant = gained / hours;
-      ramPerHour = ramPerHour === 0 ? instant : ramPerHour * 0.8 + instant * 0.2;
-    }
-  }
-  lastRamTotal = totalRam;
-  lastRamTime  = now;
-  return ramPerHour;
+  return ramTrend.update(totalRam);
 }
 
 /** @param {NS} ns */
 function getAugQueueInfo(ns) {
-  const withPurchased = ns.singularity.getOwnedAugmentations(true);
-  const installed     = ns.singularity.getOwnedAugmentations(false);
-  const queued        = withPurchased.length - installed.length;
-
-  const hasRedPill = withPurchased.includes(CONFIG.augs.redPill) && !installed.includes(CONFIG.augs.redPill);
+  // Published by the daemon each tick (lib/daemon-lib.js maybeInstall).
+  const snap = globalThis.gordAugSnapshot;
+  const queued     = snap?.queued ?? 0;
+  const hasRedPill = snap?.redPillQueued === true;
 
   const urgency        = hasRedPill ? "high" : queued >= 5 ? "medium" : "low";
   const recommendation = hasRedPill         ? "[!!] Install now - Red Pill queued!"

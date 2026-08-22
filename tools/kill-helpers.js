@@ -29,7 +29,7 @@ const P = CONFIG.paths;
 export async function main(ns) {
   const all = String(ns.args[0] ?? "") === "all";
   const scripts = all
-    ? [P.backdoor, P.finishBn, P.manager, P.sleeves, P.gang, P.grafting, P.corpSteady, P.corpUpkeep]
+    ? [P.backdoor, P.finishBn, P.manager, P.sleeves, P.sleeveShop, P.gang, P.grafting, P.corpSteady, P.corpUpkeep]
     : [P.backdoor, P.finishBn];
 
   let killed = 0;
