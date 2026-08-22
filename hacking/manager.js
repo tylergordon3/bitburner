@@ -503,156 +503,187 @@ function killOldHackScripts(ns) {
 
 // ── Main loop ────────────────────────────────────────────────────────────────
 
-/** @param {NS} ns */
-export async function main(ns) {
-  ns.disableLog("ALL");
+/** Per-process scheduler state; `step` mutates it. One per manager. */
+export function newSchedulerState() {
+  return {
+    inFlight: /** @type {any[]} */ ([]),  // batches whose legs haven't all landed (any target)
+    prepUntil: new Map(),                  // target -> time its prep legs will have landed
+    nextLaunchAt: 0,
+    currentTarget: "",
+    batchId: 0,
+    lastMode: "",
+    lastLogAt: 0,
+  };
+}
 
-  // Read from HOME explicitly: this script usually runs off-home, on a host
-  // that may not hold the worker files yet (they're copied in buildSnapshot).
+/** Forget the throttled caches (network walk, rooting, ranking, copies). For tests. */
+export function resetCachesForTests() {
+  _netAt = 0;
+  _netServers = [];
+  _rootAt = 0;
+  _copied.clear();
+  _rank = { at: 0, list: [] };
+  _lastShareHosts = "";
+}
+
+/**
+ * Per-thread RAM of the worker scripts, read from HOME explicitly: this script
+ * usually runs off-home, on a host that may not hold the worker files yet
+ * (they're copied in buildSnapshot).
+ * @param {NS} ns
+ */
+function readWorkerRam(ns) {
   RAM.hack = ns.getScriptRam(HACK, HOME) || RAM.hack;
   RAM.grow = ns.getScriptRam(GROW, HOME) || RAM.grow;
   RAM.weaken = ns.getScriptRam(WEAKEN, HOME) || RAM.weaken;
   _shareThreadRam = ns.getScriptRam(SHARE, HOME) || _shareThreadRam;
+}
 
-  if (ns.args.includes("--reset")) killOldHackScripts(ns);
+/**
+ * One tick of the manager. Exported so the whole loop can be driven against a
+ * fake `ns` under Node (tests/batcher-sim.test.mjs) - the one place the
+ * scheduling logic is exercised end to end without the game.
+ * @param {NS} ns @param {ReturnType<typeof newSchedulerState>} s @param {number} now
+ * @returns {string} the mode this tick ended in
+ */
+export function step(ns, s, now) {
+  const snap = buildSnapshot(ns, now);
 
-  /** Batches whose legs haven't all landed yet (any target). */
-  let inFlight = /** @type {any[]} */ ([]);
-  /** target -> time its prep legs will have landed. */
-  const prepUntil = new Map();
-  let nextLaunchAt = 0;
-  let currentTarget = "";
-  let batchId = 0;
-  let lastMode = "";
-  let lastLogAt = 0;
+  // Share is an optional side mode and must NEVER be able to stop the core
+  // hacking loop (e.g. a stale config on a runner). On error, log and keep going.
+  try {
+    refreshWorkers(ns, snap, manageShare(ns, snap));
+  } catch (e) {
+    ns.print(`[share] disabled this tick (error): ${String(e)}`);
+  }
 
-  while (true) {
-    const now = Date.now();
-    const snap = buildSnapshot(ns, now);
+  s.inFlight = B.pruneInFlight(s.inFlight, now);
 
-    // Share is an optional side mode and must NEVER be able to stop the core
-    // hacking loop (e.g. a stale config on a runner). On error, log and keep going.
-    try {
-      refreshWorkers(ns, snap, manageShare(ns, snap));
-    } catch (e) {
-      ns.print(`[share] disabled this tick (error): ${String(e)}`);
+  const ranked = rankTargets(ns, snap, now);
+  const target = ranked[0]?.target ?? H.defaultTarget;
+  if (target !== s.currentTarget) {
+    if (s.currentTarget) ns.print(`[target] ${s.currentTarget} -> ${target}`);
+    s.currentTarget = target;
+    s.nextLaunchAt = 0; // in-flight batches on the old target drain harmlessly
+  }
+
+  const math = targetMath(ns, target);
+  const state = readTarget(ns, target);
+  const open = s.inFlight.filter(b => b.target === target);
+  const openRam = open.reduce((sum, b) => sum + b.ram, 0);
+  const schedule = B.legSchedule({ ...math.times, spacing: H.batchSpacingMs, margin: H.launchMarginMs });
+  // RAM the botnet can devote to this target: free now plus what our own
+  // in-flight batches are holding.
+  const cycle = B.planCycle({
+    fractions: H.moneyFractions,
+    totalRam: snap.totalUsable + openRam,
+    lastLanding: schedule.lastLanding,
+    launchInterval: schedule.launchInterval,
+    maxDepth: H.maxDepth,
+    planFor: math.plan,
+  });
+
+  let mode;
+  if ((s.prepUntil.get(target) ?? 0) > now) {
+    mode = "Prepping";
+  } else if (open.length === 0 && !prepped(state)) {
+    const res = launchPrep(ns, snap, target, state, math, Infinity, now);
+    s.prepUntil.set(target, res.until);
+    mode = res.launched ? "Prepping" : "Waiting for RAM (prep)";
+    if (res.launched) {
+      ns.print(`[prep] ${target}: weaken x${res.weaken}, grow x${res.grow}${res.complete ? "" : " (partial)"} | ` +
+        `sec ${state.security.toFixed(2)}/${state.minSecurity} money ${((state.money / state.maxMoney) * 100).toFixed(0)}%`);
     }
-
-    inFlight = B.pruneInFlight(inFlight, now);
-
-    const ranked = rankTargets(ns, snap, now);
-    const target = ranked[0]?.target ?? H.defaultTarget;
-    if (target !== currentTarget) {
-      if (currentTarget) ns.print(`[target] ${currentTarget} -> ${target}`);
-      currentTarget = target;
-      nextLaunchAt = 0; // in-flight batches on the old target drain harmlessly
-    }
-
-    const math = targetMath(ns, target);
-    const state = readTarget(ns, target);
-    const open = inFlight.filter(b => b.target === target);
-    const openRam = open.reduce((s, b) => s + b.ram, 0);
-    const schedule = B.legSchedule({ ...math.times, spacing: H.batchSpacingMs, margin: H.launchMarginMs });
-    // RAM the botnet can devote to this target: free now plus what our own
-    // in-flight batches are holding.
-    const cycle = B.planCycle({
-      fractions: H.moneyFractions,
-      totalRam: snap.totalUsable + openRam,
-      lastLanding: schedule.lastLanding,
-      launchInterval: schedule.launchInterval,
-      maxDepth: H.maxDepth,
-      planFor: math.plan,
-    });
-
-    let mode;
-    if ((prepUntil.get(target) ?? 0) > now) {
-      mode = "Prepping";
-    } else if (open.length === 0 && !prepped(state)) {
-      const res = launchPrep(ns, snap, target, state, math, Infinity, now);
-      prepUntil.set(target, res.until);
-      mode = res.launched ? "Prepping" : "Waiting for RAM (prep)";
-      if (res.launched) {
-        ns.print(`[prep] ${target}: weaken x${res.weaken}, grow x${res.grow}${res.complete ? "" : " (partial)"} | ` +
-          `sec ${state.security.toFixed(2)}/${state.minSecurity} money ${((state.money / state.maxMoney) * 100).toFixed(0)}%`);
-      }
-    } else if (open.length > 0 && B.driftDetected({
-      ...state,
-      openMoneyFraction: Math.max(...open.map(b => b.moneyFraction)),
-      openSecurity: Math.max(...open.map(b => b.securityAdded)),
-      moneyTolerance: H.driftMoneyTolerance,
-      securityTolerance: H.driftSecurityTolerance,
-    })) {
-      // Stop launching; the window drains within a weaken-time and the branch
-      // above re-preps once nothing is in flight.
-      mode = "Draining (drift)";
-    } else if (!cycle) {
-      mode = "Waiting for RAM";
-    } else if (now >= nextLaunchAt && open.length < cycle.depth) {
-      const batch = launchBatch(ns, snap, target, cycle, schedule, batchId, now);
-      if (batch) {
-        batchId++;
-        inFlight.push(batch);
-        nextLaunchAt = now + cycle.launchInterval;
-        mode = "Batching";
-      } else {
-        // Free RAM is there in total but not in the right places (or an exec
-        // failed); try again next tick rather than waiting out a whole interval.
-        mode = "Waiting for RAM (fragmented)";
-      }
+  } else if (open.length > 0 && B.driftDetected({
+    ...state,
+    openMoneyFraction: Math.max(...open.map(b => b.moneyFraction)),
+    openSecurity: Math.max(...open.map(b => b.securityAdded)),
+    moneyTolerance: H.driftMoneyTolerance,
+    securityTolerance: H.driftSecurityTolerance,
+  })) {
+    // Stop launching; the window drains within a weaken-time and the branch
+    // above re-preps once nothing is in flight.
+    mode = "Draining (drift)";
+  } else if (!cycle) {
+    mode = "Waiting for RAM";
+  } else if (now >= s.nextLaunchAt && open.length < cycle.depth) {
+    const batch = launchBatch(ns, snap, target, cycle, schedule, s.batchId, now);
+    if (batch) {
+      s.batchId++;
+      s.inFlight.push(batch);
+      s.nextLaunchAt = now + cycle.launchInterval;
+      mode = "Batching";
     } else {
-      mode = open.length > 0 ? "Batching" : "Idle";
+      // Free RAM is there in total but not in the right places (or an exec
+      // failed); try again next tick rather than waiting out a whole interval.
+      mode = "Waiting for RAM (fragmented)";
     }
+  } else {
+    mode = open.length > 0 ? "Batching" : "Idle";
+  }
 
-    // Runner-up prep with RAM the primary's cycle doesn't need, so a target
-    // switch starts batching immediately instead of with a cold prep.
-    let runnerUp = null;
-    if (H.prepRunnerUp && cycle) {
-      runnerUp = ranked.find(r => r.target !== target)?.target ?? null;
-      if (runnerUp && (prepUntil.get(runnerUp) ?? 0) <= now) {
-        const primaryStillNeeds = Math.max(0, cycle.depth * cycle.plan.ram - openRam);
-        const spare = snap.totalUsable - primaryStillNeeds;
-        if (spare >= H.runnerUpMinRam) {
-          const st2 = readTarget(ns, runnerUp);
-          if (!prepped(st2)) {
-            const res = launchPrep(ns, snap, runnerUp, st2, targetMath(ns, runnerUp), spare, now);
-            prepUntil.set(runnerUp, res.until);
-          }
+  // Runner-up prep with RAM the primary's cycle doesn't need, so a target
+  // switch starts batching immediately instead of with a cold prep.
+  let runnerUp = null;
+  if (H.prepRunnerUp && cycle) {
+    runnerUp = ranked.find(r => r.target !== target)?.target ?? null;
+    if (runnerUp && (s.prepUntil.get(runnerUp) ?? 0) <= now) {
+      const primaryStillNeeds = Math.max(0, cycle.depth * cycle.plan.ram - openRam);
+      const spare = snap.totalUsable - primaryStillNeeds;
+      if (spare >= H.runnerUpMinRam) {
+        const st2 = readTarget(ns, runnerUp);
+        if (!prepped(st2)) {
+          const res = launchPrep(ns, snap, runnerUp, st2, targetMath(ns, runnerUp), spare, now);
+          s.prepUntil.set(runnerUp, res.until);
         }
       }
     }
+  }
 
-    if (mode !== lastMode || now - lastLogAt >= 30_000) {
-      lastMode = mode;
-      lastLogAt = now;
-      ns.print(
-        `[${mode}] ${target} | in flight ${open.length}/${cycle?.depth ?? 0} | ` +
-        `bite ${cycle ? (cycle.plan.hackedFraction * 100).toFixed(2) : "-"}% = ${cycle ? ns.format.ram(cycle.plan.ram) : "-"} ` +
-        `every ${cycle ? (cycle.launchInterval / 1000).toFixed(1) : "-"}s | ` +
-        `free ${ns.format.ram(snap.totalUsable)} | money ${((state.money / Math.max(1, state.maxMoney)) * 100).toFixed(0)}% sec +${(state.security - state.minSecurity).toFixed(2)}`
-      );
-    }
+  if (mode !== s.lastMode || now - s.lastLogAt >= 30_000) {
+    s.lastMode = mode;
+    s.lastLogAt = now;
+    ns.print(
+      `[${mode}] ${target} | in flight ${open.length}/${cycle?.depth ?? 0} | ` +
+      `bite ${cycle ? (cycle.plan.hackedFraction * 100).toFixed(2) : "-"}% = ${cycle ? ns.format.ram(cycle.plan.ram) : "-"} ` +
+      `every ${cycle ? (cycle.launchInterval / 1000).toFixed(1) : "-"}s | ` +
+      `free ${ns.format.ram(snap.totalUsable)} | money ${((state.money / Math.max(1, state.maxMoney)) * 100).toFixed(0)}% sec +${(state.security - state.minSecurity).toFixed(2)}`
+    );
+  }
 
-    globalThis.gordHackState = {
-      mode,
-      target,
-      score: ranked[0]?.score ?? 0,
-      formulas: math.useFormulas,
-      batchId,
-      inFlight: open.length,
-      depth: cycle?.depth ?? 0,
-      fraction: cycle?.plan.hackedFraction ?? 0,
-      batchRam: cycle?.plan.ram ?? 0,
-      launchIntervalMs: cycle?.launchInterval ?? 0,
-      weakenTimeMs: math.times.weakenTime,
-      moneyPercent: state.maxMoney > 0 ? state.money / state.maxMoney : 0,
-      security: state.security,
-      minSecurity: state.minSecurity,
-      prepUntil: prepUntil.get(target) ?? 0,
-      runnerUp,
-      freeRam: snap.totalUsable,
-      updatedAt: now,
-    };
+  globalThis.gordHackState = {
+    mode,
+    target,
+    score: ranked[0]?.score ?? 0,
+    formulas: math.useFormulas,
+    batchId: s.batchId,
+    inFlight: open.length,
+    depth: cycle?.depth ?? 0,
+    fraction: cycle?.plan.hackedFraction ?? 0,
+    batchRam: cycle?.plan.ram ?? 0,
+    launchIntervalMs: cycle?.launchInterval ?? 0,
+    weakenTimeMs: math.times.weakenTime,
+    moneyPercent: state.maxMoney > 0 ? state.money / state.maxMoney : 0,
+    security: state.security,
+    minSecurity: state.minSecurity,
+    prepUntil: s.prepUntil.get(target) ?? 0,
+    runnerUp,
+    freeRam: snap.totalUsable,
+    updatedAt: now,
+  };
 
+  return mode;
+}
+
+/** @param {NS} ns */
+export async function main(ns) {
+  ns.disableLog("ALL");
+  readWorkerRam(ns);
+  if (ns.args.includes("--reset")) killOldHackScripts(ns);
+
+  const s = newSchedulerState();
+  while (true) {
+    step(ns, s, Date.now());
     await ns.sleep(H.batchSpacingMs);
   }
 }

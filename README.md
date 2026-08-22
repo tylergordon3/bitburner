@@ -64,6 +64,13 @@ a "launch the largest batch that fits, every tick" loop:
   a weaken-time, and the target is re-prepped.
 - One network snapshot per tick; rooting, script copies and target re-ranking are
   throttled (`networkRescanMs`, `rootRetryMs`, `targetRescoreMs`).
+- The loop body is exported as `step(ns, state, now)`, so
+  [`tests/batcher-sim.test.mjs`](tests/batcher-sim.test.mjs) drives the whole
+  scheduler under Node against a fake `ns` (a model network whose money, security
+  and leg durations respond to landings) and asserts the promises above: every
+  hack lands on a prepped server, launches are continuous and never exceed the
+  depth, the drift detector is quiet in a clean run and fires/recovers on an
+  outside hit, and prep converges monotonically (one or two passes with ample RAM).
 
 After syncing a change to the manager, run `run /tools/kill-helpers.js all` before
 restarting: the manager runs off-home, so `killall` on home leaves the old copy
