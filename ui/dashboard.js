@@ -506,6 +506,9 @@ function buildOperationalCards(ns, C, data) {
       ]),
     ),
 
+    // ── Botnet: what the batcher is doing right now ─────────────────────────
+    botnetCard(ns, C),
+
     // ── Infra + Aug Queue in one card ───────────────────────────────────────
     card(C, "INFRA / AUGS", [
       el("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 20px" } },
@@ -731,6 +734,48 @@ function buildOperationalCards(ns, C, data) {
       ]);
     })(),
   ];
+}
+
+/**
+ * The HGW batcher's live state (hacking/manager.js publishes gordHackState every
+ * tick): mode, target, batches in flight against the planned depth, the bite per
+ * batch and its launch cadence, and the target's money/security so a stuck prep
+ * or a drift drain is visible at a glance. Reads globalThis only.
+ * @param {NS} ns
+ */
+function botnetCard(ns, C) {
+  const h = globalThis.gordHackState;
+  if (!h || Date.now() - (h.updatedAt ?? 0) > 30_000) {
+    return card(C, "BOTNET", [
+      el("div", { style: { color: C.dim, fontSize: "13px" } }, "manager.js not running"),
+    ]);
+  }
+
+  const mode = String(h.mode ?? "");
+  const modeColor = mode === "Batching" ? C.green
+                  : mode.startsWith("Prepping") ? C.yellow
+                  : mode.startsWith("Draining") ? C.red
+                  : C.dim;
+  const secOver = (h.security ?? 0) - (h.minSecurity ?? 0);
+  const moneyPct = h.moneyPercent ?? 0;
+
+  return card(C, "BOTNET", [
+    el("div", { style: { display: "flex", justifyContent: "space-between", marginBottom: "6px" } },
+      stat(C, "Mode", mode, modeColor),
+      stat(C, "Target", h.target ?? "-", C.blue),
+      stat(C, "In flight", `${h.inFlight ?? 0}/${h.depth ?? 0}`),
+      stat(C, "Bite", `${((h.fraction ?? 0) * 100).toFixed(2)}%`),
+    ),
+    el("div", { style: { display: "flex", justifyContent: "space-between" } },
+      stat(C, "Batch", `${ns.format.ram(h.batchRam ?? 0)} every ${((h.launchIntervalMs ?? 0) / 1000).toFixed(1)}s`),
+      stat(C, "Weaken", ns.format.time(h.weakenTimeMs ?? 0)),
+      stat(C, "Money", `${(moneyPct * 100).toFixed(0)}%`, moneyPct >= 0.95 ? C.green : C.yellow),
+      stat(C, "Sec", `+${secOver.toFixed(2)}`, secOver <= 1 ? C.green : C.yellow),
+    ),
+    el("div", { style: { color: C.dim, fontSize: "11px", marginTop: "4px" } },
+      `${h.runnerUp ? `runner-up ${h.runnerUp} | ` : ""}free ${ns.format.ram(h.freeRam ?? 0)} | ${h.formulas ? "Formulas" : "ns.* fallback"} | batches launched ${h.batchId ?? 0}`
+    ),
+  ]);
 }
 
 /**
