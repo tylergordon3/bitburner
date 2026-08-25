@@ -8,12 +8,17 @@
 // Formulas.exe path in lib/formulas.js (the one that actually runs in-game) is
 // exercised as well as the ns.* fallback.
 //
+// Faithful in one more way that matters: like the game, every ns call except
+// serverExists THROWS on a hostname that doesn't exist - an aug install deletes
+// the purchased fleet out from under a running manager, and that is exactly the
+// crash the "worker wiped mid-run" scenario reproduces (deleteServer).
+//
 // Shared by tests/batcher-sim.test.mjs (fallback path) and
 // tests/batcher-sim-formulas.test.mjs (Formulas path); each is its own process
 // under `node --test`, which matters because lib/formulas.js caches "Formulas.exe
 // is present" permanently once it sees it.
 
-import { step, newSchedulerState, resetCachesForTests } from "../../hacking/manager.js";
+import { step, newSchedulerState, resetCaches } from "../../hacking/manager.js";
 import { CONFIG } from "../../lib/config.js";
 
 export const H = CONFIG.hacking;
@@ -42,7 +47,17 @@ export function makeWorld(opts = {}) {
     execFailures: 0,
     log: /** @type {string[]} */ ([]),
   };
-  const neighbours = { home: ["w1", "w2", "t1", "t2"], w1: ["home"], w2: ["home"], t1: ["home"], t2: ["home"] };
+
+  // Like the game: a deleted server disappears from scan, and every call except
+  // serverExists throws on it.
+  const neighbours = host => host === "home"
+    ? Object.keys(world.servers).filter(s => s !== "home")
+    : (world.servers[host] ? ["home"] : []);
+  const srvOrThrow = h => {
+    const s = world.servers[h];
+    if (!s) throw new Error(`Invalid host: '${h}'`);
+    return s;
+  };
   const target = name => world.servers[name];
 
   // Models (shape-faithful, not the game's constants). All take a {sec, minSec,
@@ -102,6 +117,16 @@ export function makeWorld(opts = {}) {
     world.clock = end;
   }
 
+  /**
+   * Remove a server the way an aug install removes the purchased fleet: it
+   * vanishes from scan, its processes die (their legs never land), and every
+   * ns call on its name now throws.
+   */
+  function deleteServer(name) {
+    delete world.servers[name];
+    world.jobs = world.jobs.filter(j => j.host !== name);
+  }
+
   // The view lib/formulas.js's mock server presents, mapped onto the model.
   const view = fs => ({ sec: fs.hackDifficulty, minSec: fs.minDifficulty, money: fs.moneyAvailable, maxMoney: fs.moneyMax });
 
@@ -110,28 +135,29 @@ export function makeWorld(opts = {}) {
     disableLog() {},
     print(line) { world.log.push(line); },
     format: { ram: n => `${n.toFixed(2)}GB` },
-    scan: host => neighbours[host] ?? [],
-    hasRootAccess: () => true,
+    scan: host => neighbours(host),
+    serverExists: h => !!world.servers[h],
+    hasRootAccess: h => { srvOrThrow(h); return true; },
     fileExists: (file) => opts.formulas === true && file === "Formulas.exe",
     getHackingLevel: () => 100,
-    getServerMaxRam: h => world.servers[h]?.maxRam ?? 0,
-    getServerUsedRam: h => world.servers[h]?.used ?? 0,
-    getServerMaxMoney: h => target(h)?.maxMoney ?? 0,
-    getServerMoneyAvailable: h => target(h)?.money ?? 0,
-    getServerSecurityLevel: h => target(h)?.sec ?? 0,
-    getServerMinSecurityLevel: h => target(h)?.minSec ?? 0,
-    getServerRequiredHackingLevel: h => target(h)?.reqHack ?? 9999,
-    getServerGrowth: h => target(h)?.growth ?? 1,
-    getServerNumPortsRequired: () => 0,
+    getServerMaxRam: h => srvOrThrow(h).maxRam ?? 0,
+    getServerUsedRam: h => srvOrThrow(h).used ?? 0,
+    getServerMaxMoney: h => srvOrThrow(h).maxMoney ?? 0,
+    getServerMoneyAvailable: h => srvOrThrow(h).money ?? 0,
+    getServerSecurityLevel: h => srvOrThrow(h).sec ?? 0,
+    getServerMinSecurityLevel: h => srvOrThrow(h).minSec ?? 0,
+    getServerRequiredHackingLevel: h => srvOrThrow(h).reqHack ?? 9999,
+    getServerGrowth: h => srvOrThrow(h).growth ?? 1,
+    getServerNumPortsRequired: h => { srvOrThrow(h); return 0; },
     nuke() {}, brutessh() {}, ftpcrack() {}, relaysmtp() {}, httpworm() {}, sqlinject() {},
     getScriptRam: script => RAM[script] ?? 0,
-    scp: () => true,
-    hackAnalyze: h => hackPct(target(h)),
-    growthAnalyze: (h, mult) => Math.log(mult) / Math.log(1 + growPerThread(target(h))),
-    getHackTime: h => hackTime(target(h)),
-    getGrowTime: h => growTime(target(h)),
-    getWeakenTime: h => weakenTime(target(h)),
-    ps: host => world.jobs.filter(j => j.host === host).map(j => ({ filename: j.script, threads: j.threads, pid: j.pid })),
+    scp: (files, h) => { srvOrThrow(h); return true; },
+    hackAnalyze: h => hackPct(srvOrThrow(h)),
+    growthAnalyze: (h, mult) => Math.log(mult) / Math.log(1 + growPerThread(srvOrThrow(h))),
+    getHackTime: h => hackTime(srvOrThrow(h)),
+    getGrowTime: h => growTime(srvOrThrow(h)),
+    getWeakenTime: h => weakenTime(srvOrThrow(h)),
+    ps: host => { srvOrThrow(host); return world.jobs.filter(j => j.host === host).map(j => ({ filename: j.script, threads: j.threads, pid: j.pid })); },
     kill(pid) {
       const i = world.jobs.findIndex(j => j.pid === pid);
       if (i < 0) return false;
@@ -140,9 +166,9 @@ export function makeWorld(opts = {}) {
       return true;
     },
     exec(script, host, threads, tgt, delay) {
+      const srv = srvOrThrow(host);
       const ram = (RAM[script] ?? 0) * threads;
-      const srv = world.servers[host];
-      if (!srv || srv.used + ram > srv.maxRam + 1e-9) { world.execFailures++; return 0; }
+      if (srv.used + ram > srv.maxRam + 1e-9) { world.execFailures++; return 0; }
       srv.used += ram;
       world.jobs.push({ pid: world.pid, script, host, threads, target: tgt, ram, startAt: world.clock + delay, landAt: undefined });
       return world.pid++;
@@ -161,16 +187,20 @@ export function makeWorld(opts = {}) {
     },
   };
 
-  return { world, ns, advance };
+  return { world, ns, advance, deleteServer };
+}
+
+function freshState() {
+  resetCaches();
+  delete globalThis.gordReservedHosts;
+  delete globalThis.gordReservedRam;
+  delete globalThis.gordState;
+  return newSchedulerState();
 }
 
 /** Drive step() for `ms` of fake time. Returns the scheduler state and per-tick modes. */
 export function run(world, ns, advance, ms) {
-  resetCachesForTests();
-  delete globalThis.gordReservedHosts;
-  delete globalThis.gordReservedRam;
-  delete globalThis.gordState;
-  const s = newSchedulerState();
+  const s = freshState();
   const modes = [];
   let inFlightMax = 0;
   const ticks = Math.floor(ms / H.batchSpacingMs);
@@ -193,9 +223,8 @@ export function prepPasses(world, target) {
 }
 
 /**
- * The four scheduler scenarios, registered with the caller's `test`/`assert`
- * so one file can run them on the ns.* fallback path and another on the
- * Formulas path.
+ * The scheduler scenarios, registered with the caller's `test`/`assert` so one
+ * file can run them on the ns.* fallback path and another on the Formulas path.
  * @param {Function} test @param {any} assert @param {{formulas?: boolean}} base
  */
 export function defineScenarios(test, assert, base = {}) {
@@ -276,9 +305,7 @@ export function defineScenarios(test, assert, base = {}) {
 
   test("an outside hit on the target is detected as drift, drained and re-prepped" + label, () => {
     const { world, ns, advance } = makeWorld({ ...base });
-    resetCachesForTests();
-    delete globalThis.gordReservedHosts; delete globalThis.gordReservedRam; delete globalThis.gordState;
-    const s = newSchedulerState();
+    const s = freshState();
     const modes = [];
     const tick = () => { modes.push(step(ns, s, world.clock)); advance(H.batchSpacingMs); };
 
@@ -290,5 +317,32 @@ export function defineScenarios(test, assert, base = {}) {
     assert.ok(modes.some(m => m.startsWith("Draining")), "drift not detected");
     assert.ok(modes.slice(600).some(m => m === "Prepping"), "never re-prepped after draining");
     assert.equal(modes.at(-1), "Batching", `did not recover to batching (last mode: ${modes.at(-1)})`);
+  });
+
+  test("a worker deleted mid-run (aug install wipes the purchased fleet) is dropped without crashing" + label, () => {
+    // The bug this pins down: the manager caches its network walk for
+    // networkRescanMs, an install deleted 'cloud-2', and the next tick's
+    // hasRootAccess on the cached name threw "Invalid host" - an error modal
+    // in-game. The fake throws exactly the same way; buildSnapshot must drop
+    // the casualty via serverExists and carry on.
+    const { world, ns, advance, deleteServer } = makeWorld({ ...base });
+    const s = freshState();
+    const modes = [];
+    const tick = () => { modes.push(step(ns, s, world.clock)); advance(H.batchSpacingMs); };
+
+    for (let i = 0; i < 600; i++) tick();                       // 2 min: steady batching
+    assert.equal(modes.at(-1), "Batching");
+    deleteServer("w2");                                         // a third of the fleet vanishes
+    for (let i = 0; i < 1500; i++) tick();                      // 5 min: step() must never throw
+
+    assert.equal(modes.at(-1), "Batching", `did not keep batching after the wipe (last: ${modes.at(-1)})`);
+    // Orphaned legs (a hack whose grow died with the host) may dent the target
+    // once; the drift/prep machinery must leave the tail end clean again.
+    const recent = world.hackLandings.filter(h => h.t > world.clock - 60_000);
+    assert.ok(recent.length > 10, "no hacks landing after the wipe");
+    for (const h of recent) {
+      assert.ok(h.moneyFrac >= 0.995 && h.secOver <= 0.01,
+        `post-wipe hack unprepped (${(h.moneyFrac * 100).toFixed(1)}%, +${h.secOver.toFixed(2)})`);
+    }
   });
 }

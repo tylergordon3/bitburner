@@ -103,6 +103,17 @@ function buildSnapshot(ns, now) {
     _netServers = allServers(ns);
     _netAt = now;
   }
+  // Purchased servers can be DELETED out from under the cached list - an aug
+  // install wipes the whole fleet - and every other ns call on a gone hostname
+  // THROWS ("Invalid host"). serverExists is the one probe that just returns
+  // false, so drop casualties here, forget their file copies, and force a full
+  // rescan next tick.
+  const live = _netServers.filter(s => ns.serverExists(s));
+  if (live.length !== _netServers.length) {
+    for (const gone of _netServers) if (!live.includes(gone)) _copied.delete(gone);
+    _netServers = live;
+    _netAt = 0;
+  }
   if (now - _rootAt >= H.rootRetryMs) {
     _rootAt = now;
     for (const server of _netServers) {
@@ -516,8 +527,12 @@ export function newSchedulerState() {
   };
 }
 
-/** Forget the throttled caches (network walk, rooting, ranking, copies). For tests. */
-export function resetCachesForTests() {
+/**
+ * Forget the throttled caches (network walk, rooting, ranking, copies). Used by
+ * the crash guard in main() when a tick fails on surprise game state, and by the
+ * simulation tests between runs.
+ */
+export function resetCaches() {
   _netAt = 0;
   _netServers = [];
   _rootAt = 0;
@@ -683,7 +698,16 @@ export async function main(ns) {
 
   const s = newSchedulerState();
   while (true) {
-    step(ns, s, Date.now());
+    try {
+      step(ns, s, Date.now());
+    } catch (e) {
+      // Belt-and-braces for game state changing between ticks (the deleted-fleet
+      // case above is handled in buildSnapshot, but anything of that shape lands
+      // here): drop the caches so the next tick rebuilds from a fresh scan, and
+      // keep running instead of dying with an error modal.
+      resetCaches();
+      ns.print(`manager tick error (caches reset, retrying): ${String(e)}`);
+    }
     await ns.sleep(H.batchSpacingMs);
   }
 }
