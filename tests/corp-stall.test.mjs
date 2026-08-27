@@ -14,9 +14,13 @@
 //   had no zero-revenue exit at all and the corp stayed frozen for the life of
 //   the save.
 //
-//   lib/corp-market.js boostOrderTargets - holds boost-material orders in rounds
-//   1-2 until the round's capacity handshake fires, so the buildout money isn't
-//   sunk into Real Estate before the warehouses that hold it are bought.
+//   lib/corp-market.js boostOrderTargets - in rounds 1-2, holds boost-material
+//   orders while the buildout can still afford its next capacity step, so the
+//   money isn't sunk into Real Estate before the warehouses that hold it are
+//   bought. It deliberately does NOT wait for the capacity handshake: once
+//   capacity spending is blocked (targets met, banking for a founding, next step
+//   out of reach) the boosts are the best thing left to buy, and starving them
+//   would freeze the production multiplier of exactly the corp that needs it.
 //
 // Both are importable under Node: these modules' top level never touches ns, and
 // the functions take ns as a parameter, so a small fake covers the reads.
@@ -33,7 +37,7 @@ const GRACE = CO.stallRescueGraceMs;
 // The globals the corp phases publish to each other. Every test starts from a
 // clean slate: dyingRescue's dwell clock lives on globalThis precisely because
 // the phases are one-shots, so leakage between tests would be invisible.
-const GLOBALS = ["gordCorpOffer", "gordCorpCheapestStep", "gordCorpStallSince", "gordCorpExpandDone"];
+const GLOBALS = ["gordCorpOffer", "gordCorpCheapestStep", "gordCorpStallSince", "gordCorpExpandDone", "gordCorpSavingFor"];
 function reset() {
   for (const k of GLOBALS) globalThis[k] = undefined;
 }
@@ -199,25 +203,54 @@ test("a healthy round-1 corp mid-buildout is left alone", () => {
 
 const BOOSTS = { "Real Estate": 12000, Hardware: 0, Robots: 0, "AI Cores": 0 };
 
-test("rounds 1-2 order no boost materials until capacity is built", () => {
+/** ns for boostOrderTargets: it only needs corpFunds() via affordable(). */
+function fundsNs(funds) {
+  return { corporation: { getCorporation: () => ({ funds, divisions: [] }) } };
+}
+
+function assertHeld(targets, why) {
+  assert.deepEqual(Object.keys(targets).sort(), Object.keys(BOOSTS).sort(),
+    "every material must still appear - a missing key leaves its order unreviewed");
+  for (const [mat, units] of Object.entries(targets)) assert.equal(units, 0, `${mat}: ${why}`);
+}
+
+test("boosts stand aside while the buildout can afford its next capacity step", () => {
   reset();
-  for (const round of [1, 2]) {
-    const gated = boostOrderTargets(BOOSTS, round);
-    assert.deepEqual(Object.keys(gated).sort(), Object.keys(BOOSTS).sort(),
-      "every material must still appear - a missing key leaves its order unreviewed");
-    for (const [mat, units] of Object.entries(gated)) {
-      assert.equal(units, 0, `${mat} in round ${round}`);
-    }
-  }
+  globalThis.gordCorpCheapestStep = 1.145e9; // next warehouse level
+  const ns = fundsNs(50e9);                  // comfortably affordable
+  for (const round of [1, 2]) assertHeld(boostOrderTargets(ns, BOOSTS, round), `round ${round}`);
+});
+
+test("boosts flow once capacity is out of reach - the money isn't going there anyway", () => {
+  reset();
+  globalThis.gordCorpCheapestStep = 1.145e9;
+  assert.deepEqual(boostOrderTargets(fundsNs(0.2e9), BOOSTS, 1), BOOSTS);
+});
+
+test("boosts flow while banking for a division founding, so revenue can still grow", () => {
+  reset();
+  globalThis.gordCorpCheapestStep = 1.145e9;
+  const ns = fundsNs(10e9); // the step alone is affordable...
+  assertHeld(boostOrderTargets(ns, BOOSTS, 2), "no savings floor yet");
+  globalThis.gordCorpSavingFor = 70e9; // ...until Chemical's founding is due
+  assert.deepEqual(boostOrderTargets(ns, BOOSTS, 2), BOOSTS);
+  globalThis.gordCorpSavingFor = undefined;
 });
 
 test("the capacity handshake opens boost ordering at the round's real optimum", () => {
   reset();
   globalThis.gordCorpExpandDone = true;
-  assert.deepEqual(boostOrderTargets(BOOSTS, 1), BOOSTS);
+  assert.deepEqual(boostOrderTargets(fundsNs(50e9), BOOSTS, 1), BOOSTS);
 });
 
 test("past round 2 the gate is gone - boosts are ordered regardless", () => {
   reset();
-  assert.deepEqual(boostOrderTargets(BOOSTS, CO.boostAfterBuildoutRound + 1), BOOSTS);
+  globalThis.gordCorpCheapestStep = 1.145e9;
+  assert.deepEqual(boostOrderTargets(fundsNs(50e9), BOOSTS, CO.boostAfterBuildoutRound + 1), BOOSTS);
+});
+
+test("before corp-expand has published a step, boosts hold - the conservative side", () => {
+  reset();
+  assert.equal(globalThis.gordCorpCheapestStep, undefined);
+  assertHeld(boostOrderTargets(fundsNs(50e9), BOOSTS, 1), "no published step yet");
 });
