@@ -30,6 +30,7 @@ import assert from "node:assert/strict";
 import { CONFIG } from "../lib/config.js";
 import { dyingRescue, pass as investPass } from "../lib/corp-invest.js";
 import { boostOrderTargets } from "../lib/corp-market.js";
+import { secondsToAfford } from "../lib/corp-lib.js";
 
 const CO = CONFIG.corp;
 const GRACE = CO.stallRescueGraceMs;
@@ -129,6 +130,49 @@ test("the round-1 RP gate is not skippable, stall or no stall", () => {
   const { ns, corp } = frozen({ researchPoints: CO.round1ResearchPoints - 1 });
   globalThis.gordCorpStallSince = Date.now() - (GRACE + 1_000);
   assert.equal(dyingRescue(ns, corp, 1), false);
+});
+
+// ── "Stalled" means unreachable, not unprofitable ────────────────────────────
+//
+// The BN10 corp's round-3 state, read straight off tools/corp-status.js: funds
+// $452.750m, revenue $20.052k/s, expenses $12.638k/s - a PROFIT of $7.414k/s -
+// with the next warehouse level $1.145b away. That is 26 hours of saving, and
+// nothing in between grows, but a `profit < 0` test calls it healthy. Both the
+// $90b savings floor and the round-3 product gate then read as "be patient"
+// while the corp was in fact stationary.
+
+const BN10 = { revenue: 20052, expenses: 12638 }; // +$7.414k/s
+const BN10_FUNDS = 452.75e6;
+
+test("secondsToAfford: the gap in corp-seconds, or Infinity when not earning", () => {
+  assert.equal(secondsToAfford(10, 5, 1), 0, "already affordable");
+  assert.equal(secondsToAfford(0, 100, 10), 10);
+  assert.equal(secondsToAfford(0, 100, 0), Infinity, "not earning closes no gap");
+  assert.equal(secondsToAfford(0, 100, -5), Infinity, "nor does losing money");
+  assert.equal(
+    Math.round(secondsToAfford(BN10_FUNDS, 1.145e9, BN10.revenue - BN10.expenses)),
+    93371, "the save's own 26-hour gap",
+  );
+});
+
+test("REGRESSION: a profitable corp a day out from its next step is stalled", () => {
+  reset();
+  globalThis.gordCorpOffer = 3.218e9;         // the standing round-3 offer
+  globalThis.gordCorpCheapestStep = 1.145e9;  // Sector-12's next warehouse level
+  const ns = fakeNs({ funds: BN10_FUNDS, researchPoints: 2915 });
+  assert.ok(BN10.revenue - BN10.expenses > 0, "the whole point: it IS profitable");
+  globalThis.gordCorpStallSince = Date.now() - (GRACE + 1_000);
+  assert.equal(dyingRescue(ns, BN10, 3), true);
+});
+
+test("a profitable corp that can reach its next step soon is left to earn it", () => {
+  reset();
+  globalThis.gordCorpOffer = 3.218e9;
+  globalThis.gordCorpCheapestStep = 1.145e9;
+  // Same gap, but 100x the profit: ~934s out, well inside the horizon.
+  const ns = fakeNs({ funds: BN10_FUNDS, researchPoints: 2915 });
+  globalThis.gordCorpStallSince = Date.now() - (GRACE + 1_000);
+  assert.equal(dyingRescue(ns, { revenue: 2005200, expenses: 1263800 }, 3), false);
 });
 
 // ── The whole acceptance pass ────────────────────────────────────────────────
