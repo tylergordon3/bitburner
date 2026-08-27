@@ -116,10 +116,18 @@ export async function main(ns) {
     ns.tprint(`capacity built: ${globalThis.gordCorpExpandDone ? "yes" : "no"} ` +
       `| offices built: ${globalThis.gordCorpOfficeDone ? "yes" : "no"} ` +
       `| round published: ${globalThis.gordCorpRound ?? "(corp-invest not run yet)"}`);
+    // The one objective the corp is banking for. Everything cheaper queues behind
+    // it - which is the only way a lump (a city, a founding) is ever reached, and
+    // also the first thing to check when a spend you expected hasn't happened.
     const saving = globalThis.gordCorpSavingFor ?? 0;
     if (saving > 0) {
-      ns.tprint(`SAVING for a division founding: ${$(corp.funds)} / ${$(saving)} banked - ` +
-        "advert + warehouse/upgrade spending is paused until then (office seats still grow).");
+      const label = globalThis.gordCorpObjective ?? "a buildout step";
+      const profit = (corp.revenue ?? 0) - (corp.expenses ?? 0);
+      const eta = profit > 0 && corp.funds < saving
+        ? ` (~${(((saving - corp.funds) / profit) / 3600).toFixed(1)}h at this profit)`
+        : "";
+      ns.tprint(`BANKING for ${label}: ${$(corp.funds)} / ${$(saving)}${eta} - every cheaper`);
+      ns.tprint("         purchase (warehouse levels, office seats, advert, upgrades) waits for it.");
     }
   }
 

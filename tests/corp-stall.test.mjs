@@ -30,7 +30,8 @@ import assert from "node:assert/strict";
 import { CONFIG } from "../lib/config.js";
 import { dyingRescue, pass as investPass } from "../lib/corp-invest.js";
 import { boostOrderTargets } from "../lib/corp-market.js";
-import { secondsToAfford } from "../lib/corp-lib.js";
+import { secondsToAfford, affordable } from "../lib/corp-lib.js";
+import { pendingCityCost } from "../lib/corp-expand.js";
 
 const CO = CONFIG.corp;
 const GRACE = CO.stallRescueGraceMs;
@@ -297,4 +298,97 @@ test("before corp-expand has published a step, boosts hold - the conservative si
   reset();
   assert.equal(globalThis.gordCorpCheapestStep, undefined);
   assertHeld(boostOrderTargets(fundsNs(50e9), BOOSTS, 1), "no published step yet");
+});
+
+// ── The buildout objective: one lump at a time ───────────────────────────────
+//
+// The starvation this prevents: every corp spender is affordability-gated and
+// drains to the 10% reserve each pass, so the CHEAPEST pending purchase always
+// wins and anything dearer is unreachable at ANY income. The BN10 corp sat at 2
+// of 6 cities, offices of 3 and 4, Advert 1 - all round-3 targets of 6, 9 and 10
+// - because a $1.145b warehouse level was always affordable first and a ~$9b city
+// never was. affordable() is where the queue is enforced, so it's tested here
+// against the objective corp-expand publishes.
+
+const CONSTANTS = { officeInitialCost: 4e9, warehouseInitialCost: 5e9 };
+
+/** ns for pendingCityCost: a division holding `cities`, warehoused per `warehoused`. */
+function cityNs(cities, warehoused = cities) {
+  return {
+    corporation: {
+      getDivision: () => ({ cities }),
+      getConstants: () => CONSTANTS,
+      getWarehouse: (_d, city) => {
+        if (!warehoused.includes(city)) throw new Error("no warehouse");
+        return { level: 1 };
+      },
+    },
+  };
+}
+
+test("the next city is priced as the whole indivisible office+warehouse lump", () => {
+  const ns = cityNs(["Sector-12", "Aevum"]);
+  assert.equal(
+    pendingCityCost(ns, { name: "Agriculture" }),
+    CONSTANTS.officeInitialCost + CONSTANTS.warehouseInitialCost,
+    "an office without a warehouse produces nothing, so half a save is worse than none",
+  );
+});
+
+test("a city we hold but never warehoused is the cheaper, higher-priority step", () => {
+  const ns = cityNs(["Sector-12", "Aevum"], ["Sector-12"]);
+  assert.equal(pendingCityCost(ns, { name: "Agriculture" }), CONSTANTS.warehouseInitialCost);
+});
+
+test("no objective once every city is held and warehoused", () => {
+  const ns = cityNs([...CO.cities]);
+  assert.equal(pendingCityCost(ns, { name: "Agriculture" }), 0);
+});
+
+test("an unreadable constant must not become the objective", () => {
+  const ns = cityNs(["Sector-12"]);
+  ns.corporation.getConstants = () => ({});
+  assert.equal(pendingCityCost(ns, { name: "Agriculture" }), 0,
+    "publishing Infinity as the floor would freeze every spend in the corp");
+});
+
+test("REGRESSION: a cheaper purchase cannot preempt the objective it would starve", () => {
+  reset();
+  const ns = fakeNs({ funds: 3.6e9, researchPoints: 2915 }); // just after a $3.2b round
+  const warehouseLevel = 1.145e9;
+
+  assert.equal(affordable(ns, warehouseLevel), true, "with nothing banked it just buys");
+
+  globalThis.gordCorpSavingFor = 9e9; // the next city
+  assert.equal(affordable(ns, warehouseLevel), false,
+    "the $1.145b level must NOT eat the money the $9b city is banking");
+  assert.equal(affordable(ns, 9e9, /* ignoreSaving */ true), false,
+    "not yet affordable even for the objective itself - keep banking");
+});
+
+test("the objective spends the money banked for it once it lands", () => {
+  reset();
+  const ns = fakeNs({ funds: 10e9, researchPoints: 2915 });
+  globalThis.gordCorpSavingFor = 9e9;
+  assert.equal(affordable(ns, 9e9), false, "the floor blocks everything, itself included...");
+  assert.equal(affordable(ns, 9e9, /* ignoreSaving */ true), true, "...which is what the exemption is for");
+});
+
+test("REGRESSION: an objective out of reach must not freeze the cheap things that fund it", () => {
+  // Right after the $3.218b round-3 rescue lands: the next city is $9b, which at
+  // +$7.414k/s is 9 days away. Banking for it would buy nothing for 9 days while
+  // a $1.145b warehouse level - affordable now, and the thing that RAISES that
+  // profit - sat unbought. The corp banks only for what it can reach.
+  const funds = 3.67e9;
+  const profit = BN10.revenue - BN10.expenses;
+  const HORIZON = CO.savingHorizonSeconds;
+
+  assert.ok(secondsToAfford(funds, 9e9, profit) > HORIZON,
+    "a 9-day city is outside the horizon, so it must not become the objective");
+  assert.ok(secondsToAfford(funds, 1.145e9, profit) <= HORIZON,
+    "the warehouse level is already affordable, so nothing blocks it");
+
+  // ...and once profit has grown enough to make the city reachable, it banks.
+  assert.ok(secondsToAfford(funds, 9e9, 1e6) <= HORIZON,
+    "at $1m/s the same city is inside the horizon - that is the route to it");
 });
