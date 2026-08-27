@@ -57,6 +57,8 @@ export async function main(ns) {
 
   // ── Divisions ──────────────────────────────────────────────────────────────
   ns.tprint("-".repeat(66));
+  /** @type {string[]} */
+  const congestedCities = [];
   if (!corp.divisions.length) {
     ns.tprint("  NO DIVISIONS - the corp cannot earn anything in this state.");
   }
@@ -69,9 +71,17 @@ export async function main(ns) {
     for (const city of d.cities) {
       const wh = safe(() => c.getWarehouse(name, /** @type {any} */ (city)));
       const off = safe(() => c.getOffice(name, /** @type {any} */ (city)));
-      const whStr = wh ? `wh lvl ${wh.level} (${ns.format.number(wh.sizeUsed)}/${ns.format.number(wh.size)})` : "NO WAREHOUSE";
+      // A warehouse at ~100% can't produce: its output has nowhere to go, so the
+      // division stops producing, stops consuming its inputs, and the stock that
+      // filled it never drains. Flag it loudly - at a glance it looks identical
+      // to a healthy full-of-boost-materials warehouse.
+      const full = wh && wh.size > 0 && wh.sizeUsed >= wh.size * CO.warehouseCongestionFraction;
+      if (full) congestedCities.push(`${name}/${city}`);
+      const whStr = wh
+        ? `wh lvl ${wh.level} (${ns.format.number(wh.sizeUsed)}/${ns.format.number(wh.size)})${full ? " CONGESTED" : ""}`
+        : "NO WAREHOUSE";
       const offStr = off ? `office ${off.numEmployees}/${off.size}` : "office n/a";
-      ns.tprint(`     ${String(city).padEnd(11)} ${whStr.padEnd(34)} ${offStr}`);
+      ns.tprint(`     ${String(city).padEnd(11)} ${whStr.padEnd(44)} ${offStr}`);
     }
   }
 
@@ -111,6 +121,30 @@ export async function main(ns) {
       ns.tprint(`SAVING for a division founding: ${$(corp.funds)} / ${$(saving)} banked - ` +
         "advert + warehouse/upgrade spending is paused until then (office seats still grow).");
     }
+  }
+
+  // ── Frozen? ────────────────────────────────────────────────────────────────
+  // The one failure mode that looks exactly like "just slow": no revenue, no
+  // affordable next step, so nothing the buildout can do makes the corp any
+  // richer, while salaries keep draining it. lib/corp-invest.js's dyingRescue
+  // sells the standing round to break out - this says whether that clock is
+  // running, since it's the only thing that will ever move.
+  const cheapest = globalThis.gordCorpCheapestStep;
+  const profit = (corp.revenue ?? 0) - (corp.expenses ?? 0);
+  if (profit < 0 && Number.isFinite(cheapest) && cheapest > corp.funds) {
+    ns.tprint("-".repeat(66));
+    ns.tprint(`STALLED: losing ${$(-profit)}/s with the next buildout step at ${$(cheapest)} ` +
+      `against ${$(corp.funds)} - the corp cannot buy its way out of this.`);
+    if (congestedCities.length) {
+      ns.tprint(`         Warehouses full: ${congestedCities.join(", ")}. A full warehouse produces`);
+      ns.tprint("         nothing, so it never consumes its inputs either - corp-market drains the");
+      ns.tprint("         input overshoot to reopen headroom.");
+    }
+    const since = globalThis.gordCorpStallSince;
+    ns.tprint(since === undefined
+      ? "         Rescue clock: not started (corp-invest hasn't seen the stall yet)."
+      : `         Rescue clock: ${((Date.now() - since) / 1000).toFixed(0)}s of ` +
+        `${CO.stallRescueGraceMs / 1000}s, then round ${round}'s offer (${$(offer)}) is accepted.`);
   }
   ns.tprint("=".repeat(66));
 }
