@@ -3,7 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  planBatch, legSchedule, batchDepth, chooseFraction, planCycle, targetScore,
+  planBatch, legSchedule, batchDepth, chooseFraction, planCycle, incomeRate,
   prepPlan, allocate, isPrepped, driftDetected, pruneInFlight,
 } from "../lib/batch-logic.js";
 
@@ -98,17 +98,24 @@ test("planCycle stretches the launch interval to honour maxDepth", () => {
   assert.equal(d.launchInterval, 1200);
 });
 
-test("targetScore is $ per GB-ms and prefers the cheaper-to-grow target", () => {
-  // Same money, same chance, same time; target B needs 3x the grow threads.
-  const growSlow = remaining => 3 * growThreadsFor(remaining);
-  const planA = planFor(0.05);
-  const planB = planBatch({ moneyFraction: 0.05, hackPct: 0.002, growThreadsFor: growSlow, ramPerThread: RAM, ...GAME });
-  const a = targetScore({ maxMoney: 1e9, hackChance: 1, plan: planA, weakenTime: 40_000 });
-  const b = targetScore({ maxMoney: 1e9, hackChance: 1, plan: planB, weakenTime: 40_000 });
-  assert.ok(a > b);
-  assert.equal(a, (0.05 * 1e9 * 1) / (planA.ram * 40_000));
-  assert.equal(targetScore({ maxMoney: 1e9, hackChance: 1, plan: null, weakenTime: 40_000 }), 0);
-  assert.equal(targetScore({ maxMoney: 0, hackChance: 1, plan: planA, weakenTime: 40_000 }), 0);
+test("incomeRate is $ per ms and prefers the target that pays more, not the cheaper one", () => {
+  const plan = planFor(0.05);
+  assert.equal(incomeRate({ maxMoney: 1e9, hackChance: 1, plan, launchInterval: 1200 }),
+    (plan.hackedFraction * 1e9 * 1) / 1200);
+
+  // The bug this metric replaces: a small server whose batches are a fraction of
+  // the cost still cannot out-EARN a rich one, however efficient it is per GB.
+  // (Same bite, same cadence; only the money differs.)
+  const rich = incomeRate({ maxMoney: 1e9, hackChance: 1, plan, launchInterval: 1200 });
+  const cheap = incomeRate({ maxMoney: 2e6, hackChance: 1, plan, launchInterval: 1200 });
+  assert.ok(rich > cheap);
+
+  // Halving the hack's success chance halves the expected income.
+  assert.equal(incomeRate({ maxMoney: 1e9, hackChance: 0.5, plan, launchInterval: 1200 }), rich / 2);
+
+  assert.equal(incomeRate({ maxMoney: 1e9, hackChance: 1, plan: null, launchInterval: 1200 }), 0);
+  assert.equal(incomeRate({ maxMoney: 0, hackChance: 1, plan, launchInterval: 1200 }), 0);
+  assert.equal(incomeRate({ maxMoney: 1e9, hackChance: 1, plan, launchInterval: 0 }), 0);
 });
 
 test("prepPlan sizes weaken to cover the grow it launches alongside", () => {

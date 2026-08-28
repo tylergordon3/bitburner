@@ -16,6 +16,18 @@ import { card, stat, el } from "./dashboard-lib.js";
  * @returns {any[]}
  */
 export function extraCards(ns, C) {
+  // The HUD's CORP toggle (lib/corp-daemon.js corpAutoEnabled) is off: say so
+  // plainly, because every other state this card can show ("manager starting",
+  // "corp-steady.js not running") reads as a fault rather than a deliberate choice.
+  if (globalThis.gordCorpAuto === false) {
+    return [card(C, "CORP", [
+      el("div", { style: { color: C.yellow, fontSize: "13px" } },
+        "CORP toggle is OFF - no corp scripts are deployed and the running ones were killed."),
+      el("div", { style: { color: C.dim, fontSize: "12px", marginTop: "4px" } },
+        "The corporation is yours to run by hand. Click CORP: OFF in the header to hand it back."),
+    ])];
+  }
+
   const corp = corpCard(ns, C);
   if (corp) return [corp];
 

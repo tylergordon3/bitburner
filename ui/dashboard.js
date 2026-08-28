@@ -10,10 +10,11 @@
 //   SLEEVE  - the duplicate-sleeve roster/status card (ui/bn10.js), on any node
 //             with BN10/SF10 sleeves.
 //
-// The header also carries the two switches (TOGGLES / toggleButton) - the only
+// The header also carries the switches (TOGGLES / toggleButton) - the only
 // controls in here that change what the BOT does rather than what the HUD shows:
-// AUTO-FOCUS (lib/player-actions.js focusFlag) and AUTO-FINISH
-// (lib/daemon-lib.js ensureBackdoorHelpers). lib/toggles.js persists both.
+// AUTO-FOCUS (lib/player-actions.js focusFlag), AUTO-FINISH (lib/daemon-lib.js
+// ensureBackdoorHelpers) and AUTO-CORP (lib/corp-daemon.js corpAutoEnabled).
+// lib/toggles.js persists all three.
 //
 // The script loop paints the HUD (clearLog + printRaw). A tab click only flips a
 // module variable (activeTab) - it must NOT call any ns function, because calling
@@ -214,7 +215,7 @@ function headerBar(ns, C) {
  * lib/toggles.js persists; the HUD only ever assigns to it, because any ns call from
  * a DOM event handler stops the script (same constraint as the tab handlers).
  *
- * Both default ON, i.e. to the behaviour the bot had before they existed.
+ * All default ON, i.e. to the behaviour the bot had before they existed.
  */
 const TOGGLES = [
   {
@@ -239,6 +240,18 @@ const TOGGLES = [
     // backdoored, we just don't destroy it.
     onTitle: "Auto-finish ON - the bot destroys w0r1d_d43m0n and enters the next BitNode once it can. Click to stay in this node.",
     offTitle: "Auto-finish OFF - the daemon runs as normal and still backdoors everything this node allows, but won't beat the BitNode. Click to let it finish.",
+  },
+  {
+    key: "gordCorpAuto",
+    file: CONFIG.paths.autoCorpFile,
+    on: "CORP: AUTO",
+    off: "CORP: OFF",
+    // Read by lib/corp-daemon.js (corpAutoEnabled). Off stops the daemon deploying
+    // any corp script AND kills the ones already running (creator, operator,
+    // upkeep, and the four build phases), so the corporation is entirely hand-run
+    // until it's switched back on. Everything else the bot does is unaffected.
+    onTitle: "Auto-corp ON - the bot creates and runs the corporation. Click to stop deploying corp scripts and kill the running ones so you can run it by hand.",
+    offTitle: "Auto-corp OFF - no corp script is deployed and any running ones were killed; the corporation is yours to run. Click to hand it back to the bot.",
   },
 ];
 
@@ -738,9 +751,14 @@ function buildOperationalCards(ns, C, data) {
 
 /**
  * The HGW batcher's live state (hacking/manager.js publishes gordHackState every
- * tick): mode, target, batches in flight against the planned depth, the bite per
- * batch and its launch cadence, and the target's money/security so a stuck prep
- * or a drift drain is visible at a glance. Reads globalThis only.
+ * tick): mode, primary target, batches in flight against the planned depth, the
+ * bite per batch and its launch cadence, and the target's money/security so a
+ * stuck prep or a drift drain is visible at a glance.
+ *
+ * The last two lines are about RAM: which OTHER targets the manager spilled onto
+ * (it works several at once, since one target's income is capped by timing) and
+ * how much of the botnet all of them add up to. A claimed figure far below
+ * capacity is the thing to notice - it means the fleet is idling.
  * @param {NS} ns
  */
 function botnetCard(ns, C) {
@@ -772,8 +790,14 @@ function botnetCard(ns, C) {
       stat(C, "Money", `${(moneyPct * 100).toFixed(0)}%`, moneyPct >= 0.95 ? C.green : C.yellow),
       stat(C, "Sec", `+${secOver.toFixed(2)}`, secOver <= 1 ? C.green : C.yellow),
     ),
+    ...((h.targets ?? []).length > 1 ? [
+      el("div", { style: { color: C.dim, fontSize: "11px", marginTop: "4px" } },
+        `also: ${h.targets.slice(1).map(t => `${t.target} ${t.inFlight}/${t.depth} @${(t.fraction * 100).toFixed(1)}%`).join("  |  ")}`
+      ),
+    ] : []),
     el("div", { style: { color: C.dim, fontSize: "11px", marginTop: "4px" } },
-      `${h.runnerUp ? `runner-up ${h.runnerUp} | ` : ""}free ${ns.format.ram(h.freeRam ?? 0)} | ${h.formulas ? "Formulas" : "ns.* fallback"} | batches launched ${h.batchId ?? 0}`
+      `using ${ns.format.ram(h.claimedRam ?? 0)} of ${ns.format.ram(h.capacityRam ?? 0)} | free ${ns.format.ram(h.freeRam ?? 0)} | ` +
+      `${h.formulas ? "Formulas" : "ns.* fallback"} | batches launched ${h.batchId ?? 0}`
     ),
   ]);
 }

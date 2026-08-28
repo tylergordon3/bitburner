@@ -50,15 +50,28 @@ a "launch the largest batch that fits, every tick" loop:
   tripped a re-prep that blocked launching for a grow-time.)
 - Timing then fixes how many batches are in flight (`batchDepth`, capped by
   `hacking.maxDepth`), and the money fraction per batch is the largest in
-  `hacking.moneyFractions` that lets that many batches share the botnet's RAM
-  (`planCycle`). A batch is allocated across hosts as a whole and launched
+  `hacking.moneyFractions` that lets that many batches share the target's RAM
+  budget (`planCycle`). A batch is allocated across hosts as a whole and launched
   entirely or not at all (`allocate`).
-- Targets are ranked by **$ per GB-second** (`targetScore`), which is what a
-  RAM-bound botnet maximises; the old `maxMoney / minSec / hackTime` ignored what
-  a batch costs.
+- Targets are ranked by the **income each would earn with the whole botnet behind
+  it** (`incomeRate`, $/ms). Two earlier metrics were wrong here:
+  `maxMoney / minSec / hackTime` ignored what a batch costs, and $ per GB-second
+  (its replacement) ranked by RAM *efficiency* — and the most efficient target is
+  the cheapest, not the richest.
+- **One target cannot absorb a big botnet.** Its launch interval is fixed by
+  timing, so it pays at most `maxHackFraction` of its money every ~1.2s however
+  much RAM exists — which at a low hacking level, where n00dles is the best server
+  in reach, is a few hundred GB against a multi-TB fleet. So the manager services
+  the top `hacking.maxTargets` targets in rank order, each planned against the RAM
+  the ones above it don't claim (down to `hacking.minTargetRam`). Same scheduler
+  per target, own launch clock, own prep and drift state; the primary still takes
+  the fattest bite it can, and only what it can't absorb spills down.
 - Prep is one joint weaken+grow pass sized so the weaken also covers the grow's
   own security (`prepPlan`), and it does **not** block the loop: the manager keeps
-  ticking (share, runner-up prep) and simply doesn't launch until the legs land.
+  ticking (share, the other targets) and simply doesn't launch against that target
+  until its legs land. A target that can't plan a cycle at all (mid-prep, or a
+  botnet too small) claims its whole budget, so a prep is never starved by the
+  targets below it.
 - While batches fly, the target is checked against the worst case one open batch
   can explain (`driftDetected`); real drift stops launching, the window drains in
   a weaken-time, and the target is re-prepped.
@@ -70,11 +83,25 @@ a "launch the largest batch that fits, every tick" loop:
   and leg durations respond to landings) and asserts the promises above: every
   hack lands on a prepped server, launches are continuous and never exceed the
   depth, the drift detector is quiet in a clean run and fires/recovers on an
-  outside hit, and prep converges monotonically (one or two passes with ample RAM).
+  outside hit, prep converges monotonically (one or two passes with ample RAM),
+  and — the reason the spill exists — a 16TB botnet whose only reachable targets
+  are n00dles-alikes earns several times more, on several times the RAM, than the
+  same world limited to one target.
 
 After syncing a change to the manager, run `run /tools/kill-helpers.js all` before
 restarting: the manager runs off-home, so `killall` on home leaves the old copy
 running and the daemon never launches the new one.
+
+When the botnet looks dead or idle, [`tools/hack-status.js`](tools/hack-status.js)
+says which of the two it is in one shot: whether the daemon and the manager are
+running (and where), whether anything has room to *start* the manager — right after
+it dies its own worker legs still hold the fleet, so for about a weaken-time there
+is genuinely nowhere to put it — what the running legs are hacking, and the target
+table it would rank, with the RAM each target would hold.
+
+```text
+run tools/hack-status.js
+```
 
 ## BitNode entry points
 
@@ -227,14 +254,15 @@ funds share steps up from 20% to 50% past ~1e18/s profit (the manual's
 
 ## HUD toggles
 
-The GORDNET header carries two switches. Each is a `globalThis` boolean the HUD
+The GORDNET header carries three switches. Each is a `globalThis` boolean the HUD
 assigns and a daemon reads — a click handler can't call `ns` without stopping the
 script, so that indirection is the whole mechanism.
 [`lib/toggles.js`](lib/toggles.js) adds the durability: each value is mirrored to a
-one-word file (`CONFIG.paths.focusFile` / `autoFinishFile`) and re-seeded from it,
-because both an aug install and a page reload wipe `globalThis`, and a switch you
-deliberately turned off silently turning itself back on hours later is exactly what
-these exist to prevent. Both default **on** — the behaviour from before they existed.
+one-word file (`CONFIG.paths.focusFile` / `autoFinishFile` / `autoCorpFile`) and
+re-seeded from it, because both an aug install and a page reload wipe `globalThis`,
+and a switch you deliberately turned off silently turning itself back on hours later
+is exactly what these exist to prevent. All default **on** — the behaviour from
+before they existed.
 
 **FOCUS: AUTO / OFF.** Focused work pins the game to its work screen and the daemon
 re-issues that work every tick, which makes hand-managing the corporation or the gang
@@ -253,6 +281,18 @@ existing per-node halt sentinel (`nextBN <= 0`, e.g. BN10) — either hold annou
 itself once and leaves the world daemon standing. Flipping it off *after*
 `lib/finish-bn.js` was launched also kills that process, since it loops waiting for
 its moment and would otherwise beat the node a few ticks later anyway.
+
+**CORP: AUTO / OFF.** Off, the daemon deploys no corporation script at all — the
+creator, the always-on operator and upkeep pair, and the four build phases — and
+kills every one of them that's already running, so the corporation is entirely yours
+to run by hand. Enforced in [`lib/corp-daemon.js`](lib/corp-daemon.js)
+(`corpAutoEnabled` / `stopCorpScripts`), which sweeps the network every tick while
+the switch is off: the managers are loops on borrowed off-home RAM, so merely not
+re-launching them would leave the running copies hiring and accepting investment
+offers under your hands. The `cloud-corp` reservation is dropped too, handing that
+host back to the botnet, and the HUD's CORP tab says the switch is off rather than
+reporting a dead manager. Everything else the bot does is unaffected; flipping it
+back on re-places the managers on the next daemon tick.
 
 ## Self-test
 

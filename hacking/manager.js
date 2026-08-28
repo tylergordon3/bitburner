@@ -13,27 +13,35 @@
 //      the same view of free RAM.
 //   2. SHARE    - the optional faction-rep ns.share slice (manageShare), placed
 //      before sizing so the botnet plans around it.
-//   3. RANK     - targets scored in $ per GB-second (targetScore), re-ranked
-//      every targetRescoreMs rather than every tick.
-//   4. PREP     - when no batches are in flight against the target and it isn't
+//   3. RANK     - targets scored by the INCOME they would actually yield with
+//      the whole botnet behind them ($/ms, incomeRate), re-ranked every
+//      targetRescoreMs rather than every tick.
+//   4. SPILL    - the top targets are serviced in rank order, each planned
+//      against the RAM the ones above it don't claim, up to maxTargets. One
+//      target can only absorb so much: timing fixes its launch interval, so it
+//      pays at most maxHackFraction of its money per interval however much RAM
+//      exists. At a low hacking level (where n00dles is the best server in
+//      reach) that ceiling is small enough to leave most of a purchased fleet
+//      idle, which is exactly what this step exists to prevent.
+//   5. PREP     - when no batches are in flight against a target and it isn't
 //      at min security / max money, launch one joint weaken+grow pass sized so
 //      the weaken also covers the grow's own security (prepPlan), then WAIT
-//      WITHOUT BLOCKING: the loop keeps ticking (share, runner-up prep) and
-//      simply doesn't launch batches until the prep legs have landed.
-//   5. BATCH    - a CONTINUOUS scheduler. Leg delays come from legSchedule so
-//      the four legs land H, W1, G, W2; launches are spaced by the landing span
-//      plus a margin, which guarantees batch N+1's first landing follows batch
-//      N's last. That ordering is the whole correctness condition: each batch
-//      restores the prepped state before the next one's hack lands. Timing
-//      then fixes how many batches are in flight (batchDepth), and the money
-//      fraction per batch is the largest that lets that many batches share the
-//      botnet's RAM (planCycle). A batch is allocated across hosts as a whole
-//      (allocate) and launched entirely or not at all.
-//   6. DRIFT    - while batches fly, the target is checked against the worst
-//      case one OPEN batch can explain (driftDetected). Real drift stops
-//      launching, the window drains in ~one weaken-time, and step 4 re-preps.
-//   7. RUNNER-UP - spare RAM beyond what the primary's cycle needs preps the
-//      second-best target, so a target switch doesn't start with a cold prep.
+//      WITHOUT BLOCKING: the loop keeps ticking (share, the other targets) and
+//      simply doesn't launch batches against it until those legs have landed.
+//   6. BATCH    - a CONTINUOUS scheduler, per target. Leg delays come from
+//      legSchedule so the four legs land H, W1, G, W2; launches are spaced by
+//      the landing span plus a margin, which guarantees batch N+1's first
+//      landing follows batch N's last. That ordering is the whole correctness
+//      condition: each batch restores the prepped state before the next one's
+//      hack lands. Timing then fixes how many batches are in flight
+//      (batchDepth), and the money fraction per batch is the largest that lets
+//      that many batches share the target's RAM budget (planCycle). A batch is
+//      allocated across hosts as a whole (allocate) and launched entirely or not
+//      at all, so targets never end up sharing a half-launched batch.
+//   7. DRIFT    - while batches fly, each target is checked against the worst
+//      case one OPEN batch of its own can explain (driftDetected). Real drift
+//      stops launching against it, its window drains in ~one weaken-time, and
+//      step 5 re-preps it; the other targets carry on.
 //
 // The old loop launched "the largest batch that fits" every 200ms; those batches
 // interleaved (each hack after the first hit an already-hacked server) and the
@@ -47,6 +55,7 @@
 
 import { allServers, root } from "../lib/net.js";
 import { CONFIG } from "../lib/config.js";
+import { emitEvent } from "../lib/events.js";
 import { reservedHosts } from "../lib/ns-utils.js";
 import * as F from "../lib/formulas.js";
 import * as B from "../lib/batch-logic.js";
@@ -89,7 +98,8 @@ const _copied = new Set();
 /**
  * @typedef {{host: string, max: number, free: number}} Worker
  * @typedef {{now: number, servers: string[], rooted: string[], reserved: Set<string>,
- *            workers: Worker[], totalUsable: number, hacking: number}} Snapshot
+ *            workers: Worker[], totalUsable: number, capacity: number,
+ *            hacking: number}} Snapshot
  */
 
 /**
@@ -126,6 +136,7 @@ function buildSnapshot(ns, now) {
   const rooted = _netServers.filter(s => ns.hasRootAccess(s));
   const workers = [];
   let totalUsable = 0;
+  let capacity = 0;
   for (const host of rooted) {
     if (reserved.has(host)) continue;
     const max = ns.getServerMaxRam(host);
@@ -140,8 +151,14 @@ function buildSnapshot(ns, now) {
     const free = Math.max(0, max - ns.getServerUsedRam(host) - reserve);
     workers.push({ host, max, free });
     totalUsable += free;
+    // What this host could give the botnet if nothing else were on it. Free RAM
+    // swings wildly within a launch cycle (and collapses to nearly nothing
+    // during a big prep), so TARGET RANKING is done against this stable number -
+    // otherwise a prep in flight makes every target look unaffordable and the
+    // ranking empties out. Per-target RAM BUDGETS still come from free RAM.
+    capacity += Math.max(0, max - reserve);
   }
-  return { now, servers: _netServers, rooted, reserved, workers, totalUsable, hacking: ns.getHackingLevel() };
+  return { now, servers: _netServers, rooted, reserved, workers, totalUsable, capacity, hacking: ns.getHackingLevel() };
 }
 
 /** Re-read free RAM for a few hosts after something outside our plan ran there. */
@@ -317,6 +334,15 @@ function manageShare(ns, snap) {
  * PREPPED state a batch actually hits. Without Formulas.exe the current-state
  * ns.* approximations are used (hackAnalyze reads current security,
  * growthAnalyze ignores it) and hack chance is taken as 1.
+ *
+ * That fallback is noticeably worse on FAST targets - the small servers this
+ * scheduler now also works. Their whole cycle is a couple of seconds, so the
+ * "current" state is never the prepped one (a previous batch's hack has just
+ * landed), the hack is planned ~0.5% smaller than the one that lands, and the
+ * grow sized to match leaves the target a little short each cycle; money settles
+ * a few percent under max rather than at it. It self-limits well inside the
+ * prepped threshold, and SF-5 grants Formulas.exe - the exact path - at the start
+ * of every node, so this is an edge-case cost, not the normal one.
  * @param {NS} ns @param {string} target @returns {TargetMath}
  */
 function targetMath(ns, target) {
@@ -374,18 +400,50 @@ function prepped(state) {
 
 // ── Target ranking ───────────────────────────────────────────────────────────
 
-let _rank = { at: 0, list: /** @type {{target: string, score: number}[]} */ ([]) };
+let _rank = { at: 0, ram: 0, list: /** @type {{target: string, score: number}[]} */ ([]) };
 
 /**
- * Hackable targets ranked by $ per GB-second (batch-logic targetScore), which is
- * what a RAM-bound botnet actually maximises - the old money/minSec/hackTime
- * heuristic ignored what a batch COSTS, so a money-rich, grow-expensive server
- * could outrank a better one. Re-ranked every targetRescoreMs; scores only move
- * with hacking level.
- * @param {NS} ns @param {Snapshot} snap @param {number} now
+ * The batch plan for one target given `ramBudget`: the leg schedule (fixed by
+ * the target's leg times) and the cycle that fills the budget (depth from
+ * timing, money fraction from RAM). cycle is null when not even the smallest
+ * batch fits.
+ * @param {TargetMath} math @param {number} ramBudget
  */
-function rankTargets(ns, snap, now) {
-  if (_rank.list.length && now - _rank.at < H.targetRescoreMs) return _rank.list;
+function cycleFor(math, ramBudget) {
+  const schedule = B.legSchedule({ ...math.times, spacing: H.batchSpacingMs, margin: H.launchMarginMs });
+  const cycle = B.planCycle({
+    fractions: H.moneyFractions,
+    totalRam: ramBudget,
+    lastLanding: schedule.lastLanding,
+    launchInterval: schedule.launchInterval,
+    maxDepth: H.maxDepth,
+    planFor: math.plan,
+  });
+  return { schedule, cycle };
+}
+
+/**
+ * Hackable targets ranked by the INCOME each would yield with the whole botnet
+ * behind it ($/ms, batch-logic incomeRate) - by what we would actually earn, not
+ * by how efficiently the RAM is spent.
+ *
+ * This is the second correction to this ranking. money/minSec/hackTime ignored
+ * what a batch costs; $ per GB-second (the version before this one) fixed that
+ * but maximised RAM EFFICIENCY, and the most efficient target is not the richest
+ * - it is usually the cheapest, which on a botnet with RAM to spare means
+ * parking on n00dles and leaving the fleet idle. Income ranking prefers the
+ * server that pays most with the RAM we have, and step() spills what that target
+ * cannot absorb onto the next ones in this same list.
+ *
+ * Re-ranked every targetRescoreMs, and immediately when the botnet's usable RAM
+ * moves by more than half (a purchased-server upgrade, an aug install wiping the
+ * fleet), since the ranking is now a function of that RAM.
+ * @param {NS} ns @param {Snapshot} snap @param {number} capacity @param {number} now
+ */
+function rankTargets(ns, snap, capacity, now) {
+  const stale = now - _rank.at >= H.targetRescoreMs
+    || Math.abs(capacity - _rank.ram) > _rank.ram * 0.5;
+  if (_rank.list.length && !stale) return _rank.list;
 
   const list = [];
   for (const server of snap.rooted) {
@@ -395,16 +453,18 @@ function rankTargets(ns, snap, now) {
     if (ns.getServerRequiredHackingLevel(server) > snap.hacking) continue;
 
     const m = targetMath(ns, server);
-    const score = B.targetScore({
+    const { cycle } = cycleFor(m, capacity);
+    if (!cycle) continue;                       // not even the smallest batch fits
+    const score = B.incomeRate({
       maxMoney,
       hackChance: m.hackChance,
-      plan: m.plan(H.scoreFraction),
-      weakenTime: m.times.weakenTime,
+      plan: cycle.plan,
+      launchInterval: cycle.launchInterval,
     });
     if (score > 0) list.push({ target: server, score });
   }
   list.sort((a, b) => b.score - a.score);
-  _rank = { at: now, list };
+  _rank = { at: now, ram: capacity, list };
   return list;
 }
 
@@ -519,11 +579,12 @@ export function newSchedulerState() {
   return {
     inFlight: /** @type {any[]} */ ([]),  // batches whose legs haven't all landed (any target)
     prepUntil: new Map(),                  // target -> time its prep legs will have landed
-    nextLaunchAt: 0,
-    currentTarget: "",
+    nextLaunchAt: new Map(),               // target -> earliest next launch (its own cadence)
+    currentTarget: "",                     // the primary, for logging a switch
     batchId: 0,
     lastMode: "",
     lastLogAt: 0,
+    lastIdleWarnAt: -Infinity,   // throttle on the "nothing scored" warning
   };
 }
 
@@ -555,11 +616,79 @@ function readWorkerRam(ns) {
 }
 
 /**
+ * One tick's work against ONE target, given the RAM budget it may claim in
+ * steady state: prep it, drain it, or launch its next batch. Every target the
+ * manager works runs this same body with its own budget and its own launch
+ * clock, so a secondary target is not a lesser mode - it is the same scheduler.
+ *
+ * `claim` is the RAM this target will hold once its cycle is at full depth - what
+ * the caller subtracts before budgeting the next one. It is claimed even while
+ * the target is still PREPPING, since it will need that RAM as soon as the prep
+ * lands, so a target lower down can't take it out from under one warming up. A
+ * target that couldn't plan a cycle at all claims 0 here; step() decides what
+ * that means (the primary keeps the lot for its prep, a secondary steps aside).
+ *
+ * @param {NS} ns @param {ReturnType<typeof newSchedulerState>} s
+ * @param {Snapshot} snap @param {string} target
+ * @param {number} budgetRam @param {number} now
+ */
+function serviceTarget(ns, s, snap, target, budgetRam, now) {
+  const math = targetMath(ns, target);
+  const state = readTarget(ns, target);
+  const open = s.inFlight.filter(b => b.target === target);
+  const { schedule, cycle } = cycleFor(math, budgetRam);
+
+  let mode;
+  if ((s.prepUntil.get(target) ?? 0) > now) {
+    mode = "Prepping";
+  } else if (open.length === 0 && !prepped(state)) {
+    const res = launchPrep(ns, snap, target, state, math, budgetRam, now);
+    s.prepUntil.set(target, res.until);
+    mode = res.launched ? "Prepping" : "Waiting for RAM (prep)";
+    if (res.launched) {
+      ns.print(`[prep] ${target}: weaken x${res.weaken}, grow x${res.grow}${res.complete ? "" : " (partial)"} | ` +
+        `sec ${state.security.toFixed(2)}/${state.minSecurity} money ${((state.money / state.maxMoney) * 100).toFixed(0)}%`);
+    }
+  } else if (open.length > 0 && B.driftDetected({
+    ...state,
+    openMoneyFraction: Math.max(...open.map(b => b.moneyFraction)),
+    openSecurity: Math.max(...open.map(b => b.securityAdded)),
+    moneyTolerance: H.driftMoneyTolerance,
+    securityTolerance: H.driftSecurityTolerance,
+  })) {
+    // Stop launching against this target; its window drains within a weaken-time
+    // and the branch above re-preps it once nothing of ours is in flight.
+    mode = "Draining (drift)";
+  } else if (!cycle) {
+    mode = "Waiting for RAM";
+  } else if (now >= (s.nextLaunchAt.get(target) ?? 0) && open.length < cycle.depth) {
+    const batch = launchBatch(ns, snap, target, cycle, schedule, s.batchId, now);
+    if (batch) {
+      s.batchId++;
+      s.inFlight.push(batch);
+      s.nextLaunchAt.set(target, now + cycle.launchInterval);
+      mode = "Batching";
+    } else {
+      // Free RAM is there in total but not in the right places (or an exec
+      // failed); try again next tick rather than waiting out a whole interval.
+      mode = "Waiting for RAM (fragmented)";
+    }
+  } else {
+    mode = open.length > 0 ? "Batching" : "Idle";
+  }
+
+  return {
+    target, mode, cycle, math, state, open,
+    claim: cycle ? cycle.depth * cycle.plan.ram : 0,
+  };
+}
+
+/**
  * One tick of the manager. Exported so the whole loop can be driven against a
  * fake `ns` under Node (tests/batcher-sim.test.mjs) - the one place the
  * scheduling logic is exercised end to end without the game.
  * @param {NS} ns @param {ReturnType<typeof newSchedulerState>} s @param {number} now
- * @returns {string} the mode this tick ended in
+ * @returns {string} the mode this tick ended in (the primary target's)
  */
 export function step(ns, s, now) {
   const snap = buildSnapshot(ns, now);
@@ -574,115 +703,124 @@ export function step(ns, s, now) {
 
   s.inFlight = B.pruneInFlight(s.inFlight, now);
 
-  const ranked = rankTargets(ns, snap, now);
-  const target = ranked[0]?.target ?? H.defaultTarget;
-  if (target !== s.currentTarget) {
-    if (s.currentTarget) ns.print(`[target] ${s.currentTarget} -> ${target}`);
-    s.currentTarget = target;
-    s.nextLaunchAt = 0; // in-flight batches on the old target drain harmlessly
+  // What the botnet can plan with right now: RAM free this tick plus what our own
+  // in-flight batches are holding (they release it as they land). Ranking uses
+  // snap.capacity instead - see buildSnapshot.
+  const budgetRam = snap.totalUsable + s.inFlight.reduce((sum, b) => sum + b.ram, 0);
+
+  const ranked = rankTargets(ns, snap, snap.capacity, now);
+  if (!ranked.length) {
+    // No rooted server scored anything: nothing can carry even the smallest
+    // batch (a fresh node, or the fleet just vanished with an aug install), or
+    // every score came back zero.
+    //
+    // SAY SO, in the journal, not just in a tail nobody has open. The last time
+    // this state happened it was a zero multiplying every score
+    // (lib/formulas.js was asking about an unrooted mock server, so hackChance
+    // was always 0) and it went unnoticed for a whole run, because the old code
+    // quietly fell back to a hardcoded n00dles and looked like it was working.
+    if (now - s.lastIdleWarnAt >= H.idleWarnMs) {
+      s.lastIdleWarnAt = now;
+      const msg = `botnet idle: none of ${snap.rooted.length} rooted servers scored above zero ` +
+        `(${ns.format.ram(snap.capacity)} of botnet, hacking level ${snap.hacking}) - run /tools/hack-status.js`;
+      ns.print(`WARN: ${msg}`);
+      emitEvent(`[!] ${msg}`, "sys");
+    }
+    globalThis.gordHackState = {
+      mode: "Idle", target: "-", score: 0, formulas: F.hasFormulas(ns), batchId: s.batchId,
+      inFlight: 0, depth: 0, fraction: 0, batchRam: 0, launchIntervalMs: 0, weakenTimeMs: 0,
+      moneyPercent: 0, security: 0, minSecurity: 0, prepUntil: 0, targets: [],
+      claimedRam: 0, capacityRam: snap.capacity, freeRam: snap.totalUsable, updatedAt: now,
+    };
+    return "Idle";
   }
 
-  const math = targetMath(ns, target);
-  const state = readTarget(ns, target);
-  const open = s.inFlight.filter(b => b.target === target);
-  const openRam = open.reduce((sum, b) => sum + b.ram, 0);
-  const schedule = B.legSchedule({ ...math.times, spacing: H.batchSpacingMs, margin: H.launchMarginMs });
-  // RAM the botnet can devote to this target: free now plus what our own
-  // in-flight batches are holding.
-  const cycle = B.planCycle({
-    fractions: H.moneyFractions,
-    totalRam: snap.totalUsable + openRam,
-    lastLanding: schedule.lastLanding,
-    launchInterval: schedule.launchInterval,
-    maxDepth: H.maxDepth,
-    planFor: math.plan,
-  });
-
-  let mode;
-  if ((s.prepUntil.get(target) ?? 0) > now) {
-    mode = "Prepping";
-  } else if (open.length === 0 && !prepped(state)) {
-    const res = launchPrep(ns, snap, target, state, math, Infinity, now);
-    s.prepUntil.set(target, res.until);
-    mode = res.launched ? "Prepping" : "Waiting for RAM (prep)";
-    if (res.launched) {
-      ns.print(`[prep] ${target}: weaken x${res.weaken}, grow x${res.grow}${res.complete ? "" : " (partial)"} | ` +
-        `sec ${state.security.toFixed(2)}/${state.minSecurity} money ${((state.money / state.maxMoney) * 100).toFixed(0)}%`);
-    }
-  } else if (open.length > 0 && B.driftDetected({
-    ...state,
-    openMoneyFraction: Math.max(...open.map(b => b.moneyFraction)),
-    openSecurity: Math.max(...open.map(b => b.securityAdded)),
-    moneyTolerance: H.driftMoneyTolerance,
-    securityTolerance: H.driftSecurityTolerance,
-  })) {
-    // Stop launching; the window drains within a weaken-time and the branch
-    // above re-preps once nothing is in flight.
-    mode = "Draining (drift)";
-  } else if (!cycle) {
-    mode = "Waiting for RAM";
-  } else if (now >= s.nextLaunchAt && open.length < cycle.depth) {
-    const batch = launchBatch(ns, snap, target, cycle, schedule, s.batchId, now);
-    if (batch) {
-      s.batchId++;
-      s.inFlight.push(batch);
-      s.nextLaunchAt = now + cycle.launchInterval;
-      mode = "Batching";
-    } else {
-      // Free RAM is there in total but not in the right places (or an exec
-      // failed); try again next tick rather than waiting out a whole interval.
-      mode = "Waiting for RAM (fragmented)";
-    }
-  } else {
-    mode = open.length > 0 ? "Batching" : "Idle";
+  const primary = ranked[0].target;
+  if (primary !== s.currentTarget) {
+    if (s.currentTarget) ns.print(`[target] ${s.currentTarget} -> ${primary}`);
+    s.currentTarget = primary;
+    // In-flight batches on the old primary drain harmlessly; it may well still be
+    // serviced below, just no longer first.
+    s.nextLaunchAt.delete(primary);
   }
 
-  // Runner-up prep with RAM the primary's cycle doesn't need, so a target
-  // switch starts batching immediately instead of with a cold prep.
-  let runnerUp = null;
-  if (H.prepRunnerUp && cycle) {
-    runnerUp = ranked.find(r => r.target !== target)?.target ?? null;
-    if (runnerUp && (s.prepUntil.get(runnerUp) ?? 0) <= now) {
-      const primaryStillNeeds = Math.max(0, cycle.depth * cycle.plan.ram - openRam);
-      const spare = snap.totalUsable - primaryStillNeeds;
-      if (spare >= H.runnerUpMinRam) {
-        const st2 = readTarget(ns, runnerUp);
-        if (!prepped(st2)) {
-          const res = launchPrep(ns, snap, runnerUp, st2, targetMath(ns, runnerUp), spare, now);
-          s.prepUntil.set(runnerUp, res.until);
-        }
-      }
+  // Service targets in rank order, each budgeted with the RAM the ones above it
+  // don't claim. The best target takes the fattest bite it can (its own income is
+  // what the ranking maximises) and only what it CANNOT absorb spills down - so
+  // this never trades primary income for secondary income, it only stops the
+  // remainder from idling.
+  const serviced = [];
+  let claimed = 0;
+  for (const { target } of ranked) {
+    if (serviced.length >= H.maxTargets) break;
+    const budget = budgetRam - claimed;
+    // The primary always gets serviced, however little RAM there is; opening a
+    // further target is only worth it above minTargetRam.
+    if (serviced.length > 0 && budget < H.minTargetRam) break;
+    const res = serviceTarget(ns, s, snap, target, budget, now);
+    serviced.push(res);
+    if (res.cycle) {
+      claimed += res.claim;
+    } else if (serviced.length === 1) {
+      // The primary couldn't plan a cycle: it's mid-prep, or the botnet is too
+      // small for even its smallest batch. Either way its prep needs the RAM, so
+      // claim the lot and spill nothing - letting the targets below it take that
+      // RAM is how a primary prep ends up starved (the old runner-up rule was
+      // "only spill once the primary has a cycle").
+      claimed += budget;
     }
+    // A SECONDARY with no cycle just doesn't fit its budget; it claims nothing so
+    // a cheaper target further down can still use what's left.
   }
+
+  const head = serviced[0];
+  const mode = head.mode;
 
   if (mode !== s.lastMode || now - s.lastLogAt >= 30_000) {
     s.lastMode = mode;
     s.lastLogAt = now;
+    const cycle = head.cycle;
+    const state = head.state;
     ns.print(
-      `[${mode}] ${target} | in flight ${open.length}/${cycle?.depth ?? 0} | ` +
+      `[${mode}] ${head.target} | in flight ${head.open.length}/${cycle?.depth ?? 0} | ` +
       `bite ${cycle ? (cycle.plan.hackedFraction * 100).toFixed(2) : "-"}% = ${cycle ? ns.format.ram(cycle.plan.ram) : "-"} ` +
       `every ${cycle ? (cycle.launchInterval / 1000).toFixed(1) : "-"}s | ` +
       `free ${ns.format.ram(snap.totalUsable)} | money ${((state.money / Math.max(1, state.maxMoney)) * 100).toFixed(0)}% sec +${(state.security - state.minSecurity).toFixed(2)}`
     );
+    if (serviced.length > 1) {
+      ns.print(`[spill] ${serviced.slice(1).map(r => `${r.target} (${r.mode}, ${r.open.length}/${r.cycle?.depth ?? 0})`).join(", ")} | ` +
+        `claimed ${ns.format.ram(claimed)} of ${ns.format.ram(budgetRam)}`);
+    }
   }
 
   globalThis.gordHackState = {
     mode,
-    target,
-    score: ranked[0]?.score ?? 0,
-    formulas: math.useFormulas,
+    target: head.target,
+    score: ranked[0]?.score ?? 0,          // $/ms the primary is expected to earn
+    formulas: head.math.useFormulas,
     batchId: s.batchId,
-    inFlight: open.length,
-    depth: cycle?.depth ?? 0,
-    fraction: cycle?.plan.hackedFraction ?? 0,
-    batchRam: cycle?.plan.ram ?? 0,
-    launchIntervalMs: cycle?.launchInterval ?? 0,
-    weakenTimeMs: math.times.weakenTime,
-    moneyPercent: state.maxMoney > 0 ? state.money / state.maxMoney : 0,
-    security: state.security,
-    minSecurity: state.minSecurity,
-    prepUntil: s.prepUntil.get(target) ?? 0,
-    runnerUp,
+    inFlight: head.open.length,
+    depth: head.cycle?.depth ?? 0,
+    fraction: head.cycle?.plan.hackedFraction ?? 0,
+    batchRam: head.cycle?.plan.ram ?? 0,
+    launchIntervalMs: head.cycle?.launchInterval ?? 0,
+    weakenTimeMs: head.math.times.weakenTime,
+    moneyPercent: head.state.maxMoney > 0 ? head.state.money / head.state.maxMoney : 0,
+    security: head.state.security,
+    minSecurity: head.state.minSecurity,
+    prepUntil: s.prepUntil.get(head.target) ?? 0,
+    // Every target being worked this tick, primary first (the dashboard lists
+    // them), plus how much of the botnet they add up to.
+    targets: serviced.map(r => ({
+      target: r.target,
+      mode: r.mode,
+      inFlight: r.open.length,
+      depth: r.cycle?.depth ?? 0,
+      fraction: r.cycle?.plan.hackedFraction ?? 0,
+      ram: r.claim,
+    })),
+    claimedRam: claimed,
+    capacityRam: snap.capacity,
     freeRam: snap.totalUsable,
     updatedAt: now,
   };

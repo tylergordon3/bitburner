@@ -30,6 +30,22 @@ const RAM = { "/hacking/hack.js": 1.7, "/hacking/grow.js": 1.75, "/hacking/weake
  * @param {number} [opts.w1Ram] @param {number} [opts.w2Ram]
  * @param {boolean} [opts.formulas] expose a fake ns.formulas + Formulas.exe
  */
+/**
+ * The n00dles-alikes for a world (see opts.tinyCount). Money varies a little per
+ * target so their ranking is deterministic rather than tied.
+ * @param {{tinyCount?: number}} opts
+ */
+function tinyTargets(opts) {
+  const out = {};
+  for (let i = 0; i < (opts.tinyCount ?? 0); i++) {
+    out[`tiny${i + 1}`] = {
+      maxRam: 0, maxMoney: 5e7 * (1 - i * 0.1), minSec: 1, sec: 1,
+      money: 5e7 * (1 - i * 0.1), reqHack: 1, growth: 3000, speed: 0.05, hackMult: 20,
+    };
+  }
+  return out;
+}
+
 export function makeWorld(opts = {}) {
   const world = {
     clock: 0,
@@ -41,12 +57,24 @@ export function makeWorld(opts = {}) {
       w2: { maxRam: opts.w2Ram ?? 128, used: 0 },
       t1: { maxRam: 0, maxMoney: 1e9, minSec: 10, sec: opts.t1Sec ?? 10, money: opts.t1Money ?? 1e9, reqHack: 1, growth: 50 },
       t2: { maxRam: 0, maxMoney: 4e8, minSec: 20, sec: 40, money: 4e8 * 0.04, reqHack: 1, growth: 30 },
+      // opts.tinyCount adds N n00dles-alikes: little money, but legs land in a
+      // twentieth of the time and one hack thread takes 20x the bite - the
+      // cheapest dollars on the network, and each able to absorb only a sliver
+      // of a big botnet. Opt-in, so they only appear in the scenarios about
+      // that; opts.onlyTiny additionally removes t1/t2, modelling the low
+      // hacking level where nothing better is in reach.
+      ...tinyTargets(opts),
     },
     hackLandings: /** @type {{t: number, moneyFrac: number, secOver: number, target: string}[]} */ ([]),
     stolen: 0,
     execFailures: 0,
     log: /** @type {string[]} */ ([]),
   };
+
+  if (opts.onlyTiny) {
+    delete world.servers.t1;
+    delete world.servers.t2;
+  }
 
   // Like the game: a deleted server disappears from scan, and every call except
   // serverExists throws on it.
@@ -62,11 +90,11 @@ export function makeWorld(opts = {}) {
 
   // Models (shape-faithful, not the game's constants). All take a {sec, minSec,
   // money, maxMoney} view so the Formulas fake can evaluate them on a mock server.
-  const timeMult = s => 1 + 0.05 * (s.sec - s.minSec);
+  const timeMult = s => (s.speed ?? 1) * (1 + 0.05 * (s.sec - s.minSec));
   const hackTime = s => 10_000 * timeMult(s);
   const growTime = s => 32_000 * timeMult(s);
   const weakenTime = s => 40_000 * timeMult(s);
-  const hackPct = s => 0.002 * Math.max(0.2, 1 - 0.02 * (s.sec - s.minSec));
+  const hackPct = s => 0.002 * (s.hackMult ?? 1) * Math.max(0.2, 1 - 0.02 * (s.sec - s.minSec));
   const growPerThread = s => 0.0045 * Math.max(0.2, 1 - 0.02 * (s.sec - s.minSec));
   const growThreadsFor = (s, targetMoney) =>
     Math.log(targetMoney / Math.max(s.money, 1)) / Math.log(1 + growPerThread(s));
@@ -128,7 +156,13 @@ export function makeWorld(opts = {}) {
   }
 
   // The view lib/formulas.js's mock server presents, mapped onto the model.
-  const view = fs => ({ sec: fs.hackDifficulty, minSec: fs.minDifficulty, money: fs.moneyAvailable, maxMoney: fs.moneyMax });
+  const view = fs => ({
+    sec: fs.hackDifficulty, minSec: fs.minDifficulty, money: fs.moneyAvailable, maxMoney: fs.moneyMax,
+    // lib/formulas.js builds its mock off mockServer() and only copies the
+    // fields the real formulas read, so the fake's extra knobs are looked up
+    // from the host it names instead.
+    speed: world.servers[fs.hostname]?.speed, hackMult: world.servers[fs.hostname]?.hackMult,
+  });
 
   const ns = {
     args: [],
@@ -175,10 +209,17 @@ export function makeWorld(opts = {}) {
     },
     getPlayer: () => ({ money: 0, skills: { hacking: 100 } }),
     formulas: {
-      mockServer: () => ({ hostname: "", moneyMax: 0, moneyAvailable: 0, minDifficulty: 1, hackDifficulty: 1, requiredHackingSkill: 1, serverGrowth: 1 }),
+      // Like the game's: every field defaults to empty/false, INCLUDING
+      // hasAdminRights - a mock server is not rooted until the caller says so.
+      mockServer: () => ({ hostname: "", moneyMax: 0, moneyAvailable: 0, minDifficulty: 1, hackDifficulty: 1, requiredHackingSkill: 1, serverGrowth: 1, hasAdminRights: false }),
       hacking: {
         hackPercent: fs => hackPct(view(fs)),
-        hackChance: () => 1,
+        // The game's calculateHackingChance returns 0 outright for a server the
+        // player has no root on ("unrooted or unhackable"), and a mock server is
+        // unrooted by default. Modelled here because getting that field wrong is
+        // invisible - the chance just silently becomes 0 and every target scores
+        // nothing.
+        hackChance: fs => (fs.hasAdminRights ? 1 : 0),
         growThreads: (fs, _p, targetMoney) => Math.ceil(growThreadsFor(view(fs), targetMoney)),
         hackTime: fs => hackTime(view(fs)),
         growTime: fs => growTime(view(fs)),
@@ -188,6 +229,18 @@ export function makeWorld(opts = {}) {
   };
 
   return { world, ns, advance, deleteServer };
+}
+
+/** Total worker RAM in use across the fake network (home included). */
+export function usedRam(world) {
+  return Object.entries(world.servers)
+    .filter(([, s]) => (s.maxRam ?? 0) > 0)
+    .reduce((sum, [, s]) => sum + s.used, 0);
+}
+
+/** Distinct hosts currently running at least one worker script. */
+export function busyHosts(world) {
+  return [...new Set(world.jobs.map(j => j.host))].sort();
 }
 
 function freshState() {
@@ -301,6 +354,76 @@ export function defineScenarios(test, assert, base = {}) {
     for (const h of world.hackLandings) {
       assert.ok(h.moneyFrac >= 0.995 && h.secOver <= 0.01, `hack at t=${h.t} on unprepped state`);
     }
+  });
+
+  test("the cheapest dollar does not win the ranking - the biggest income does" + label, () => {
+    // tiny1 is 20x poorer than t1 but its batches cost a fraction as much and
+    // land 20x faster, so it wins $ per GB-second by a mile - and it is the
+    // wrong answer: it can only ever pay 0.48 x $50m every ~1.2s, while t1 pays
+    // 0.5 x $1b on the same cadence. Ranking by income has to prefer t1, and the
+    // spill order below depends on it (a cheap target servicing FIRST would
+    // starve the rich one).
+    const { world, ns, advance } = makeWorld({ ...base, tinyCount: 1, w1Ram: 4096, w2Ram: 4096 });
+    const sim = run(world, ns, advance, 3 * 60_000);
+
+    assert.equal(sim.state.target, "t1", `primary should be the richest target, got ${sim.state.target}`);
+    assert.ok(sim.state.targets.some(t => t.target === "tiny1"),
+      "the cheap target should still be worked with the RAM t1 cannot use");
+    assert.ok(sim.state.targets[0].target === "t1", "the primary must be serviced first");
+  });
+
+  test("a botnet with more RAM than its best target can absorb spills onto the next ones" + label, () => {
+    // The reported bug, in the shape it actually appears: at a low hacking level
+    // every reachable server is a n00dles-alike, one target's income is capped by
+    // timing alone (one batch per ~1.2s, at most maxHackFraction of its money),
+    // and the old single-target scheduler therefore left most of a 16TB fleet
+    // idle. Same world, same RAM, maxTargets 1 vs the configured value.
+    const worldOpts = { ...base, tinyCount: 5, onlyTiny: true, w1Ram: 8192, w2Ram: 8192 };
+    const measure = (maxTargets) => {
+      const saved = H.maxTargets;
+      H.maxTargets = maxTargets;
+      try {
+        const { world, ns, advance } = makeWorld(worldOpts);
+        const sim = run(world, ns, advance, 4 * 60_000);
+        return { world, sim, hosts: busyHosts(world), used: usedRam(world) };
+      } finally {
+        H.maxTargets = saved;
+      }
+    };
+
+    const one = measure(1);
+    const many = measure(H.maxTargets);
+
+    assert.ok(many.sim.state.targets.length >= 3,
+      `expected several targets in flight, got ${JSON.stringify(many.sim.state.targets.map(t => t.target))}`);
+    assert.ok(many.used > one.used * 2,
+      `RAM in use should climb with the extra targets: ${one.used.toFixed(0)}GB -> ${many.used.toFixed(0)}GB`);
+    assert.ok(many.world.stolen > one.world.stolen * 2,
+      `income should climb with the extra targets: $${one.world.stolen.toFixed(0)} -> $${many.world.stolen.toFixed(0)}`);
+
+    // Spilling must not cost correctness: every hack, on every target, still
+    // lands on a prepped server.
+    //
+    // The bar differs by math path, and only for targets this fast. Their whole
+    // cycle is ~2.6s, so the "current" state the ns.* fallback sizes against is
+    // never the prepped one - a previous batch's hack has always just landed, so
+    // hackAnalyze reads an elevated security, the hack it plans for is ~0.5%
+    // smaller than the one that lands, and the grow sized to match under-restores
+    // by that much every cycle. Money settles a few percent below max instead of
+    // at it. Nothing to do with the spill: the same target alone, with nothing to
+    // spill to, decays identically (verified), and the Formulas path - which is
+    // what runs in-game with SF-5 - sizes at the prepped state and holds 100.00%.
+    // Either way it stays inside the manager's own prepped threshold and nowhere
+    // near the drift detector, which is what this asserts.
+    const moneyBar = base.formulas ? 0.995 : H.prepMoneyThreshold;
+    assert.ok(many.world.hackLandings.length > 50, "hacks actually landed");
+    for (const h of many.world.hackLandings) {
+      assert.ok(h.moneyFrac >= moneyBar && h.secOver <= 0.01,
+        `hack on ${h.target} at t=${h.t} landed unprepped (${(h.moneyFrac * 100).toFixed(1)}%, +${h.secOver.toFixed(2)})`);
+    }
+    assert.equal(many.world.execFailures, 0, "exec was asked for more RAM than a host had");
+    assert.equal(many.sim.modes.filter(m => m.startsWith("Draining")).length, 0,
+      "drift detector tripped while spilling across targets");
   });
 
   test("an outside hit on the target is detected as drift, drained and re-prepped" + label, () => {
