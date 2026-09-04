@@ -15,7 +15,7 @@
 // Read-only: it buys nothing and changes nothing.
 
 import { CONFIG } from "../lib/config.js";
-import { safe } from "../lib/corp-lib.js";
+import { safe, designCity } from "../lib/corp-lib.js";
 
 const CO = CONFIG.corp;
 
@@ -128,6 +128,77 @@ export async function main(ns) {
         : "";
       ns.tprint(`BANKING for ${label}: ${$(corp.funds)} / ${$(saving)}${eta} - every cheaper`);
       ns.tprint("         purchase (warehouse levels, office seats, advert, upgrades) waits for it.");
+    }
+  }
+
+  // ── Product pipeline (the round-3+ gate) ───────────────────────────────────
+  // Rounds 3 and 4 are only accepted once Tobacco has finished 1 / 2 products
+  // (CONFIG.corp.productsBeforeRound), so a product pipeline that never starts
+  // freezes the whole corp at round 3 with Agriculture looking perfectly healthy.
+  // Nothing else in this tool would show that, hence this section.
+  ns.tprint("-".repeat(66));
+  const tobacco = corp.divisions.find(n => safe(() => c.getDivision(n).industry) === CO.tobaccoDivision.industry);
+  if (!tobacco) {
+    if (round >= CO.tobaccoStartRound) {
+      const cost = safe(() => c.getIndustryData(/** @type {any} */ (CO.tobaccoDivision.industry)).startingCost) ?? NaN;
+      ns.tprint(`PRODUCTS: no ${CO.tobaccoDivision.industry} division yet (round ${round} wants one). ` +
+        `Founding costs ${$(cost)}; corp holds ${$(corp.funds)}.`);
+    } else {
+      ns.tprint(`PRODUCTS: not due until round ${CO.tobaccoStartRound} (currently ${round}).`);
+    }
+  } else {
+    const d = safe(() => c.getDivision(tobacco));
+    const city = designCity(ns, tobacco);
+    const office = city ? safe(() => c.getOffice(tobacco, city)) : null;
+    ns.tprint(`PRODUCTS: ${tobacco} | design city ${city ?? "NONE - the division holds no city"}: ` +
+      `office ${office?.numEmployees ?? 0}/${office?.size ?? 0}` +
+      ` | slots ${(d?.products ?? []).length}/${d?.maxProducts ?? CO.maxProductsFallback}`);
+
+    for (const p of d?.products ?? []) {
+      const pd = safe(() => c.getProduct(tobacco, city, p));
+      if (!pd) { ns.tprint(`     ${p.padEnd(14)} (unreadable)`); continue; }
+      const pct = pd.developmentProgress ?? 0;
+      ns.tprint(`     ${p.padEnd(14)} ${pct >= 100 ? "finished" : `developing ${pct.toFixed(1)}%`}` +
+        ` | rating ${ns.format.number(pd.rating ?? 0)}` +
+        ` | invested ${$((pd.designInvestment ?? 0) + (pd.advertisingInvestment ?? 0))}`);
+    }
+
+    // The gate that actually decides whether a NEW product is ever started:
+    // corp-steady spends CO.productInvestFraction of LIQUID funds and refuses
+    // anything below CO.productInvestMin, so the pipeline needs
+    // productInvestMin / productInvestFraction on hand in a single tick.
+    // The FIRST product ignores productInvestMin (it's a round gate, not a
+    // quality decision), so the floor - and the funds it implies - only bind
+    // once the division already has one.
+    const floor = (d?.products ?? []).length ? CO.productInvestMin : 0;
+    const invest = Math.min(corp.funds * CO.productInvestFraction, CO.productInvestCap);
+    ns.tprint(`     next product spends ${(CO.productInvestFraction * 100).toFixed(0)}% of funds: ` +
+      `${$(corp.funds)} -> ${$(invest)}` +
+      (floor > 0 ? ` (floor ${$(floor)}, i.e. ${$(floor / CO.productInvestFraction)} liquid)` : " (no floor: first product)") +
+      (invest <= floor ? "  <-- BLOCKED, no new product will be started" : ""));
+
+    if (round <= CO.investmentRounds) {
+      const need = CO.productsBeforeRound[round] ?? 0;
+      if (need) {
+        let finished = 0;
+        for (const p of d?.products ?? []) {
+          const pd = safe(() => c.getProduct(tobacco, city, p));
+          if (pd && (pd.developmentProgress ?? 0) >= 100) finished++;
+        }
+        ns.tprint(`     round ${round} needs ${need} finished product(s); have ${finished}.`);
+      }
+    }
+
+    // Every per-cycle Tobacco action (products, Wilson, Advert) lives in
+    // lib/corp-steady.js. If that script isn't placed, Agriculture still builds
+    // out through the rotation phases while Tobacco does literally nothing -
+    // which looks identical to a blocked pipeline from the outside.
+    const st = globalThis.gordCorpState;
+    const age = st?.updatedAt ? (Date.now() - st.updatedAt) / 1000 : Infinity;
+    if (!(age < 60)) {
+      ns.tprint(`     WARNING: corp-steady has not published state ${
+        Number.isFinite(age) ? `for ${age.toFixed(0)}s` : "at all"
+      } - the product/Wilson/Advert loop is probably not running.`);
     }
   }
 

@@ -288,10 +288,36 @@ test("the capacity handshake opens boost ordering at the round's real optimum", 
   assert.deepEqual(boostOrderTargets(fundsNs(50e9), BOOSTS, 1), BOOSTS);
 });
 
-test("past round 2 the gate is gone - boosts are ordered regardless", () => {
+test("past round 2 the capacity gate is gone - surplus is ordered on sight", () => {
   reset();
-  globalThis.gordCorpCheapestStep = 1.145e9;
+  globalThis.gordCorpCheapestStep = 1.145e9; // would HOLD boosts in rounds 1-2
   assert.deepEqual(boostOrderTargets(fundsNs(50e9), BOOSTS, CO.boostAfterBuildoutRound + 1), BOOSTS);
+});
+
+// Past round 2 the manual's debt allowance ends, and an unconditional order is a
+// spender with no ceiling: a BN3 corp holding $3.4b went to -$17.3b in one pass
+// when two warehouse levels enlarged its boost targets. That blocked the first
+// product outright - its budget is a share of LIQUID funds - and pushed the city
+// it was banking for from 15 minutes away to 1.2 hours. Rounds 1-2 are unaffected;
+// finishing them in the red is the manual's own plan.
+test("past round 2 boosts never dig the corp deeper into debt", () => {
+  reset();
+  const round = CO.boostAfterBuildoutRound + 1;
+  assertHeld(boostOrderTargets(fundsNs(-17.281e9), BOOSTS, round), "already in debt");
+  assertHeld(boostOrderTargets(fundsNs(0), BOOSTS, round),
+    "at exactly $0 the whole pile would still be bought on credit");
+});
+
+test("past round 2 boosts queue behind the buildout objective, not ahead of it", () => {
+  reset();
+  const round = CO.boostAfterBuildoutRound + 1;
+  const ns = fundsNs(3.406e9);
+  assert.deepEqual(boostOrderTargets(ns, BOOSTS, round), BOOSTS, "surplus with nothing banked");
+  globalThis.gordCorpSavingFor = 9e9; // Tobacco's next city
+  assertHeld(boostOrderTargets(ns, BOOSTS, round), "banking for the product division's city");
+  // ...and flow again once the corp is genuinely clear of reserve + objective.
+  assert.deepEqual(boostOrderTargets(fundsNs(50e9), BOOSTS, round), BOOSTS);
+  globalThis.gordCorpSavingFor = undefined;
 });
 
 test("before corp-expand has published a step, boosts hold - the conservative side", () => {
