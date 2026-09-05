@@ -54,9 +54,18 @@ function homeFreeRam(ns) {
  * rooted server we can reach. Neither touches Singularity, so both are cheap.
  * @param {NS} ns
  */
+let _managerWarnedAt = 0;
+
 function ensureMoneyEngine(ns) {
   if (ns.fileExists(P.manager, HOME)) {
-    if (!ns.scriptRunning(P.manager, HOME)) ns.run(P.manager, 1);
+    if (!ns.scriptRunning(P.manager, HOME) && ns.run(P.manager, 1) === 0) {
+      // Say so: a failed launch here used to be silent, and a home with no
+      // botnet looks exactly like a home with an idle one.
+      if (Date.now() - _managerWarnedAt > 60_000) {
+        _managerWarnedAt = Date.now();
+        ns.tprint(`WARN: could not start ${P.manager} on home - needs ${ns.format.ram(scriptRamSafe(ns, P.manager))}, ${ns.format.ram(homeFreeRam(ns))} free.`);
+      }
+    }
     return;
   }
 
@@ -81,12 +90,47 @@ function ensureMoneyEngine(ns) {
 }
 
 /**
+ * Where hacknet SERVERS are the economy (BN9: hacking earns ~0.1% of normal),
+ * the cold boot would crawl on the botnet alone, so the fleet manager (~7GB)
+ * runs from the first tick. Placed like the daemon's helpers: the roomiest
+ * rooted off-home host first, so home stays the botnet's, and home only as the
+ * fallback. Never on a hacknet server itself - a script there cuts the hash
+ * rate it exists to grow. Only nodes whose config turns it on (BITNODE[9]).
+ * @param {NS} ns @param {number} node
+ */
+function ensureHacknetEngine(ns, node) {
+  if (!forNode(node).hacknet.enabled) return;
+  if (!ns.fileExists(P.hacknet, HOME)) return;
+
+  const rooted = allServers(ns).filter(s => ns.hasRootAccess(s));
+  if (rooted.some(s => ns.scriptRunning(P.hacknet, s))) return;
+
+  const ram = scriptRamSafe(ns, P.hacknet);
+  const hosts = rooted
+    .filter(s => s !== HOME && !s.startsWith(CONFIG.hacking.excludeTargetPrefix))
+    .map(s => ({ s, free: ns.getServerMaxRam(s) - ns.getServerUsedRam(s) }))
+    .filter(h => h.free >= ram)
+    .sort((a, b) => b.free - a.free);
+  for (const { s } of hosts) {
+    ns.scp(ns.ls(HOME, ".js"), s, HOME);
+    if (ns.exec(P.hacknet, s, 1, node, 1) !== 0) {
+      ns.tprint(`Launched ${P.hacknet} on ${s} - growing the hacknet fleet from the start.`);
+      return;
+    }
+  }
+  if (homeFreeRam(ns) >= ram && ns.run(P.hacknet, 1, node, 1) !== 0) {
+    ns.tprint(`Launched ${P.hacknet} on home - growing the hacknet fleet from the start.`);
+  }
+}
+
+/**
  * Tear down the money engine so the daemon boots into a clean home. The daemon
- * restarts the botnet itself once it's up.
+ * restarts the botnet itself once it's up (and the hacknet manager, off-home).
  * @param {NS} ns
  */
 function stopMoneyEngine(ns) {
   ns.scriptKill(P.manager, HOME);
+  ns.scriptKill(P.hacknet, HOME);
   ns.scriptKill(P.worker, HOME);
   ns.scriptKill(P.gangBoot, HOME);
   ns.scriptKill(P.legacyStartup, HOME);
@@ -153,6 +197,7 @@ export async function main(ns) {
 
   while (true) {
     ensureMoneyEngine(ns);
+    ensureHacknetEngine(ns, node);
 
     // Grow home RAM as aggressively as money allows. At SF4.3 Singularity is 1x
     // RAM; upgradeHomeRam and the daemon are the only Singularity the driver

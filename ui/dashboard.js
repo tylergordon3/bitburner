@@ -9,6 +9,8 @@
 //   CORP    - the corporation card (ui/bn3.js).
 //   SLEEVE  - the duplicate-sleeve roster/status card (ui/bn10.js), on any node
 //             with BN10/SF10 sleeves.
+//   HACKNET - the hacknet-server fleet + hash cards (ui/bn9.js), wherever
+//             lib/hacknet.js runs (BN9 / SF9).
 //
 // The header also carries the switches (TOGGLES / toggleButton) - the only
 // controls in here that change what the BOT does rather than what the HUD shows:
@@ -33,6 +35,7 @@ import { COLORS, el, card, label, progressBar, stat, statRow, formatDuration, sh
 import { extraCards as gangExtraCards } from "./bn5.js";
 import { extraCards as corpExtraCards } from "./bn3.js";
 import { extraCards as sleeveExtraCards } from "./bn10.js";
+import { extraCards as hacknetExtraCards } from "./bn9.js";
 import { updateJournal, journalPanel } from "./journal.js";
 
 // Everything below comes from CONFIG.ui / CONFIG.factions - see lib/config.js.
@@ -61,6 +64,7 @@ const TABS = [
   { id: "gang",    label: "GANG" },
   { id: "corp",    label: "CORP" },
   { id: "sleeve",  label: "SLEEVE" },
+  { id: "hacknet", label: "HACKNET" },
 ];
 
 // Module UI state. The HUD paints via the script loop (clearLog + printRaw); a
@@ -335,6 +339,7 @@ function activePanel(ns, C) {
     if (activeTab === "gang")    return wrapCards(gangPanel(ns, C), C, "No gang yet - grinding toward one (watch the karma line in STATS / JOURNAL).");
     if (activeTab === "corp")    return wrapCards(corpPanel(ns, C), C, "No corporation in this BitNode.");
     if (activeTab === "sleeve")  return wrapCards(sleevePanel(ns, C), C, "No sleeve activity (needs BN10 or SF10, and a host with ~72GB free for the manager).");
+    if (activeTab === "hacknet") return wrapCards(hacknetPanel(ns, C), C, "No hacknet-server manager running (BN9 / SF9 only - lib/hacknet.js).");
     if (!statsData) return el("div", { style: { color: C.dim, fontSize: "13px", padding: "8px 2px" } }, "Gathering stats...");
     return el("div", {}, ...statsPanel(ns, C, statsData));
   } catch (e) {
@@ -362,6 +367,11 @@ function corpPanel(ns, C) {
 /** @param {NS} ns */
 function sleevePanel(ns, C) {
   try { return sleeveExtraCards(ns, C) ?? []; } catch { return []; }
+}
+
+/** @param {NS} ns */
+function hacknetPanel(ns, C) {
+  try { return hacknetExtraCards(ns, C) ?? []; } catch { return []; }
 }
 
 // ── STATS tab ─────────────────────────────────────────────────────────────────

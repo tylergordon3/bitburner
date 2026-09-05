@@ -113,6 +113,9 @@ Each bitnode gets a thin `bnX/daemon.js` orchestrator; everything reusable lives
   creates the gang, then launches `lib/gang.js` on whatever server has ~35GB free.
 - `lib/gang.js` — standalone BN-agnostic gang manager (recruit/ascend/equip/tasks/territory);
   reusable in any bitnode with SF2 gang access.
+- `bn9/daemon.js` — BN9 (Hacktocracy): the hacknet-server fleet is the economy (see
+  below); installs are batched bigger, hashes are sold before every reset, and idle
+  time studies toward the world daemon's doubled hacking gate.
 
 [`lib/daemon-lib.js`](lib/daemon-lib.js) holds the building blocks that are
 identical across all five: rooting, darkweb buys, accepting invites, off-home helper
@@ -149,6 +152,51 @@ Grafting, Bladeburner, Hacknet-Server, Stanek — is available when you're in it
 BitNode *or* hold its Source-File, so this replaces scattered `try/catch` probes
 with `getCapabilities(ns)`. The decision logic is pure (`sourceFileLevel`,
 `hasApiAccess`, `singularityRamMultiplier`, `capabilitiesFromReset`) and unit-tested.
+
+## Hacknet servers (BN9)
+
+BN9 cuts hacking income to ~0.1% of normal (`ScriptHackMoney` 0.1 on a
+`ServerMaxMoney` of 0.01), hacking exp to 5%, crime money in half, forbids purchased
+servers and prices home RAM at 5x — and doubles the world daemon's hacking gate to
+6000. What it gives back is hacknet **servers**, whose hashes sell for $1M per 4 and
+buy the upgrades that make the node beatable. [`lib/hacknet.js`](lib/hacknet.js) is
+the fleet manager, an off-home helper `early/driver.js` starts on the very first
+tick there and `bn9/daemon.js` keeps as a *required* helper; every decision is the
+pure, unit-tested [`lib/hacknet-logic.js`](lib/hacknet-logic.js):
+
+- **Fleet growth** ranks every purchasable step (new server, +1 level, x2 RAM, +1 core)
+  by *marginal hashes per dollar* (`rankUpgrades`, using `ns.formulas.hacknetServers`
+  when Formulas.exe is present) and buys the best one that fits the budget **and pays
+  for itself** — at the sell-for-money rate — within `hacknet.maxPaybackMs`
+  (`pickUpgrade`). That horizon is the only brake: the first servers pay back in
+  seconds, a maxed fleet's last cores in days. While the daemon is saving for an aug
+  the horizon shrinks to `savingPaybackMs`, so only upgrades that delay the aug by
+  less than they speed up everything after it still go through. Cache is bought when
+  a wanted hash investment can't fit the capacity we have.
+- **Hash spending** (`planHashSpend`) sells everything not earmarked — a full cache is
+  production thrown away — and takes the *investments* in priority order when
+  affordable: `Improve Studying` / `Improve Gym Training` while the player is doing
+  exactly that (hacking level is the node's real gate), `Reduce Minimum Security` /
+  `Increase Maximum Money` on the batcher's primary target, a rate-limited
+  `Generate Coding Contract` for `lib/contracts.js`. The best unaffordable one is
+  saved toward only while it costs at most half the cache. The daemon's
+  `gordHashHints` flips it all to *cash priority* (sell every hash) while cash is the
+  bottleneck: before TOR, during an invite hoard, and while an aug is paid up in rep
+  but not in money.
+- **Installs wipe the fleet**, every hash upgrade and (as always) hacking exp, so
+  `BITNODE[9]` batches installs bigger and rarer, and the daemon's `beforeInstall` hook
+  (new in `lib/daemon-core.js`, honoured by `maybeInstall`) asks the helper to sell
+  every hash and holds the reset until it answers (`gordHashDumpRequested` /
+  `gordHashDumpDone`, with a timeout so a dead helper can't block a reset).
+- **Hacknet servers are rooted RAM** the botnet would otherwise fill, and a script on
+  one cuts its hash rate in proportion — so the daemon's `reserveHosts` hook (also new)
+  adds them to `gordReservedHosts`. Flip `hacknet.botnetMayUse` to hand them over.
+- The HUD gets a **HACKNET** tab ([`ui/bn9.js`](ui/bn9.js)): cache fill, rate as
+  cash, what the hashes are becoming, the multiplier levels, and the fleet.
+
+`lib/econ.js`'s cheap hacknet-*node* buyer is switched off there (`econ.hacknetNodes`)
+so the two never compete for the same money; it now takes the node number as exec
+arg [1] to resolve that.
 
 ## Coding contracts
 
@@ -313,7 +361,7 @@ capabilities plus contract-solver coverage. It makes no purchases and never rese
 ## Testing
 
 The pure (`ns`-free) logic modules — `lib/capabilities.js`, `lib/contract-solvers.js`,
-`lib/grafting-logic.js`, `lib/crime-logic.js`, `lib/batch-logic.js` — have Node unit tests under
+`lib/grafting-logic.js`, `lib/crime-logic.js`, `lib/batch-logic.js`, `lib/hacknet-logic.js` — have Node unit tests under
 [`tests/`](tests/). With Node ≥20:
 
 ```bash
