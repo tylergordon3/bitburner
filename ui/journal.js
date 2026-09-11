@@ -396,6 +396,23 @@ function narrate(ns, state) {
     return { key: `crime-${aug ?? "money"}`, text: `Committing ${crime}${chance} to earn ${reason || "money"}.` };
   }
 
+  // Bladeburner (bn6/daemon.js). Keyed by PHASE, not by contract or rest cycle:
+  // the loop switches contracts and lends its rest phases to faction work every
+  // few minutes, and one journal line per switch would bury everything else.
+  if (a === "Bladeburner" || a === "Faction Work (blade resting)") {
+    const phase = state.bladePhase ?? "ops";
+    const b = globalThis.gordBladeState;
+    const rank = b ? ` (rank ${fmt(b.rank)})` : "";
+    if (phase === "join") return { key: "blade-join", text: `Joined the Bladeburner division.` };
+    if (phase.startsWith("blackop-")) {
+      return { key: `blade-${phase}`, text: `Attempting the black op ${phase.slice(8)}${rank}.` };
+    }
+    if (phase.startsWith("general-")) {
+      return { key: `blade-${phase}`, text: `Bladeburner: ${phase.slice(8)} - ${b?.want?.reason ?? d}.` };
+    }
+    return { key: "blade-ops", text: `Running Bladeburner contracts and operations for rank${rank}, lending rest phases to faction work.` };
+  }
+
   // Gang faction rep is passive (comes from respect, not player work)
   if (a === "Gang Rep (passive)") {
     return { key: `gangrep-${faction}-${aug}`, text: `Letting gang respect build ${faction}'s reputation toward ${aug}.` };

@@ -6,12 +6,13 @@
 // usual `killall; run /early/driver.js` restart leaves the old copies running, with
 // the old code, on whatever purchased server they landed on.
 //
-// That's mostly harmless, but not for the two helpers that can END A BITNODE:
-// lib/backdoor.js (a backdoor on w0r1d_d43m0n IS the finish) and lib/finish-bn.js.
-// After syncing a change to either, run this BEFORE restarting the daemon.
+// That's mostly harmless, but not for the helpers that can END A BITNODE:
+// lib/backdoor.js (a backdoor on w0r1d_d43m0n IS the finish), lib/finish-bn.js, and
+// lib/bladeburner.js (Operation Daedalus, BN6). After syncing a change to any of
+// them, run this BEFORE restarting the daemon.
 //
-//   run /tools/kill-helpers.js        - the two BitNode-ending helpers (default)
-//   run /tools/kill-helpers.js all    - those plus the botnet manager, sleeves/gang/corp/grafting
+//   run /tools/kill-helpers.js        - the BitNode-ending helpers (default)
+//   run /tools/kill-helpers.js all    - those plus the botnet manager, sleeves/gang/corp/grafting/blade upkeep
 //
 // The botnet manager (hacking/manager.js) is on the `all` list for the same
 // reason: it runs off-home, so `killall` on home leaves the OLD manager running
@@ -29,8 +30,8 @@ const P = CONFIG.paths;
 export async function main(ns) {
   const all = String(ns.args[0] ?? "") === "all";
   const scripts = all
-    ? [P.backdoor, P.finishBn, P.manager, P.sleeves, P.sleeveShop, P.gang, P.grafting, P.corpSteady, P.corpUpkeep]
-    : [P.backdoor, P.finishBn];
+    ? [P.backdoor, P.finishBn, P.bladeburner, P.manager, P.sleeves, P.sleeveShop, P.gang, P.grafting, P.corpSteady, P.corpUpkeep, P.bladeUpkeep]
+    : [P.backdoor, P.finishBn, P.bladeburner];
 
   let killed = 0;
   for (const host of allServers(ns)) {

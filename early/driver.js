@@ -100,12 +100,42 @@ function ensureMoneyEngine(ns) {
  */
 function ensureHacknetEngine(ns, node) {
   if (!forNode(node).hacknet.enabled) return;
-  if (!ns.fileExists(P.hacknet, HOME)) return;
+  launchOffHomeFirst(ns, P.hacknet, [node, 1], "growing the hacknet fleet from the start");
+}
+
+/**
+ * Bladeburner nodes (CONFIG.bladeburner.enabled - BN6): gym to the division's
+ * join gate (100 in every combat stat) and join, via the ~13GB one-shot
+ * early/blade-boot.js. A new BitNode resets the division, so this is part of
+ * every cold boot there; an aug install doesn't, so it's a no-op after one.
+ * @param {NS} ns @param {number} node
+ */
+function ensureBladeBoot(ns, node) {
+  if (!forNode(node).bladeburner.enabled) return;
+  if (ns.bladeburner.inBladeburner()) {
+    globalThis.gordReservedRam = {};
+    return;
+  }
+  const up = launchOffHomeFirst(ns, P.bladeBoot, [node], "training toward the Bladeburner division");
+  // Early on the botnet fills every host; until the boot script lands, have
+  // hacking/manager.js keep its size free on home (same mechanism as the gang's).
+  globalThis.gordReservedRam = up ? {} : { home: scriptRamSafe(ns, P.bladeBoot) };
+}
+
+/**
+ * Launch a cold-boot engine unless it's already running anywhere: the roomiest
+ * rooted off-home host first, so home stays the botnet's, home as the fallback.
+ * Never on a hacknet server - a script there cuts its hash rate.
+ * @param {NS} ns @param {string} script @param {any[]} args @param {string} why
+ * @returns {boolean} whether it's running now
+ */
+function launchOffHomeFirst(ns, script, args, why) {
+  if (!ns.fileExists(script, HOME)) return false;
 
   const rooted = allServers(ns).filter(s => ns.hasRootAccess(s));
-  if (rooted.some(s => ns.scriptRunning(P.hacknet, s))) return;
+  if (rooted.some(s => ns.scriptRunning(script, s))) return true;
 
-  const ram = scriptRamSafe(ns, P.hacknet);
+  const ram = scriptRamSafe(ns, script);
   const hosts = rooted
     .filter(s => s !== HOME && !s.startsWith(CONFIG.hacking.excludeTargetPrefix))
     .map(s => ({ s, free: ns.getServerMaxRam(s) - ns.getServerUsedRam(s) }))
@@ -113,14 +143,16 @@ function ensureHacknetEngine(ns, node) {
     .sort((a, b) => b.free - a.free);
   for (const { s } of hosts) {
     ns.scp(ns.ls(HOME, ".js"), s, HOME);
-    if (ns.exec(P.hacknet, s, 1, node, 1) !== 0) {
-      ns.tprint(`Launched ${P.hacknet} on ${s} - growing the hacknet fleet from the start.`);
-      return;
+    if (ns.exec(script, s, 1, ...args) !== 0) {
+      ns.tprint(`Launched ${script} on ${s} - ${why}.`);
+      return true;
     }
   }
-  if (homeFreeRam(ns) >= ram && ns.run(P.hacknet, 1, node, 1) !== 0) {
-    ns.tprint(`Launched ${P.hacknet} on home - growing the hacknet fleet from the start.`);
+  if (homeFreeRam(ns) >= ram && ns.run(script, 1, ...args) !== 0) {
+    ns.tprint(`Launched ${script} on home - ${why}.`);
+    return true;
   }
+  return false;
 }
 
 /**
@@ -135,10 +167,12 @@ function stopMoneyEngine(ns) {
   ns.scriptKill(P.gangBoot, HOME);
   ns.scriptKill(P.legacyStartup, HOME);
 
+  // blade-boot too: the daemon trains toward the division itself, and two
+  // scripts re-issuing different gym workouts would just fight over the slot.
   for (const server of allServers(ns)) {
     if (!ns.hasRootAccess(server)) continue;
     for (const p of ns.ps(server)) {
-      if ([P.hack, P.grow, P.weaken, P.worker].includes(p.filename)) ns.kill(p.pid);
+      if ([P.hack, P.grow, P.weaken, P.worker, P.bladeBoot].includes(p.filename)) ns.kill(p.pid);
     }
   }
 }
@@ -198,6 +232,7 @@ export async function main(ns) {
   while (true) {
     ensureMoneyEngine(ns);
     ensureHacknetEngine(ns, node);
+    ensureBladeBoot(ns, node);
 
     // Grow home RAM as aggressively as money allows. At SF4.3 Singularity is 1x
     // RAM; upgradeHomeRam and the daemon are the only Singularity the driver

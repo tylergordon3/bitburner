@@ -116,6 +116,21 @@ Each bitnode gets a thin `bnX/daemon.js` orchestrator; everything reusable lives
 - `bn9/daemon.js` — BN9 (Hacktocracy): the hacknet-server fleet is the economy (see
   below); installs are batched bigger, hashes are sold before every reset, and idle
   time studies toward the world daemon's doubled hacking gate.
+- `bn6/daemon.js` — BN6 (Bladeburners): the cold boot already gyms every combat stat
+  to 100 and joins the division ([`early/blade-boot.js`](early/blade-boot.js), launched
+  by the driver wherever `bladeburner.enabled`), then the daemon gives the player's
+  work slot to Bladeburner. Rest phases (stamina regenerates passively either way)
+  run no-stamina actions — Field Analysis, Recruitment, Diplomacy — not the regen
+  chamber. The work runs in two
+  off-home helpers — [`lib/bladeburner.js`](lib/bladeburner.js) (contracts, operations,
+  black ops, stamina rests, per-action level control; placed ahead of the sleeve
+  manager) and [`lib/blade-upkeep.js`](lib/blade-upkeep.js) (skill points, city, the
+  Bladeburners faction) — with the decisions in the pure, tested
+  [`lib/bladeburner-logic.js`](lib/bladeburner-logic.js). The slot is lent to faction
+  work only while Bladeburner rests; other factions' rep is otherwise the sleeves'
+  job. Operation Daedalus (which ends the node) is held unless FINISH is on and a
+  next node is passed (`run bn6/daemon.js 7`); then `lib/finish-bn.js` runs in
+  "blade" mode. Once The Blade's Simulacrum is installed, both run side by side.
 
 [`lib/daemon-lib.js`](lib/daemon-lib.js) holds the building blocks that are
 identical across all five: rooting, darkweb buys, accepting invites, off-home helper
