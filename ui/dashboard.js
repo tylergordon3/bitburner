@@ -12,7 +12,7 @@
 //   HACKNET - the hacknet-server fleet + hash cards (ui/bn9.js), wherever
 //             lib/hacknet.js runs (BN9 / SF9).
 //   BLADE   - the Bladeburner rank / black-op / skills cards (ui/bn6.js),
-//             wherever lib/bladeburner.js runs (BN6).
+//             wherever lib/bladeburner.js runs (BN6/7).
 //
 // The header also carries the switches (TOGGLES / toggleButton) - the only
 // controls in here that change what the BOT does rather than what the HUD shows:
@@ -344,7 +344,7 @@ function activePanel(ns, C) {
     if (activeTab === "corp")    return wrapCards(corpPanel(ns, C), C, "No corporation in this BitNode.");
     if (activeTab === "sleeve")  return wrapCards(sleevePanel(ns, C), C, "No sleeve activity (needs BN10 or SF10, and a host with ~72GB free for the manager).");
     if (activeTab === "hacknet") return wrapCards(hacknetPanel(ns, C), C, "No hacknet-server manager running (BN9 / SF9 only - lib/hacknet.js).");
-    if (activeTab === "blade")   return wrapCards(bladePanel(ns, C), C, "No Bladeburner loop running (BN6 - lib/bladeburner.js).");
+    if (activeTab === "blade")   return wrapCards(bladePanel(ns, C), C, "No Bladeburner loop running (BN6/7 - lib/bladeburner.js).");
     if (!statsData) return el("div", { style: { color: C.dim, fontSize: "13px", padding: "8px 2px" } }, "Gathering stats...");
     return el("div", {}, ...statsPanel(ns, C, statsData));
   } catch (e) {

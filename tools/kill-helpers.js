@@ -8,7 +8,7 @@
 //
 // That's mostly harmless, but not for the helpers that can END A BITNODE:
 // lib/backdoor.js (a backdoor on w0r1d_d43m0n IS the finish), lib/finish-bn.js, and
-// lib/bladeburner.js (Operation Daedalus, BN6). After syncing a change to any of
+// lib/bladeburner.js (Operation Daedalus, BN6/7). After syncing a change to any of
 // them, run this BEFORE restarting the daemon.
 //
 //   run /tools/kill-helpers.js        - the BitNode-ending helpers (default)

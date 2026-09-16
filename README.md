@@ -131,6 +131,21 @@ Each bitnode gets a thin `bnX/daemon.js` orchestrator; everything reusable lives
   job. Operation Daedalus (which ends the node) is held unless FINISH is on and a
   next node is passed (`run bn6/daemon.js 7`); then `lib/finish-bn.js` runs in
   "blade" mode. Once The Blade's Simulacrum is installed, both run side by side.
+  The strategy itself is the shared [`lib/blade-daemon.js`](lib/blade-daemon.js);
+  `bn6/daemon.js` is `runBladeDaemon(ns, forNode(6))`.
+- `bn7/daemon.js` — BN7 (Bladeburners 2079): the same engine as BN6
+  (`runBladeDaemon(ns, forNode(7))`) with Bladeburner's own penalties priced into
+  `BITNODE[7]`. Verified against bitburner-src: BN6's table plus `ScriptHackMoney`
+  0.5, `AugmentationMoneyCost` 3, `BladeburnerSkillCost` 2 and 4S at 2x; `BladeburnerRank`
+  stays 0.6. So skill points concentrate on the every-action levers (Blade's Intuition,
+  Overclock, Reaper, Evasive System, Digital Observer; Datamancer 0, Tracer capped),
+  Hands of Midas keeps a real weight because contract money is real income here,
+  and installs batch bigger (`augs.install`). SF7 buffs the four `bladeburner_*`
+  multipliers (+8/12/14%) and SF7.3 installs the Simulacrum on joining, so by
+  default the node **re-enters itself until SF7.3** (`bladeburner.reenterUntilSF`,
+  `plannedNodeAfterBlade`); the HUD's FINISH toggle still holds Operation Daedalus,
+  and a daemon arg overrides the plan. Sleeves work for the division on both
+  Bladeburner nodes — see [Sleeves](#sleeves).
 
 [`lib/daemon-lib.js`](lib/daemon-lib.js) holds the building blocks that are
 identical across all five: rooting, darkweb buys, accepting invites, off-home helper
@@ -245,6 +260,24 @@ earns. What "earns" means depends on the gang:
   back to its own money-best crime, then the gym. Studying is deliberately *not*
   mirrored by default (`sleeves.mirrorStudy`): tuition per sleeve, no income, and the
   sleeve's own crime ladder both earns and syncs combat exp back.
+- **Bladeburner** — on the Bladeburner nodes (BN6/7, `bladeburner.enabled`), once
+  the player is in the division and the action loop is publishing. Contract and
+  operation *attempts* are those nodes' real time gate (natural regen is one
+  `growthFunction()` per 480s), and a sleeve on **Infiltrate Synthoids** adds
+  `n^-0.5 / 2` attempts to every contract and operation each minute (`sqrt(n)/2` in
+  total for `n` sleeves). A sleeve that clears `sleeves.blade.minContractChance` on a
+  contract — its *own* stats, via `getActionEstimatedSuccessChance(..., sleeveNumber)`
+  — runs **Take on contracts** instead, which pays the player's rank exactly as the
+  player's attempt would (no money; one sleeve per contract name, so at most three).
+  The split is the pure `planSleeveBladeWork` in
+  [`lib/bladeburner-logic.js`](lib/bladeburner-logic.js): sleeves keep a still-viable
+  contract, each unclaimed contract goes deepest-queue-first to the best free sleeve,
+  everyone else infiltrates. Attempt counts come from `gordBladeState.contractCounts`
+  (published by `lib/bladeburner.js`) so the manager pays for one Bladeburner getter,
+  not three. It outranks mirroring but not the gang bootstrap: a couple of hours of
+  sleeve homicide buys an income that lasts the whole node. "Support main sleeve" is
+  deliberately unused — it counts the sleeve into `teamSize`, which the upkeep sends on
+  black ops.
 
 **Augmentations** are bought everywhere, cheapest-first across the roster, once cash
 clears `sleeves.augMinMoney`. **Buying sleeves and memory** only works in BitNode 10,

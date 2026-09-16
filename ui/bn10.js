@@ -140,6 +140,7 @@ function modeLine(C, s) {
 // human-readable action string.
 const KIND_COLORS = {
   crime: "green",
+  blade: "green",
   faction: "purple",
   company: "purple",
   class: "blue",

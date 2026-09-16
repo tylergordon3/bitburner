@@ -12,6 +12,10 @@ import {
   chooseSkill,
   chooseCity,
   restAction,
+  planSleeveBladeWork,
+  plannedNodeAfterBlade,
+  SLEEVE_TAKE_CONTRACTS,
+  SLEEVE_INFILTRATE,
 } from "../lib/bladeburner-logic.js";
 import { CONFIG } from "../lib/config.js";
 
@@ -155,9 +159,95 @@ test("every configured skill and action list is well-formed", () => {
   assert.ok(B.restBelow > 0.5);
 });
 
-test("only BN6 boots into Bladeburner by default", async () => {
+test("only the Bladeburner nodes boot into Bladeburner by default", async () => {
   const { forNode } = await import("../lib/config.js");
   assert.equal(forNode(6).bladeburner.enabled, true);
+  assert.equal(forNode(7).bladeburner.enabled, true);
   assert.equal(forNode(4).bladeburner.enabled, false);
   assert.equal(forNode(6).bladeburner.minChance, CONFIG.bladeburner.minChance); // deep-merged, not replaced
+});
+
+// ── Sleeves ──────────────────────────────────────────────────────────────────
+
+const SLEEVE_OPTS = { minChance: 0.8, maxContractSleeves: 3 };
+const sl = (index, chances) => ({ index, chances });
+const COUNTS = { Tracking: 10, "Bounty Hunter": 5, Retirement: 2 };
+
+test("sleeves that clear the bar take contracts, the rest infiltrate", () => {
+  const plan = planSleeveBladeWork(
+    [sl(0, { Tracking: 0.9, "Bounty Hunter": 0.85, Retirement: 0.5 }), sl(1, { Tracking: 0.3 }), sl(2, { Tracking: 0.95 })],
+    COUNTS,
+    SLEEVE_OPTS,
+  );
+  // Deepest queue first (Tracking), to the best sleeve at it (#2); Bounty Hunter to #0.
+  assert.deepEqual(plan.map(p => [p.index, p.action, p.contract ?? null]), [
+    [0, SLEEVE_TAKE_CONTRACTS, "Bounty Hunter"],
+    [1, SLEEVE_INFILTRATE, null],
+    [2, SLEEVE_TAKE_CONTRACTS, "Tracking"],
+  ]);
+});
+
+test("one sleeve per contract name, and at most maxContractSleeves", () => {
+  const strong = { Tracking: 0.99, "Bounty Hunter": 0.99, Retirement: 0.99 };
+  const plan = planSleeveBladeWork([sl(0, strong), sl(1, strong), sl(2, strong), sl(3, strong)], COUNTS, SLEEVE_OPTS);
+  const contracts = plan.filter(p => p.action === SLEEVE_TAKE_CONTRACTS).map(p => p.contract);
+  assert.equal(contracts.length, 3);
+  assert.equal(new Set(contracts).size, 3);
+  assert.equal(plan[3].action, SLEEVE_INFILTRATE);
+
+  const one = planSleeveBladeWork([sl(0, strong), sl(1, strong)], COUNTS, { ...SLEEVE_OPTS, maxContractSleeves: 1 });
+  assert.equal(one.filter(p => p.action === SLEEVE_TAKE_CONTRACTS).length, 1);
+});
+
+test("a sleeve keeps a still-viable contract; an exhausted one is dropped", () => {
+  const strong = { Tracking: 0.99, "Bounty Hunter": 0.99, Retirement: 0.99 };
+  const kept = planSleeveBladeWork([sl(0, strong), sl(1, strong)], COUNTS, { ...SLEEVE_OPTS, current: { 0: "Retirement" } });
+  assert.equal(kept[0].contract, "Retirement"); // not re-shuffled onto the deeper Tracking queue
+  assert.equal(kept[1].contract, "Tracking");
+
+  const dropped = planSleeveBladeWork([sl(0, strong)], { ...COUNTS, Retirement: 0.4 }, { ...SLEEVE_OPTS, current: { 0: "Retirement" } });
+  assert.equal(dropped[0].contract, "Tracking");
+});
+
+test("no attempts left anywhere: everyone infiltrates", () => {
+  const strong = { Tracking: 0.99, "Bounty Hunter": 0.99, Retirement: 0.99 };
+  const plan = planSleeveBladeWork([sl(0, strong), sl(1, strong)], { Tracking: 0, "Bounty Hunter": 0.5, Retirement: 0 }, SLEEVE_OPTS);
+  assert.ok(plan.every(p => p.action === SLEEVE_INFILTRATE));
+  assert.deepEqual(planSleeveBladeWork([], COUNTS, SLEEVE_OPTS), []);
+});
+
+// ── Finishing ────────────────────────────────────────────────────────────────
+
+test("plannedNodeAfterBlade: an arg wins, else re-enter until the SF target, else halt", () => {
+  assert.equal(plannedNodeAfterBlade({ override: 8, currentNode: 7, sfLevel: 0, reenterUntilSF: 3 }), 8);
+  assert.equal(plannedNodeAfterBlade({ override: 0, currentNode: 7, sfLevel: 0, reenterUntilSF: 3 }), 0); // explicit halt
+  // BN7 with reenterUntilSF 3: 7.1 and 7.2 re-enter, the run that awards 7.3 halts.
+  assert.equal(plannedNodeAfterBlade({ override: null, currentNode: 7, sfLevel: 0, reenterUntilSF: 3 }), 7);
+  assert.equal(plannedNodeAfterBlade({ override: null, currentNode: 7, sfLevel: 1, reenterUntilSF: 3 }), 7);
+  assert.equal(plannedNodeAfterBlade({ override: null, currentNode: 7, sfLevel: 2, reenterUntilSF: 3 }), 0);
+  // BN6 keeps the halt sentinel.
+  assert.equal(plannedNodeAfterBlade({ override: null, currentNode: 6, sfLevel: 0, reenterUntilSF: 0 }), 0);
+  assert.equal(plannedNodeAfterBlade({ override: undefined, currentNode: 6, sfLevel: 0, reenterUntilSF: 0 }), 0);
+});
+
+test("BN7 config: the same engine with Bladeburner's penalties priced in", async () => {
+  const { forNode, BITNODE } = await import("../lib/config.js");
+  const c7 = forNode(7);
+  assert.equal(c7.paths.daemon, "/bn7/daemon.js");
+  assert.equal(c7.bladeburner.reenterUntilSF, 3);
+  assert.equal(forNode(6).bladeburner.reenterUntilSF, 0);
+  // Skill points cost double: nothing goes to Datamancer, Tracer is capped.
+  assert.equal(c7.bladeburner.skills["Datamancer"].weight, 0);
+  assert.ok(c7.bladeburner.skills["Tracer"].cap <= 20);
+  assert.ok(c7.bladeburner.skills["Blade's Intuition"].weight >= c7.bladeburner.skills["Hands of Midas"].weight);
+  // The rest of the Bladeburner block is inherited, not replaced.
+  assert.equal(c7.bladeburner.minChance, CONFIG.bladeburner.minChance);
+  assert.deepEqual(c7.bladeburner.contracts, CONFIG.bladeburner.contracts);
+  // Augs cost triple: installs batch bigger than the default.
+  assert.ok(c7.augs.install.queuedThreshold > CONFIG.augs.install.queuedThreshold);
+  // Sleeves work for the division on both Bladeburner nodes only.
+  for (const n of [6, 7]) assert.ok(forNode(n).bladeburner.enabled && forNode(n).sleeves.blade.enabled);
+  assert.equal(forNode(4).bladeburner.enabled, false);
+  assert.ok(forNode(7).sleeves.blade.maxContractSleeves <= CONFIG.bladeburner.contracts.length);
+  assert.equal(BITNODE[7].name, "Bladeburners 2079");
 });
