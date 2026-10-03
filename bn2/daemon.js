@@ -124,7 +124,6 @@ export async function main(ns) {
   await runDaemon(ns, {
     cfg: CFG,
     self: SELF,
-    finishCallback: SELF,
     decide: decideNextPriority,
     // lib/econ.js keeps the gang-join money free while we're still bootstrapping.
     econArgs: [GANG_JOIN_MONEY],

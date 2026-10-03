@@ -136,6 +136,10 @@ const ramTrend = makeTrend();
 export async function main(ns) {
   ns.disableLog("ALL");
   ns.ui.openTail();
+  // A tail window outlives its script. Left open, the dead HUD keeps its last
+  // frame on screen - with toggle buttons that still flip the real switches but
+  // never repaint - and the restarted HUD opens a second window on top of it.
+  ns.atExit(() => ns.ui.closeTail());
   ns.ui.setTailTitle("GORDNET");
   ns.ui.moveTail(UI.tail.x, UI.tail.y);
 
@@ -244,10 +248,10 @@ const TOGGLES = [
     on: "FINISH: AUTO",
     off: "FINISH: OFF",
     // Read by lib/daemon-lib.js (ensureBackdoorHelpers). Off changes nothing except
-    // the one irreversible step: everything still runs, w0r1d_d43m0n still gets
-    // backdoored, we just don't destroy it.
+    // the one irreversible step: everything still runs, we just don't end the
+    // node (the bot never backdoors w0r1d_d43m0n itself - that IS the finish).
     onTitle: "Auto-finish ON - the bot destroys w0r1d_d43m0n and enters the next BitNode once it can. Click to stay in this node.",
-    offTitle: "Auto-finish OFF - the daemon runs as normal and still backdoors everything this node allows, but won't beat the BitNode. Click to let it finish.",
+    offTitle: "Auto-finish OFF - the daemon runs as normal and won't beat the BitNode - w0r1d_d43m0n is left for you to backdoor. Click to let it finish.",
   },
   {
     key: "gordCorpAuto",
@@ -359,29 +363,33 @@ function wrapCards(cards, C, emptyMsg) {
   return el("div", {}, ...cards);
 }
 
+// No try/catch in these wrappers: an exception used to come back as an empty
+// list, which wrapCards renders as "nothing running" - so one missing field in a
+// helper's state made a live helper look dead. Errors now reach activePanel's
+// catch and are shown as what they are.
 /** @param {NS} ns */
 function gangPanel(ns, C) {
-  try { return gangExtraCards(ns, C) ?? []; } catch { return []; }
+  return gangExtraCards(ns, C) ?? [];
 }
 
 /** @param {NS} ns */
 function corpPanel(ns, C) {
-  try { return corpExtraCards(ns, C) ?? []; } catch { return []; }
+  return corpExtraCards(ns, C) ?? [];
 }
 
 /** @param {NS} ns */
 function sleevePanel(ns, C) {
-  try { return sleeveExtraCards(ns, C) ?? []; } catch { return []; }
+  return sleeveExtraCards(ns, C) ?? [];
 }
 
 /** @param {NS} ns */
 function hacknetPanel(ns, C) {
-  try { return hacknetExtraCards(ns, C) ?? []; } catch { return []; }
+  return hacknetExtraCards(ns, C) ?? [];
 }
 
 /** @param {NS} ns */
 function bladePanel(ns, C) {
-  try { return bladeExtraCards(ns, C) ?? []; } catch { return []; }
+  return bladeExtraCards(ns, C) ?? [];
 }
 
 // ── STATS tab ─────────────────────────────────────────────────────────────────
@@ -976,11 +984,14 @@ const ROOTING_PROGRAMS = CONFIG.programs.portOpeners.map(name => ({
 function getNetworkStatus(ns) {
   // Backdoor status comes from lib/backdoor.js's published state, not from
   // ns.getServer (2GB): the helper is what installs them, so it's the authority.
-  const backdoored = new Set(globalThis.gordBackdoorState?.done ?? []);
+  const bd = globalThis.gordBackdoorState;
+  const backdoored = new Set(bd?.done ?? []);
   const backdoors = BACKDOOR_CHECKLIST.map(({ server, label }) => {
     const exists = ns.serverExists(server);
     const rooted = exists && ns.hasRootAccess(server);
-    const done   = exists && backdoored.has(server);
+    // The world daemon is never backdoored by the bot (that ends the node), so
+    // its tick means "ready to finish": rooted, hacking level met.
+    const done   = exists && (server === FINAL_HOST ? bd?.finalReady === true : backdoored.has(server));
     return { server, label, exists, rooted, done };
   });
 
@@ -1111,9 +1122,11 @@ function getAugQueueInfo(ns) {
   const queued     = snap?.queued ?? 0;
   const hasRedPill = snap?.redPillQueued === true;
 
-  const urgency        = hasRedPill ? "high" : queued >= 5 ? "medium" : "low";
+  // The node's own threshold (BN7/BN9 batch bigger), published with the snapshot.
+  const installAt      = snap?.installAt ?? CONFIG.augs.install.queuedThreshold;
+  const urgency        = hasRedPill ? "high" : queued >= installAt ? "medium" : "low";
   const recommendation = hasRedPill         ? "[!!] Install now - Red Pill queued!"
-                       : queued >= 5        ? "[!]  Install soon - threshold met"
+                       : queued >= installAt ? "[!]  Install soon - threshold met"
                        : queued > 0         ? "Keep grinding"
                        : "Nothing queued";
 

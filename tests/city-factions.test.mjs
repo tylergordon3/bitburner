@@ -42,10 +42,28 @@ test("declines a city faction with nothing left to offer", () => {
 });
 
 test("prefers an enemy that is inviting us right now and offers more", () => {
-  const augs = { ...cityAugs, "Volhaven": ["A", "B", "C"] };
+  // Priority augs already owned, so only the count decides.
+  const augs = { ...cityAugs, "Sector-12": [...cityAugs["Sector-12"], "X"], "Volhaven": ["A", "B", "C"] };
+  const owned = cityAugs["Sector-12"];
   const pending = ["Sector-12", "Volhaven"];
-  assert.equal(shouldJoinCityFaction(fakeNs(augs), "Sector-12", pending), false);
-  assert.equal(shouldJoinCityFaction(fakeNs(augs), "Volhaven", pending), true);
+  assert.equal(shouldJoinCityFaction(fakeNs(augs, owned), "Sector-12", pending), false);
+  assert.equal(shouldJoinCityFaction(fakeNs(augs, owned), "Volhaven", pending), true);
+});
+
+test("REGRESSION: never bans the faction that sells an unowned install-priority aug", () => {
+  // Parked in Chongqing for Tian Di Hui when cash crosses $20M: the Chongqing
+  // invite arrives alone. Taking it bans Sector-12, and CashRoot with it.
+  assert.equal(shouldJoinCityFaction(fakeNs(cityAugs), "Chongqing", ["Chongqing"]), false);
+  // Sector-12 itself is fine, and wins a head-to-head even against a bigger list.
+  const augs = { ...cityAugs, "Volhaven": ["A", "B", "C"] };
+  assert.equal(shouldJoinCityFaction(fakeNs(augs), "Sector-12", ["Sector-12", "Volhaven"]), true);
+  assert.equal(shouldJoinCityFaction(fakeNs(augs), "Volhaven", ["Sector-12", "Volhaven"]), false);
+  // Once CashRoot is owned there is nothing left to protect.
+  assert.equal(shouldJoinCityFaction(fakeNs(cityAugs, cityAugs["Sector-12"]), "Chongqing", ["Chongqing"]), true);
+  // ...and once Sector-12 is already out of reach (an enemy is joined), likewise.
+  const ns = fakeNs(cityAugs);
+  ns.getPlayer = () => ({ factions: ["Volhaven"] });
+  assert.equal(shouldJoinCityFaction(ns, "Chongqing", ["Chongqing"]), true);
 });
 
 test("a better enemy that is NOT inviting us doesn't block the invite in hand", () => {

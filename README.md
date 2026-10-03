@@ -48,6 +48,17 @@ a "launch the largest batch that fits, every tick" loop:
   next one's hack lands. (The old loop launched every 200 ms, so every hack after
   the first landed on an already-hacked server, and the first landing hack
   tripped a re-prep that blocked launching for a grow-time.)
+- A leg's duration is fixed by the game when the leg **starts**, at the target's
+  security at that moment — and with other batches in flight that is often not the
+  prepped minimum (a hack or grow has landed, its weaken hasn't). So the workers
+  pass their delay to the game as `additionalMsec` (the duration locks at launch,
+  not after an in-script sleep), and the manager computes each leg's delay from the
+  leg times *as they are at launch* (`landingDelays`), aimed at a **landing window**
+  the batch owns. Windows are one launch interval apart; the launch itself opens
+  `hacking.launchLeadMs` early so it can wait out the few hundred ms in which
+  security is raised without the window slipping. Before this, a fat batch's grow
+  stretched any leg started inside it by seconds against a 200 ms spacing, batches
+  landed `W1, G, H, W2`, and the target spent ~40% of its time draining.
 - Timing then fixes how many batches are in flight (`batchDepth`, capped by
   `hacking.maxDepth`), and the money fraction per batch is the largest in
   `hacking.moneyFractions` that lets that many batches share the target's RAM
@@ -88,9 +99,17 @@ a "launch the largest batch that fits, every tick" loop:
   are n00dles-alikes earns several times more, on several times the RAM, than the
   same world limited to one target.
 
-After syncing a change to the manager, run `run /tools/kill-helpers.js all` before
-restarting: the manager runs off-home, so `killall` on home leaves the old copy
-running and the daemon never launches the new one.
+After syncing a change to **any** helper, run `run /tools/kill-helpers.js all` before
+restarting: helpers run off-home, so `killall` on home leaves the old copies running
+and the daemon — seeing them "already running" — never launches the new code. `all`
+is derived from `CONFIG.paths`, so it covers every helper the daemon can place (the
+HUD, stocks, contracts, econ, hacknet and the corp phases included).
+
+The purchased-server buyer ([`lib/pserv.js`](lib/pserv.js)) spends its budget one
+purchase at a time on the best **RAM per dollar** on offer. Where cloud RAM is priced
+flat that is still "the largest tier we can afford"; on a softcap curve (BN7: $/GB
+doubles with every doubling past 64GB) it fills the slots small and levels them up,
+which is roughly three times the RAM for the same money.
 
 When the botnet looks dead or idle, [`tools/hack-status.js`](tools/hack-status.js)
 says which of the two it is in one shot: whether the daemon and the manager are
@@ -119,9 +138,12 @@ Each bitnode gets a thin `bnX/daemon.js` orchestrator; everything reusable lives
 - `bn6/daemon.js` — BN6 (Bladeburners): the cold boot already gyms every combat stat
   to 100 and joins the division ([`early/blade-boot.js`](early/blade-boot.js), launched
   by the driver wherever `bladeburner.enabled`), then the daemon gives the player's
-  work slot to Bladeburner. Rest phases (stamina regenerates passively either way)
-  run no-stamina actions — Field Analysis, Recruitment, Diplomacy — not the regen
-  chamber. The work runs in two
+  work slot to Bladeburner. Rest phases calm a chaotic city (Diplomacy) or tighten
+  loose estimates (Field Analysis) first, and otherwise sit in the Regeneration
+  Chamber: its +1% of max stamina a minute is as much as passive regen itself once
+  max stamina is in the hundreds, so it roughly halves the rest
+  (`bladeburner.restInChamber`). Incite Violence is never used — it adds
+  `10 + chaos/log10(chaos)` chaos to *every* city. The work runs in two
   off-home helpers — [`lib/bladeburner.js`](lib/bladeburner.js) (contracts, operations,
   black ops, stamina rests, per-action level control; placed ahead of the sleeve
   manager) and [`lib/blade-upkeep.js`](lib/blade-upkeep.js) (skill points, city, the
@@ -147,8 +169,30 @@ Each bitnode gets a thin `bnX/daemon.js` orchestrator; everything reusable lives
   and a daemon arg overrides the plan. Sleeves work for the division on both
   Bladeburner nodes — see [Sleeves](#sleeves).
 
+Three things about resets that the daemons rely on, all verified against
+bitburner-src:
+
+- **Per-node config only reaches code that asks for it.** `BITNODE[n]` overrides
+  apply through `forNode(n)`; a module that captures `CONFIG.section` at module scope
+  runs on the defaults forever. That is how BN7's skill weights and BN7/BN9's install
+  thresholds sat dead in the config. `tests/config-captures.test.mjs` now fails on
+  any such capture of an overridden key, and off-home helpers take the node as an
+  exec arg.
+- **A reset callback gets no arguments and must fit in RAM.** So the next-BitNode arg
+  (`run bn7/daemon.js 10`, or `0` to hold) is remembered in `/data/next-bn.txt` for
+  the rest of the BitNode (`nextBNOverride`; `run <daemon> auto` forgets it), and
+  the finisher's callback is always the cold-start driver.
+- **`globalThis` survives installs and BitNode changes** (only a page load clears
+  it). The core deletes the state that gates irreversible decisions at boot, and
+  readers of helper state check its age.
+
+Installs follow `augs.install` for the node (`installReason`): the default is 5
+queued (2 with a priority aug); BN7 and BN9 batch 8 / 4 with a floor of 4. An
+install first asks the stock trader to liquidate (the market is wiped by a reset)
+and waits up to a minute for it.
+
 [`lib/daemon-lib.js`](lib/daemon-lib.js) holds the building blocks that are
-identical across all five: rooting, darkweb buys, accepting invites, off-home helper
+identical across every node: rooting, darkweb buys, accepting invites, off-home helper
 placement, the gang manager's placement, faction work, `buyAugs`, the install policy,
 and the purchased-server budget. [`lib/daemon-core.js`](lib/daemon-core.js) holds
 the skeleton built from them: `runDaemon(ns, hooks)` is `main()` (the tick loop and
@@ -156,7 +200,7 @@ the helper launch order), and `decidePrelude` / `decideNoTarget` / `decideAugFlo
 are the parts of `decideNextPriority` every node shares (train → rep → money → buy).
 A node's daemon is then just its strategy prefix plus hooks: `maybeSetupGang` (BN2's
 -9 shortcut vs BN5's active karma grind vs everyone else's passive snap-up),
-`plannedNextBN`, extra helpers, the status line. All five daemons are on the core;
+`plannedNextBN`, extra helpers, the status line. Every daemon is on the core;
 `bn10/daemon.js` is the fullest example of the hooks (required sleeve manager,
 grafting as an extra helper, a stay-city publish after the decision, its own
 no-target branch for the money hoard and grafting).
@@ -246,9 +290,14 @@ launched `optional` outside BN10 so it waits quietly until a host has room). It
 self-exits where sleeves
 are unavailable, so launching it everywhere is inert on nodes that can't use it.
 
-Every sleeve clears **shock** to zero (which is also what unlocks buying it
-augmentations — the game refuses while shock > 0), then **synchronizes** to 100, then
-earns. What "earns" means depends on the gang:
+Every sleeve clears **shock** (zero is what unlocks buying it augmentations — the
+game refuses while shock > 0), then **synchronizes** to 100, then earns. Full shock
+recovery is ~18.5 hours from the 100 every sleeve starts a BitNode with, and only exp
+gain depends on shock, so the gate is per mode: the gang bootstrap starts at
+`sleeves.gangShockBelow` (85), Bladeburner mode starts immediately
+(`sleeves.blade.workShockBelow` — nothing a sleeve does for the division needs exp or
+sync), and only mirroring waits for zero. Shock keeps decaying passively while they
+work. What "earns" means depends on the gang:
 
 - **Gang bootstrap** — gang API available, no gang yet. Sleeve crime karma counts for
   the player, so the roster is the fastest route to the karma gate. Crimes are ranked
@@ -267,20 +316,28 @@ earns. What "earns" means depends on the gang:
   `n^-0.5 / 2` attempts to every contract and operation each minute (`sqrt(n)/2` in
   total for `n` sleeves). A sleeve that clears `sleeves.blade.minContractChance` on a
   contract — its *own* stats, via `getActionEstimatedSuccessChance(..., sleeveNumber)`
-  — runs **Take on contracts** instead, which pays the player's rank exactly as the
-  player's attempt would (no money; one sleeve per contract name, so at most three).
+  — runs **Take on contracts** instead, which pays the player's rank and money exactly
+  as the player's attempt would (one sleeve per contract name, so at most three).
   The split is the pure `planSleeveBladeWork` in
   [`lib/bladeburner-logic.js`](lib/bladeburner-logic.js): sleeves keep a still-viable
   contract, each unclaimed contract goes deepest-queue-first to the best free sleeve,
-  everyone else infiltrates. Attempt counts come from `gordBladeState.contractCounts`
+  everyone else infiltrates. General actions act on the *division*, whoever performs
+  them, so the sleeves off contracts also **support the player**: while the player's
+  stamina is under `sleeves.blade.regenBelow` they sit in the Regeneration Chamber
+  (each restores 1% of the player's max stamina per minute, which keeps the player
+  out of rest phases altogether rather than shortening them), and while city chaos
+  is past the Diplomacy threshold they run Diplomacy. Attempt counts come from `gordBladeState.contractCounts`
   (published by `lib/bladeburner.js`) so the manager pays for one Bladeburner getter,
   not three. It outranks mirroring but not the gang bootstrap: a couple of hours of
-  sleeve homicide buys an income that lasts the whole node. "Support main sleeve" is
-  deliberately unused — it counts the sleeve into `teamSize`, which the upkeep sends on
-  black ops.
+  sleeve homicide buys an income that lasts the whole node. **Support main sleeve** is
+  used for black ops only: a supporting sleeve counts into the team (`(team+1)^0.05`
+  success — about +10% for six) and, unlike a recruit, can't be lost, so the whole
+  roster joins when that bonus would carry a rank-ready black op over its bar and goes
+  back to work when it's done (`nextSleeveSupportState`).
 
 **Augmentations** are bought everywhere, cheapest-first across the roster, once cash
-clears `sleeves.augMinMoney`. **Buying sleeves and memory** only works in BitNode 10,
+clears `sleeves.augMinMoney` — in batches of `sleeves.augBatchMin` per sleeve (or
+all it has left), because installing an aug on a sleeve zeroes its exp. **Buying sleeves and memory** only works in BitNode 10,
 where The Covenant sells them, so that shop is its own helper,
 [`lib/sleeve-shop.js`](lib/sleeve-shop.js) (~26GB), launched by the daemon core only
 in `sleeves.shopBitNode`: its four `ns.sleeve.*` shop calls are 4GB each and would
@@ -370,8 +427,11 @@ Management Implant is installed. It changes *only* the focus flag: `shouldFocus(
 the "can we background a second job?" question the daemons branch on — is untouched,
 so this doesn't rewire which work the bot picks.
 
-**FINISH: AUTO / OFF.** Off, the daemon runs exactly as normal and still backdoors
-`w0r1d_d43m0n`, but never destroys it. Enforced in
+**FINISH: AUTO / OFF.** Off, the daemon runs exactly as normal but never ends the
+node. That takes two things, because a scripted backdoor on `w0r1d_d43m0n` opens the
+BitVerse by itself: `lib/backdoor.js` never backdoors the world daemon on any node
+(it only reports when it is *ready* - rooted, hacking level met - and
+`destroyW0r1dD43m0n` needs nothing more), and the finisher is held. Enforced in
 [`lib/daemon-lib.js`](lib/daemon-lib.js) `ensureBackdoorHelpers`, alongside the
 existing per-node halt sentinel (`nextBN <= 0`, e.g. BN10) — either hold announces
 itself once and leaves the world daemon standing. Flipping it off *after*
@@ -408,9 +468,10 @@ capabilities plus contract-solver coverage. It makes no purchases and never rese
 
 ## Testing
 
-The pure (`ns`-free) logic modules — `lib/capabilities.js`, `lib/contract-solvers.js`,
-`lib/grafting-logic.js`, `lib/crime-logic.js`, `lib/batch-logic.js`, `lib/hacknet-logic.js` — have Node unit tests under
-[`tests/`](tests/). With Node ≥20:
+The pure (`ns`-free) logic modules — capabilities, contract solvers, batch / hacknet /
+grafting / crime / Bladeburner logic, the corp planners, the install policy and the
+server buyer's choice rule — have Node unit tests under [`tests/`](tests/), plus an
+end-to-end simulation of the batcher and a lint for config captures. With Node ≥20:
 
 ```bash
 npm test

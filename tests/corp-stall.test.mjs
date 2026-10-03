@@ -195,7 +195,7 @@ function fakeCorpNs({ round, offer, funds, revenue, expenses, researchPoints }) 
       getInvestmentOffer: () => ({ round, funds: offer }),
       getCorporation: () => ({ funds, divisions: [division.name], revenue, expenses, public: false }),
       getDivision: name => (name === division.name ? division : undefined),
-      acceptInvestmentOffer: () => accepted.push(round),
+      acceptInvestmentOffer: () => { accepted.push(round); return true; }, // the game returns a boolean
     },
   };
   return { ns, accepted };

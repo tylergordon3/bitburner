@@ -19,7 +19,7 @@ test("hashGainRate follows the game's formula and its RAM-usage penalty", () => 
   assert.equal(hashGainRate(1, 0, 1, 1), 0.001);                 // base: 0.001 per level
   assert.equal(hashGainRate(10, 0, 1, 1), 0.01);                 // linear in level
   assert.ok(hashGainRate(1, 0, 2, 1) > hashGainRate(1, 0, 1, 1)); // RAM helps
-  assert.ok(Math.abs(hashGainRate(1, 0, 1, 17) - 0.002) < 1e-12); // 16 extra cores double it
+  assert.ok(Math.abs(hashGainRate(1, 0, 1, 6) - 0.002) < 1e-12); // 5 extra cores double it (+20% each)
   assert.equal(hashGainRate(1, 0.5, 1, 1), 0.0005);              // half the RAM used -> half the rate
   assert.equal(hashGainRate(1, 1, 1, 1), 0);                     // fully used -> nothing
   assert.equal(hashGainRate(0, 0, 1, 1), 0);

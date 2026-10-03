@@ -52,7 +52,6 @@ export async function main(ns) {
   await runDaemon(ns, {
     cfg: CFG,
     self: SELF,
-    finishCallback: SELF,
     decide: decideNextPriority,
   });
 }

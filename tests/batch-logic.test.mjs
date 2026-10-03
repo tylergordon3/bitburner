@@ -3,7 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  planBatch, legSchedule, batchDepth, chooseFraction, planCycle, incomeRate,
+  planBatch, legSchedule, landingDelays, batchDepth, chooseFraction, planCycle, incomeRate,
   prepPlan, allocate, isPrepped, driftDetected, pruneInFlight,
 } from "../lib/batch-logic.js";
 
@@ -179,4 +179,51 @@ test("pruneInFlight drops batches that have fully landed", () => {
   const list = [{ id: 1, doneAt: 100 }, { id: 2, doneAt: 300 }];
   assert.deepEqual(pruneInFlight(list, 200).map(b => b.id), [2]);
   assert.deepEqual(pruneInFlight(list, 50).map(b => b.id), [1, 2]);
+});
+
+// ── landingDelays ────────────────────────────────────────────────────────────
+
+test("landingDelays reproduces the prepped schedule when the target is prepped", () => {
+  const t = { hackTime: 25_000, growTime: 80_000, weakenTime: 100_000 };
+  const sched = legSchedule({ ...t, spacing: 200, margin: 200 });
+  const d = landingDelays(sched, t, 1_000, 0);
+  // No slot yet: land as soon as possible, which is exactly legSchedule's plan.
+  assert.equal(d.base, 1_000 + sched.firstLanding);
+  for (const k of ["hack", "weaken1", "grow", "weaken2"]) assert.ok(Math.abs(d.delays[k] - sched.delays[k]) < 1e-6, k);
+  assert.equal(d.slip, 0);
+});
+
+test("REGRESSION: with security raised at launch, every leg still lands on its slot, in order", () => {
+  const prepped = { hackTime: 25_000, growTime: 80_000, weakenTime: 100_000 };
+  const sched = legSchedule({ ...prepped, spacing: 200, margin: 200 });
+  // +4% on every leg: what a fat grow's security does to a leg started inside it.
+  const cur = { hackTime: 26_000, growTime: 83_200, weakenTime: 104_000 };
+  const now = 50_000;
+  const windowAt = now + 110_000; // a slot comfortably ahead
+  const d = landingDelays(sched, cur, now, windowAt);
+
+  const land = {
+    hack: now + d.delays.hack + cur.hackTime,
+    weaken1: now + d.delays.weaken1 + cur.weakenTime,
+    grow: now + d.delays.grow + cur.growTime,
+    weaken2: now + d.delays.weaken2 + cur.weakenTime,
+  };
+  assert.equal(d.slip, 0);
+  assert.ok(Math.abs(land.hack - windowAt) < 1e-6, "the first leg lands on the window");
+  assert.ok(land.hack < land.weaken1 && land.weaken1 < land.grow && land.grow < land.weaken2, "H, W1, G, W2");
+  assert.ok(Math.abs(land.weaken2 - d.lastLanding) < 1e-6);
+  for (const k of ["hack", "weaken1", "grow", "weaken2"]) assert.ok(d.delays[k] >= 0, `${k} delay`);
+
+  // The old way - prepped delays, durations taken at the raised security - put
+  // the legs seconds apart from where the 200ms spacing wanted them.
+  const old = { hack: now + sched.delays.hack + cur.hackTime, weaken1: now + sched.delays.weaken1 + cur.weakenTime };
+  assert.ok(Math.abs((old.weaken1 - old.hack) - 200) > 1_000);
+});
+
+test("landingDelays slips the window, never a negative delay, when the slot is out of reach", () => {
+  const t = { hackTime: 25_000, growTime: 80_000, weakenTime: 100_000 };
+  const sched = legSchedule({ ...t, spacing: 200, margin: 200 });
+  const d = landingDelays(sched, t, 1_000, 2_000); // a slot 1s away, a weaken takes 100s
+  assert.ok(d.slip > 0);
+  for (const k of ["hack", "weaken1", "grow", "weaken2"]) assert.ok(d.delays[k] >= 0, k);
 });

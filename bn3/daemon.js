@@ -84,7 +84,6 @@ export async function main(ns) {
   await runDaemon(ns, {
     cfg: CFG,
     self: SELF,
-    finishCallback: SELF,
     setupGang: maybeSetupGang,
     decide: decideNextPriority,
     statusLine: ns => ` | Karma: ${(ns.getPlayer().karma ?? 0).toFixed(0)}`,

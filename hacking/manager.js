@@ -524,7 +524,11 @@ function launchPrep(ns, snap, target, state, math, ramCap, now) {
   ]);
   if (!alloc.assignments.length) return { launched: false, until: now + H.waitForRamMs, ...plan };
 
-  execAll(ns, alloc.assignments, target, "prep");
+  // execAll kills whatever it started when any exec fails, so a failure means
+  // NOTHING is running - don't wait out a weaken-time for legs that aren't there.
+  if (!execAll(ns, alloc.assignments, target, "prep")) {
+    return { launched: false, until: now + H.waitForRamMs, ...plan };
+  }
   applyAllocation(snap, alloc);
 
   // Legs run at the CURRENT security, so wait on the current-state times.
@@ -536,10 +540,14 @@ function launchPrep(ns, snap, target, state, math, ramCap, now) {
  * Launch one batch of `cycle.plan` against `target`, entirely or not at all.
  * Returns the in-flight record, or null if it didn't fit / launch.
  * @param {NS} ns @param {Snapshot} snap @param {string} target
+ * @param {any} cycle @param {ReturnType<typeof B.landingDelays>} timing
+ * @param {number} id @param {number} now
  */
-function launchBatch(ns, snap, target, cycle, schedule, id, now) {
+function launchBatch(ns, snap, target, cycle, timing, id, now) {
   const plan = cycle.plan;
-  const d = schedule.delays;
+  // Delays from the CURRENT leg times (lib/batch-logic.js landingDelays), so each
+  // leg lands on its slot whatever the target's security is right now.
+  const d = timing.delays;
   const legs = [
     { script: HACK, threads: plan.hackThreads, ram: RAM.hack, delay: d.hack },
     { script: WEAKEN, threads: plan.weaken1Threads, ram: RAM.weaken, delay: d.weaken1 },
@@ -558,7 +566,7 @@ function launchBatch(ns, snap, target, cycle, schedule, id, now) {
     moneyFraction: plan.hackedFraction,
     securityAdded: plan.securityAdded,
     launchedAt: now,
-    doneAt: now + schedule.lastLanding + H.landingPadMs,
+    doneAt: timing.lastLanding + H.landingPadMs,
   };
 }
 
@@ -579,7 +587,7 @@ export function newSchedulerState() {
   return {
     inFlight: /** @type {any[]} */ ([]),  // batches whose legs haven't all landed (any target)
     prepUntil: new Map(),                  // target -> time its prep legs will have landed
-    nextLaunchAt: new Map(),               // target -> earliest next launch (its own cadence)
+    nextWindowAt: new Map(),               // target -> when its next batch's first leg is due to LAND
     currentTarget: "",                     // the primary, for logging a switch
     batchId: 0,
     lastMode: "",
@@ -661,12 +669,27 @@ function serviceTarget(ns, s, snap, target, budgetRam, now) {
     mode = "Draining (drift)";
   } else if (!cycle) {
     mode = "Waiting for RAM";
-  } else if (now >= (s.nextLaunchAt.get(target) ?? 0) && open.length < cycle.depth) {
-    const batch = launchBatch(ns, snap, target, cycle, schedule, s.batchId, now);
-    if (batch) {
+  } else if (open.length < cycle.depth && now >= (s.nextWindowAt.get(target) ?? 0) - schedule.firstLanding - H.launchLeadMs) {
+    // Each batch owns a LANDING window; windows are launchInterval apart, which
+    // is what keeps one batch's legs from interleaving with the next's. The
+    // launch itself can happen any time early enough to reach the window, so it
+    // opens launchLeadMs ahead of the latest moment that would still make it.
+    const windowAt = s.nextWindowAt.get(target) ?? 0;
+    const cur = { hackTime: ns.getHackTime(target), growTime: ns.getGrowTime(target), weakenTime: ns.getWeakenTime(target) };
+    const timing = B.landingDelays(schedule, cur, now, windowAt);
+    // Launching now would miss the window only because security is raised this
+    // instant (another batch is between its hack and its weaken): a tick or two
+    // later the leg times are back to prepped and the window is reachable. Wait
+    // for that while the lead lasts; after it, take the slip.
+    const raised = cur.weakenTime - math.times.weakenTime > H.batchSpacingMs / 4;
+    const waitForCalm = timing.slip > 1 && raised && now < windowAt - schedule.firstLanding + H.launchLeadMs;
+    const batch = waitForCalm ? null : launchBatch(ns, snap, target, cycle, timing, s.batchId, now);
+    if (waitForCalm) {
+      mode = "Batching";
+    } else if (batch) {
       s.batchId++;
       s.inFlight.push(batch);
-      s.nextLaunchAt.set(target, now + cycle.launchInterval);
+      s.nextWindowAt.set(target, timing.base + cycle.launchInterval);
       mode = "Batching";
     } else {
       // Free RAM is there in total but not in the right places (or an exec
@@ -740,8 +763,9 @@ export function step(ns, s, now) {
     if (s.currentTarget) ns.print(`[target] ${s.currentTarget} -> ${primary}`);
     s.currentTarget = primary;
     // In-flight batches on the old primary drain harmlessly; it may well still be
-    // serviced below, just no longer first.
-    s.nextLaunchAt.delete(primary);
+    // serviced below, just no longer first. The new primary keeps its landing
+    // window: if it was already being serviced as a secondary, forgetting the
+    // window would launch straight into its previous batch's landings.
   }
 
   // Service targets in rank order, each budgeted with the RAM the ones above it

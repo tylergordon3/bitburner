@@ -11,6 +11,11 @@ export async function main(ns) {
   const target = String(ns.args[0]);
   const delay = Number(ns.args[1] ?? 0);
 
-  if (delay > 0) await ns.sleep(delay);
-  await ns.hack(target);
+  // The delay goes to the game as additionalMsec rather than an ns.sleep here:
+  // an action's duration is fixed when it STARTS, at the target's security at
+  // that moment. Sleeping first meant starting later - possibly inside another
+  // batch's hack->weaken window, where the security bump stretches the action
+  // and it lands out of order. This way the duration locks at launch, when the
+  // manager computed the delay from that same current duration.
+  await ns.hack(target, { additionalMsec: delay });
 }

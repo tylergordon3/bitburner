@@ -62,3 +62,18 @@ test("no affordable / no candidates -> null best, still ranks for the dashboard"
   assert.equal(none.best, null);
   assert.equal(none.ranked.length, 1); // still scored + returned for display
 });
+
+test("REGRESSION: the entropy cap never blocks the graft that cures entropy", async () => {
+  const { CONGRUITY_IMPLANT } = await import("../lib/grafting-logic.js");
+  const candidates = [
+    { aug: "A", price: 5000, timeMs: 10, affordable: true },
+    { aug: CONGRUITY_IMPLANT, price: 1, timeMs: 1e9, affordable: true },
+  ];
+  const res = chooseBestGraft(candidates, opts({ entropy: 25, entropyCap: 25 }));
+  assert.equal(res.capped, true);
+  assert.equal(res.best.aug, CONGRUITY_IMPLANT);
+  assert.equal(res.worthwhile, true);
+  // ...but only when we can pay for it.
+  const poor = chooseBestGraft([{ ...candidates[1], affordable: false }], opts({ entropy: 25, entropyCap: 25 }));
+  assert.equal(poor.best, null);
+});

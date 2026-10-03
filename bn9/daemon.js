@@ -46,7 +46,7 @@ import {
 } from "../lib/player-actions.js";
 import { getNextAugTarget, getMoneyHoardGoal } from "../lib/aug-targets.js";
 import { forNode } from "../lib/config.js";
-import { playerMoney, hackingLevel, maybeBuyInfra, inGangSafe } from "../lib/daemon-lib.js";
+import { playerMoney, hackingLevel, maybeBuyInfra, inGangSafe, nextBNOverride } from "../lib/daemon-lib.js";
 import { runDaemon, decidePrelude, decideAugFlow, pursueNextFaction } from "../lib/daemon-core.js";
 // Megacorp faction grinding (factions.pursueCompanyFactions): the long no-reset
 // endgame makes their augs worth the grind, as in BN10.
@@ -79,7 +79,8 @@ const CRIMINAL_FACTIONS = /** @type {any[]} */ (GANG.criminalFactions);
  * @param {NS} ns
  */
 function plannedNextBN(ns) {
-  if (ns.args[0] != null) return Number(ns.args[0]);
+  const override = nextBNOverride(ns);
+  if (override != null) return override;
 
   const info = ns.getResetInfo();
   if (info.currentNode !== 9) return CFG.backdoor.defaultNextBN;
@@ -341,7 +342,6 @@ export async function main(ns) {
   await runDaemon(ns, {
     cfg: CFG,
     self: SELF,
-    finishCallback: SELF,
     plannedNextBN,
     setupGang: maybeSetupGang,
     decide: decideNextPriority,

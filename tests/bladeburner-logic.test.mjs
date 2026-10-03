@@ -16,6 +16,12 @@ import {
   plannedNodeAfterBlade,
   SLEEVE_TAKE_CONTRACTS,
   SLEEVE_INFILTRATE,
+  SLEEVE_DIPLOMACY,
+  SLEEVE_SUPPORT,
+  REGEN_CHAMBER,
+  nextSleeveRegenState,
+  nextSleeveSupportState,
+  conservePopulation,
 } from "../lib/bladeburner-logic.js";
 import { CONFIG } from "../lib/config.js";
 
@@ -113,13 +119,26 @@ test("fallback: diplomacy > incite > field analysis > training", () => {
 const RA = { hpRestBelow: 0.5, chaosDiplomacy: 50, analysisSpread: 0.1, recruitMinChance: 0.5 };
 const rest = (over = {}) => ({ hpFrac: 1, chaos: 0, spread: 0, recruitChance: 1, ...over });
 
-test("rest phases use no-stamina actions; the chamber only for HP", () => {
+test("rest phases without restInChamber use no-stamina actions; the chamber only for HP", () => {
   assert.equal(restAction(rest({ hpFrac: 0.3, chaos: 90 }), RA).name, "Hyperbolic Regeneration Chamber");
   assert.equal(restAction(rest({ chaos: 90, spread: 0.5 }), RA).name, "Diplomacy");
   assert.equal(restAction(rest({ spread: 0.5 }), RA).name, "Field Analysis");
   assert.equal(restAction(rest(), RA).name, "Recruitment");
   assert.equal(restAction(rest({ recruitChance: 0.2 }), RA).name, "Field Analysis");
   assert.equal(restAction(rest({ chaos: null }), RA).name, "Recruitment"); // unknown chaos isn't high chaos
+});
+
+test("restInChamber: the chamber is the default rest, after chaos and loose estimates", () => {
+  const o = { ...RA, restInChamber: true };
+  assert.equal(restAction(rest(), o).name, REGEN_CHAMBER);
+  assert.equal(restAction(rest({ recruitChance: 0.2 }), o).name, REGEN_CHAMBER);
+  assert.equal(restAction(rest({ chaos: 90 }), o).name, "Diplomacy");
+  assert.equal(restAction(rest({ spread: 0.5 }), o).name, "Field Analysis");
+});
+
+test("Incite Violence is off by default: it raises chaos in every city", () => {
+  assert.equal(CONFIG.bladeburner.inciteWhenExhausted, false);
+  assert.equal(fallbackAction({ chaos: 10, exhausted: true, spread: 0 }, CONFIG.bladeburner).name, "Training");
 });
 
 test("chooseSkill takes the lowest cost per weight it can afford", () => {
@@ -165,6 +184,24 @@ test("only the Bladeburner nodes boot into Bladeburner by default", async () => 
   assert.equal(forNode(7).bladeburner.enabled, true);
   assert.equal(forNode(4).bladeburner.enabled, false);
   assert.equal(forNode(6).bladeburner.minChance, CONFIG.bladeburner.minChance); // deep-merged, not replaced
+});
+
+test("REGRESSION: the helpers resolve their knobs per node, so BN7's skill weights apply", async () => {
+  const { forNode } = await import("../lib/config.js");
+  const { readFileSync } = await import("node:fs");
+  // BITNODE[7] really does differ from the defaults the helpers used to read...
+  assert.notEqual(forNode(7).bladeburner.skills.Datamancer.weight, CONFIG.bladeburner.skills.Datamancer.weight);
+  assert.equal(forNode(7).bladeburner.skills.Datamancer.weight, 0);
+  assert.equal(forNode(7).bladeburner.skills.Tracer.cap, 10);
+  // ...so both helpers must call forNode() on the node the daemon passes them,
+  // and the daemon must pass it.
+  const read = f => readFileSync(new URL(`../lib/${f}`, import.meta.url), "utf8");
+  for (const f of ["bladeburner.js", "blade-upkeep.js"]) {
+    assert.match(read(f), /B = forNode\(Number\(ns\.args\[0\] \?\? 0\)\)\.bladeburner/, f);
+  }
+  const daemon = read("blade-daemon.js");
+  assert.match(daemon, /script: cfg\.paths\.bladeburner, optional: false, args: \[node\]/);
+  assert.match(daemon, /script: cfg\.paths\.bladeUpkeep, optional: true, args: \[node\]/);
 });
 
 // ── Sleeves ──────────────────────────────────────────────────────────────────
@@ -214,6 +251,77 @@ test("no attempts left anywhere: everyone infiltrates", () => {
   const plan = planSleeveBladeWork([sl(0, strong), sl(1, strong)], { Tracking: 0, "Bounty Hunter": 0.5, Retirement: 0 }, SLEEVE_OPTS);
   assert.ok(plan.every(p => p.action === SLEEVE_INFILTRATE));
   assert.deepEqual(planSleeveBladeWork([], COUNTS, SLEEVE_OPTS), []);
+});
+
+test("sleeves off contracts support the division: diplomacy first, then the player's stamina", () => {
+  const sleeves = [sl(0, { Tracking: 0.95 }), sl(1, { Tracking: 0.1 }), sl(2, { Tracking: 0.1 })];
+  const jobs = o => planSleeveBladeWork(sleeves, COUNTS, { ...SLEEVE_OPTS, ...o }).map(p => p.action);
+
+  // The contract sleeve keeps earning rank either way.
+  assert.deepEqual(jobs({ regen: true }), [SLEEVE_TAKE_CONTRACTS, REGEN_CHAMBER, REGEN_CHAMBER]);
+  assert.deepEqual(jobs({ diplomacy: true }), [SLEEVE_TAKE_CONTRACTS, SLEEVE_DIPLOMACY, SLEEVE_DIPLOMACY]);
+  // Chaos penalises every action, so it outranks stamina.
+  assert.deepEqual(jobs({ diplomacy: true, regen: true }), [SLEEVE_TAKE_CONTRACTS, SLEEVE_DIPLOMACY, SLEEVE_DIPLOMACY]);
+  assert.deepEqual(jobs({}), [SLEEVE_TAKE_CONTRACTS, SLEEVE_INFILTRATE, SLEEVE_INFILTRATE]);
+});
+
+test("support: the whole roster joins the team, contracts included", () => {
+  const strong = { Tracking: 0.99, "Bounty Hunter": 0.99, Retirement: 0.99 };
+  const plan = planSleeveBladeWork([sl(0, strong), sl(1, {})], COUNTS, { ...SLEEVE_OPTS, support: true, regen: true, diplomacy: true });
+  assert.deepEqual(plan.map(p => p.action), [SLEEVE_SUPPORT, SLEEVE_SUPPORT]);
+});
+
+const SUP = { minChance: 0.9, graceMs: 45_000, cooldownMs: 600_000 };
+const OFF = { on: false, since: 0, cooldownUntil: 0 };
+const sup = (over = {}) => ({ now: 1_000_000, eligible: true, running: false, chance: 0.85, humanTeam: 0, sleeves: 6, ...over });
+
+test("sleeve support joins only when the team bonus carries the black op over its bar", () => {
+  // 0.85 * 7^0.05 = 0.937: worth joining. 0.7 * 1.102 = 0.77: not.
+  assert.equal(nextSleeveSupportState(OFF, sup(), SUP).on, true);
+  assert.equal(nextSleeveSupportState(OFF, sup({ chance: 0.7 }), SUP).on, false);
+  // An existing team dilutes the bonus: (10+6+1)/(10+1) ^ 0.05 = 1.022.
+  assert.equal(nextSleeveSupportState(OFF, sup({ humanTeam: 10 }), SUP).on, false);
+  assert.equal(nextSleeveSupportState(OFF, sup({ humanTeam: 10, chance: 0.89 }), SUP).on, true);
+  // Not while the op isn't on the table (rank short, held, the player resting).
+  assert.equal(nextSleeveSupportState(OFF, sup({ eligible: false, chance: 1 }), SUP).on, false);
+  assert.equal(nextSleeveSupportState(OFF, sup({ sleeves: 0, chance: 1 }), SUP).on, false);
+});
+
+test("sleeve support holds through the op, and stands down with a cooldown when the bar isn't met", () => {
+  const on = { on: true, since: 1_000_000, cooldownUntil: 0 };
+  // Within the grace period the op's team size may not be set yet.
+  assert.equal(nextSleeveSupportState(on, sup({ now: 1_010_000, chance: 0.85 }), SUP).on, true);
+  // Bar met: stay until it runs; running: stay whatever else changed.
+  assert.equal(nextSleeveSupportState(on, sup({ now: 1_100_000, chance: 0.93 }), SUP).on, true);
+  assert.equal(nextSleeveSupportState(on, sup({ now: 1_100_000, running: true, eligible: false, chance: 0 }), SUP).on, true);
+  // Grace over and still short: stand down, and don't flap straight back on.
+  const down = nextSleeveSupportState(on, sup({ now: 1_100_000, chance: 0.85 }), SUP);
+  assert.equal(down.on, false);
+  assert.equal(down.cooldownUntil, 1_700_000);
+  assert.equal(nextSleeveSupportState(down, sup({ now: 1_200_000 }), SUP).on, false);
+  assert.equal(nextSleeveSupportState(down, sup({ now: 1_800_000 }), SUP).on, true);
+  // The op finished (no longer eligible): back to work.
+  assert.equal(nextSleeveSupportState(on, sup({ eligible: false }), SUP).on, false);
+});
+
+test("population-spending operations only run above the floor", () => {
+  const o = { populationOps: ["Sting Operation", "Stealth Retirement Operation"], populationFloor: 1e9 };
+  const c = ["Tracking", "Sting Operation", "Stealth Retirement Operation", "Assassination"].map(name => ({ name }));
+  assert.equal(conservePopulation(c, 1.4e9, o).length, 4);
+  assert.deepEqual(conservePopulation(c, 0.9e9, o).map(x => x.name), ["Tracking", "Assassination"]);
+  assert.equal(conservePopulation(c, null, o).length, 4); // unknown population filters nothing
+  for (const name of CONFIG.bladeburner.populationOps) assert.ok(CONFIG.bladeburner.operations.includes(name), name);
+});
+
+test("sleeve regen hysteresis: on below regenBelow, off above regenAbove", () => {
+  const o = { regenBelow: 0.75, regenAbove: 0.95 };
+  assert.equal(nextSleeveRegenState(false, 0.8, o), false);
+  assert.equal(nextSleeveRegenState(false, 0.7, o), true);
+  assert.equal(nextSleeveRegenState(true, 0.9, o), true);   // holds through the band
+  assert.equal(nextSleeveRegenState(true, 0.96, o), false);
+  // The sleeves must step in before the player's own rest phase would start.
+  assert.ok(CONFIG.sleeves.blade.regenBelow > CONFIG.bladeburner.restBelow);
+  assert.ok(CONFIG.sleeves.blade.regenBelow < CONFIG.sleeves.blade.regenAbove);
 });
 
 // ── Finishing ────────────────────────────────────────────────────────────────

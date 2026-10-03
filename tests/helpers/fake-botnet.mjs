@@ -204,7 +204,10 @@ export function makeWorld(opts = {}) {
       const ram = (RAM[script] ?? 0) * threads;
       if (srv.used + ram > srv.maxRam + 1e-9) { world.execFailures++; return 0; }
       srv.used += ram;
-      world.jobs.push({ pid: world.pid, script, host, threads, target: tgt, ram, startAt: world.clock + delay, landAt: undefined });
+      // The workers pass the delay to the game as additionalMsec, so the action
+      // STARTS at exec and its duration locks at the security of this moment.
+      const landAt = world.clock + delay + durationFor(script, target(tgt));
+      world.jobs.push({ pid: world.pid, script, host, threads, target: tgt, ram, startAt: world.clock, landAt });
       return world.pid++;
     },
     getPlayer: () => ({ money: 0, skills: { hacking: 100 } }),
@@ -311,6 +314,35 @@ export function defineScenarios(test, assert, base = {}) {
     // FINISH in ten minutes - the primary keeps priority by design - but it must
     // progress (the launch count above proves it never took the primary's RAM).
     assert.ok(world.servers.t2.sec < 40, `runner-up security never moved (${world.servers.t2.sec})`);
+  });
+
+  // Formulas path only. The ns.* fallback sizes its threads from hackAnalyze /
+  // growthAnalyze at the target's CURRENT security, which with fat batches in
+  // flight is not the prepped state they land on - so its grows come up a few
+  // hundredths of a percent short per batch and the drift detector re-preps now
+  // and then. That approximation is the fallback's documented nature (README,
+  // "Formulas API"); the landing ORDER is right on both paths.
+  if (base.formulas) test("REGRESSION: a big botnet taking fat bites still lands every hack on a prepped server" + label, () => {
+    // 32TB against t1: the plan takes the largest money fraction, whose grow adds
+    // enough security to stretch any leg STARTED during a hack->weaken or
+    // grow->weaken window by far more than the 200ms landing spacing. With the
+    // delay slept inside the worker (durations fixed at start-after-sleep) most
+    // hacks landed out of order - 261 of 293 on an unprepped server here, and
+    // 43% of ticks spent draining. Durations now lock at launch and the delays
+    // are computed from the current leg times, so the order holds.
+    const { world, ns, advance } = makeWorld({ ...base, w1Ram: 16384, w2Ram: 16384 });
+    const sim = run(world, ns, advance, 10 * 60_000);
+
+    assert.ok(sim.state.fraction >= 0.05, `expected a fat bite, got ${sim.state.fraction}`);
+    assert.ok(world.hackLandings.length > 50, "hacks actually landed");
+    const t1 = world.hackLandings.filter(h => h.target === "t1");
+    const bad = t1.filter(h => h.moneyFrac < 0.995 || h.secOver > 0.01);
+    assert.equal(bad.length, 0, `${bad.length} of ${t1.length} t1 hacks landed unprepped`);
+    const draining = sim.modes.filter(m => m.startsWith("Draining")).length;
+    assert.equal(draining, 0, `${draining} of ${sim.modes.length} ticks draining`);
+    // ...and waiting for a calm launch moment didn't cost the cadence.
+    const expected = Math.floor((10 * 60_000) / sim.state.launchIntervalMs);
+    assert.ok(sim.s.batchId >= expected * 0.9, `launched ${sim.s.batchId}, expected ~${expected}`);
   });
 
   test("from a deeply unprepped target on a small botnet: RAM-bound prep converges monotonically, then batching starts" + label, () => {

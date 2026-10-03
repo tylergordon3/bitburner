@@ -40,7 +40,7 @@ import {
 } from "../lib/player-actions.js";
 import { getNextAugTarget } from "../lib/aug-targets.js";
 import { forNode } from "../lib/config.js";
-import { maybeBuyInfra, inGangSafe } from "../lib/daemon-lib.js";
+import { maybeBuyInfra, inGangSafe, nextBNOverride } from "../lib/daemon-lib.js";
 import { runDaemon, decidePrelude, decideNoTarget, decideAugFlow } from "../lib/daemon-core.js";
 
 // Every tunable value comes from lib/config.js, resolved for BitNode 5 - that's
@@ -73,7 +73,8 @@ const GANG_TRAIN_REQS = FACTION_REQUIREMENTS["Slum Snakes"] ?? {};
  * @param {NS} ns
  */
 function plannedNextBN(ns) {
-  if (ns.args[0] != null) return Number(ns.args[0]);
+  const override = nextBNOverride(ns);
+  if (override != null) return override;
 
   const info = ns.getResetInfo();
   if (info.currentNode !== 5) return CFG.backdoor.defaultNextBN;
