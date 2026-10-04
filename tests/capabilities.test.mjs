@@ -94,7 +94,8 @@ test("the configured campaign is well formed, and every node on it has a daemon"
   const { existsSync } = await import("node:fs");
   for (const [node, level] of CONFIG.campaign.order) {
     assert.ok(Number.isInteger(node) && node >= 1 && node <= 15, `node ${node}`);
-    assert.ok(level >= 1 && (node === 12 || level <= 3), `BN${node} target ${level}`);
+    // A challenge step is checked against CHALLENGE in tests/achievements.test.mjs.
+    assert.ok(level === "challenge" || (level >= 1 && (node === 12 || level <= 3)), `BN${node} target ${level}`);
     const daemon = forNode(node).paths.daemon;
     assert.ok(daemon, `BN${node} has no daemon path`);
     assert.ok(existsSync(new URL(`..${daemon}`, import.meta.url)), `${daemon} does not exist`);

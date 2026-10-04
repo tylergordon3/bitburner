@@ -16,7 +16,7 @@
 // capabilities + contract-solver coverage. It makes NO purchases and never resets.
 // Idea ported from ame824/autoDoIt (tools/self-test.js).
 
-import { CONFIG, forNode } from "../lib/config.js";
+import { CONFIG, forReset } from "../lib/config.js";
 import { allServers } from "../lib/net.js";
 import { getCapabilities } from "../lib/capabilities.js";
 import { supportedContractTypes } from "../lib/contract-solvers.js";
@@ -32,7 +32,7 @@ function safeRam(ns, f) {
 export async function main(ns) {
   const caps = getCapabilities(ns);
   const node = caps.currentNode;
-  const cfg = forNode(node);
+  const cfg = forReset(caps.reset);
   const daemonPath = cfg.paths.daemon;
 
   ns.tprint("");
@@ -114,8 +114,10 @@ export async function main(ns) {
   // 5. Detected capabilities for this run.
   ns.tprint(
     `APIs: singularity=${caps.singularity} gang=${caps.gang} corp=${caps.corporation} ` +
-    `sleeves=${caps.sleeves} grafting=${caps.grafting} bladeburner=${caps.bladeburner}`
+    `sleeves=${caps.sleeves} grafting=${caps.grafting} bladeburner=${caps.bladeburner} ` +
+    `hacknetServer=${caps.hacknetServer} stanek=${caps.stanek}`
   );
+  if (caps.challenge) ns.tprint("This run was entered as a CHALLENGE run (see CHALLENGE in lib/config.js): its config overlay is in force.");
   if (caps.singularity) {
     ns.tprint(`Singularity RAM multiplier: ${caps.singularityRamMultiplier}x (1x once SF4.3 is owned).`);
   }

@@ -128,3 +128,14 @@ test("REGRESSION: nothing cheaper is bought while a dearer aug is within reach",
   // Nothing affordable, nothing near: nothing.
   assert.deepEqual(nextAugPurchase(ready, { spendable: 1, incomePerMs: 0, horizonMs: 1 }), { buy: null, savingFor: null });
 });
+
+test("installReason: a short queue is installed eventually, even where minQueued is above one", () => {
+  const dear = { ...DEFAULT, minQueued: 4, timeTriggerMs: 1_000 };
+  // Three bought, minQueued four: the ordinary time trigger does not fire...
+  assert.equal(installReason(st({ queued: 3, elapsedMs: 1_000 }), dear), null);
+  // ...but twice the time does, so they do not sit uninstalled for the whole node.
+  assert.equal(installReason(st({ queued: 3, elapsedMs: 2_000 }), dear), "time");
+  assert.equal(installReason(st({ queued: 1, elapsedMs: 2_000 }), dear), "time");
+  // Nothing queued is still never a reason.
+  assert.equal(installReason(st({ queued: 0, elapsedMs: 1e12 }), dear), null);
+});

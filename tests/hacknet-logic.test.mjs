@@ -10,6 +10,11 @@ import {
   pickUpgrade,
   planHashSpend,
   activityHints,
+  fleetRateFactor,
+  levelUpgradeCost,
+  ramUpgradeCost,
+  coreUpgradeCost,
+  newServerBundle,
 } from "../lib/hacknet-logic.js";
 
 const server = (index, level = 1, ram = 1, cores = 1, cache = 1, ramUsed = 0) =>
@@ -85,6 +90,99 @@ test("pickUpgrade takes the best candidate inside budget AND payback", () => {
   assert.equal(slow.reason, "payback too slow");
 
   assert.equal(pickUpgrade([], { budget: 1, dollarsPerHash, maxPaybackMs: 1 }).reason, "fleet maxed");
+});
+
+// ── A new server is worth its bundle ─────────────────────────────────────────
+
+test("the price curve matches the game's HacknetServers formulas", () => {
+  // calculateLevelUpgradeCost: 10 * BaseCost(50e3) * 1.1^level
+  assert.equal(levelUpgradeCost(1), 10 * 50e3 * 1.1);
+  assert.equal(levelUpgradeCost(1, 0.5), 5 * 50e3 * 1.1);
+  assert.equal(levelUpgradeCost(HACKNET_SERVER.maxLevel), Infinity);
+  // calculateRamUpgradeCost: ram * RamBaseCost(200e3) * 1.4^log2(ram)
+  assert.equal(ramUpgradeCost(1), 200e3);
+  assert.ok(Math.abs(ramUpgradeCost(64) - 64 * 200e3 * Math.pow(1.4, 6)) < 1e-3);
+  assert.equal(ramUpgradeCost(HACKNET_SERVER.maxRam), Infinity);
+  // calculateCoreUpgradeCost: CoreBaseCost(1e6) * 1.55^(cores - 1)
+  assert.equal(coreUpgradeCost(1), 1e6);
+  assert.ok(Math.abs(coreUpgradeCost(11) - 1e6 * Math.pow(1.55, 10)) < 1e-3);
+  assert.equal(coreUpgradeCost(HACKNET_SERVER.maxCores), Infinity);
+});
+
+test("newServerBundle: a cheap server is its own best deal, a dear one is its upgrades", () => {
+  // Server #1 ($50k for 0.001/s): no upgrade is cheaper per hash than that.
+  const first = newServerBundle({ purchaseCost: 50e3, rate });
+  assert.deepEqual(first, { cost: 50e3, gain: hashGainRate(1, 0, 1, 1) });
+
+  // Server #6 ($16.8m): the bundle is far cheaper per hash than the bare server.
+  const price = 50e3 * Math.pow(3.2, 5);
+  const sixth = newServerBundle({ purchaseCost: price, rate });
+  assert.ok(sixth.cost > price && sixth.gain > 0.01);
+  assert.ok(sixth.gain / sixth.cost > 10 * (0.001 / price));
+
+  // Unpriced / unproductive -> never a candidate.
+  assert.equal(newServerBundle({ purchaseCost: Infinity, rate }).gain, 0);
+  assert.equal(newServerBundle({ purchaseCost: 1e6, rate: () => 0 }).gain, 0);
+});
+
+/** Run the buyer to a standstill with unlimited money; returns the fleet. */
+function growFleet(maxPaybackMs) {
+  const servers = [];
+  for (let i = 0; i < 20_000; i++) {
+    const costs = servers.map(s => ({
+      level: levelUpgradeCost(s.level), ram: ramUpgradeCost(s.ram), cores: coreUpgradeCost(s.cores),
+    }));
+    const ranked = rankUpgrades({ servers, costs, purchaseCost: 50e3 * Math.pow(3.2, servers.length), rate });
+    const { pick } = pickUpgrade(ranked, { budget: Infinity, dollarsPerHash: 250_000, maxPaybackMs });
+    if (!pick) break;
+    if (pick.kind === "server") servers.push(server(servers.length));
+    else if (pick.kind === "level") servers[pick.index].level++;
+    else if (pick.kind === "ram") servers[pick.index].ram *= 2;
+    else servers[pick.index].cores++;
+  }
+  return servers;
+}
+
+test("the fleet no longer stalls at the last server whose FIRST LEVEL pays back", () => {
+  // Scored bare, server #6 ($16.8m for $250/s) is a 19-hour payback and a 6-hour
+  // horizon stopped at 5 servers - while still buying their 41st levels.
+  const fleet = growFleet(6 * 3_600_000);
+  assert.ok(fleet.length >= 8, `fleet of ${fleet.length}`);
+  // ...and it still stops: the 20th server ($198t) never pays back in 6 hours.
+  assert.ok(fleet.length < HACKNET_SERVER.maxServers);
+  // Every server it bought was then built up, not left at level 1.
+  assert.ok(fleet.every(s => s.level > 10));
+});
+
+test("a new server is paid for at its price but judged on its bundle", () => {
+  const price = 50e3 * Math.pow(3.2, 5);
+  const ranked = rankUpgrades({ servers: [], costs: [], purchaseCost: price, rate });
+  const s = ranked[0];
+  assert.equal(s.kind, "server");
+  assert.equal(s.cost, price);                       // what the purchase costs
+  assert.equal(s.gain, hashGainRate(1, 0, 1, 1));    // what the purchase adds
+  assert.ok(s.bundleCost > price && s.bundleGain > s.gain);
+
+  const pay = { dollarsPerHash: 250_000, maxPaybackMs: 6 * 3_600_000 };
+  // Budget is tested against the price alone...
+  assert.equal(pickUpgrade(ranked, { ...pay, budget: price }).pick?.kind, "server");
+  assert.equal(pickUpgrade(ranked, { ...pay, budget: price - 1 }).reason, "over budget");
+  // ...and a horizon the bundle can't meet still refuses it.
+  assert.equal(pickUpgrade(ranked, { ...pay, budget: price, maxPaybackMs: 60_000 }).reason, "payback too slow");
+});
+
+test("fleetRateFactor measures the BitNode's multiplier off the fleet", () => {
+  const own = (level, ram, cores, production, ramUsed = 0) => ({ level, ram, cores, production, ramUsed });
+  // BN5-style HacknetNodeMoney 0.2: the game reports a fifth of the formula.
+  const real = hashGainRate(10, 0, 4, 2, 1.5) * 0.2;
+  assert.ok(Math.abs(fleetRateFactor([own(10, 4, 2, real)], 1.5) - 0.2) < 1e-12);
+  // A server bought this instant reads 0 and must not zero the estimate...
+  assert.ok(Math.abs(fleetRateFactor([own(1, 1, 1, 0), own(10, 4, 2, real)], 1.5) - 0.2) < 1e-12);
+  // ...but a fleet that really produces nothing (BN8) does.
+  assert.equal(fleetRateFactor([own(10, 4, 2, 0)], 1.5), 0);
+  // Nothing to measure (no fleet, or only busy servers): assume 1.
+  assert.equal(fleetRateFactor([], 1), 1);
+  assert.equal(fleetRateFactor([own(10, 4, 2, real, 2)], 1.5), 1);
 });
 
 test("planHashSpend sells everything under cash priority", () => {

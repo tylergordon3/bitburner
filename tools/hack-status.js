@@ -34,7 +34,7 @@ const WORKERS = [P.hack, P.grow, P.weaken];
 
 /**
  * The manager's own view of one target, mirrored here rather than imported:
- * importing hacking/manager.js would pull its whole ~12GB of Netscript into this
+ * importing hacking/manager.js would pull its whole ~10GB of Netscript into this
  * tool. The pure parts (preppedScale, planCycle, incomeRate) ARE the manager's,
  * so the numbers below are the ones it ranks by.
  * @param {NS} ns @param {string} target @param {number} ramBudget
@@ -231,7 +231,9 @@ export async function main(ns) {
   // most. (Its own split also favours targets it is already working and marks
   // down ones that need a long prep, so the live one can differ at the margin -
   // the State lines above say what it actually chose.)
-  const share = new Map(B.allocateRam({
+  // (Named `split`, not `share`: the RAM analyser bills identifiers by name, and
+  // a variable called `share` cost this tool ns.share's 2.4GB.)
+  const split = new Map(B.allocateRam({
     totalRam: capacity,
     curves: ranked.filter(r => r.points.length).map(r => ({ key: r.target, points: r.points, minRam: r.minRam })),
     maxTargets: H.maxTargets,
@@ -240,7 +242,7 @@ export async function main(ns) {
   // Targets with a share first (best earner first), then the rest by what each
   // would earn alone.
   ranked.sort((a, b) =>
-    (share.get(b.target)?.income ?? -1) - (share.get(a.target)?.income ?? -1) || b.income - a.income);
+    (split.get(b.target)?.income ?? -1) - (split.get(a.target)?.income ?? -1) || b.income - a.income);
 
   ns.tprint("-".repeat(72));
   ns.tprint(`Targets (top ${Math.min(top, ranked.length)} of ${ranked.length}). "share" is the manager's split of the ` +
@@ -249,16 +251,16 @@ export async function main(ns) {
     `${"batch".padStart(10)} ${"depth".padStart(6)} ${"would hold".padStart(11)}`);
   for (const r of ranked.slice(0, top)) {
     const hold = r.cycle ? r.cycle.depth * r.cycle.plan.ram : 0;
-    ns.tprint(`  ${r.target.padEnd(20)} ${(share.has(r.target) ? ram(share.get(r.target).ram) : "-").padStart(10)} ${$(r.income * 1000).padStart(10)} ` +
+    ns.tprint(`  ${r.target.padEnd(20)} ${(split.has(r.target) ? ram(split.get(r.target).ram) : "-").padStart(10)} ${$(r.income * 1000).padStart(10)} ` +
       `${(r.cycle ? (r.cycle.plan.hackedFraction * 100).toFixed(1) + "%" : "-").padStart(7)} ` +
       // A chance of 0.0% across the board means the math is being asked about an
       // unrooted server, not that the targets are hard - see lib/formulas.js.
       `${(r.hackChance * 100).toFixed(1) + "%"}`.padStart(7) +
       ` ${(r.cycle ? ram(r.cycle.plan.ram) : "-").padStart(10)} ${String(r.cycle?.depth ?? "-").padStart(6)} ${ram(hold).padStart(11)}`);
   }
-  const spread = [...share.values()].reduce((sum, a) => sum + a.ram, 0);
-  const earning = [...share.values()].reduce((sum, a) => sum + a.income, 0);
-  ns.tprint(`  The ${share.size} with a share hold ~${ram(spread)} of ${ram(capacity)} ` +
+  const spread = [...split.values()].reduce((sum, a) => sum + a.ram, 0);
+  const earning = [...split.values()].reduce((sum, a) => sum + a.income, 0);
+  ns.tprint(`  The ${split.size} with a share hold ~${ram(spread)} of ${ram(capacity)} ` +
     `(${capacity > 0 ? ((spread / capacity) * 100).toFixed(0) : 0}% of the fleet) for ~${$(earning * 1000)}/sec.`);
   ns.tprint("=".repeat(72));
 }

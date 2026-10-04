@@ -75,6 +75,9 @@ export function makeWorld(opts = {}) {
       ...tinyTargets(opts),
     },
     hackLandings: /** @type {{t: number, moneyFrac: number, secOver: number, target: string}[]} */ ([]),
+    // The player's grow multiplier (ns.getPlayer().mults.hacking_grow): a graft,
+    // a Stanek charge or an IPvGO bonus moves it under a running manager.
+    growMult: 1,
     stolen: 0,
     execFailures: 0,
     // Every process ns.kill() took down, so a scenario can assert that nothing
@@ -117,7 +120,7 @@ export function makeWorld(opts = {}) {
   const hackPct = s => 0.002 * (s.hackMult ?? 1) * Math.max(0, 100 - s.sec) / (100 - s.minSec);
   const growLog = sec => Math.min(Math.log1p(0.03 / sec), GROW_MAX_LOG);
   // Log-growth per grow thread.
-  const growRate = s => 0.0045 * growLog(s.sec) / growLog(s.minSec);
+  const growRate = s => 0.0045 * world.growMult * growLog(s.sec) / growLog(s.minSec);
   const growThreadsFor = (s, targetMoney) =>
     Math.log(targetMoney / Math.max(s.money, 1)) / growRate(s);
 
@@ -253,7 +256,7 @@ export function makeWorld(opts = {}) {
       world.jobs.push({ pid: world.pid, script, host, threads, target: tgt, tag, ram, startAt: world.clock, landAt });
       return world.pid++;
     },
-    getPlayer: () => ({ money: 0, skills: { hacking: 100 } }),
+    getPlayer: () => ({ money: 0, skills: { hacking: 100 }, mults: { hacking_grow: world.growMult } }),
     formulas: {
       // Like the game's: every field defaults to empty/false, INCLUDING
       // hasAdminRights - a mock server is not rooted until the caller says so.
@@ -657,6 +660,88 @@ export function defineScenarios(test, assert, base = {}) {
       tick();
       assert.equal(shareJobs().length, 0);
       assert.deepEqual(world.killed.filter(k => k.script !== SHARE), []);
+    } finally {
+      delete globalThis.gordState;
+      delete globalThis.gordShareState;
+    }
+  });
+
+  test("batch plans are kept between ticks, and re-made the moment the player's grow multiplier moves" + label, () => {
+    // (6TB, so the window is full and a batch launches every interval.)
+    const { world, ns, advance } = makeWorld({ ...base, w1Ram: 4096, w2Ram: 2048 });
+    const s = freshState();
+    // Every batch size the planner tries is a grow-thread question to the game
+    // (Formulas growThreads, or growthAnalyze without it) - the costly part of a
+    // plan, and what the manager used to ask ~25 times per target on every tick.
+    let asked = 0;
+    const counted = fn => (...args) => { asked++; return fn(...args); };
+    ns.growthAnalyze = counted(ns.growthAnalyze);
+    ns.formulas.hacking.growThreads = counted(ns.formulas.hacking.growThreads);
+    const tick = () => { step(ns, s, world.clock); advance(H.batchSpacingMs); };
+    // Grow threads per hack thread in the batch launched last (the RAM budget is
+    // fixed, so a costlier grow shrinks the bite: the ratio is what must move).
+    const threadsOf = (script, tag) => world.jobs
+      .filter(j => j.script === script && j.tag === tag).reduce((n, j) => n + j.threads, 0);
+    const lastBatchGrow = () => {
+      const tag = `batch-${s.batchId - 1}`;
+      return threadsOf("/hacking/grow.js", tag) / threadsOf("/hacking/hack.js", tag);
+    };
+
+    for (let i = 0; i < 600; i++) tick();                       // 2 min: steady batching
+    asked = 0;
+    const ticks = 3 * H.targetRescoreMs / H.batchSpacingMs;     // three re-ranks' worth
+    for (let i = 0; i < ticks; i++) tick();
+    assert.ok(asked / ticks < 4, `the game was asked for grow threads ${(asked / ticks).toFixed(1)} times per tick`);
+
+    // Grow at half strength (a multiplier lost): the very next batch must carry
+    // about twice the grow per hack thread, not the cached plan's.
+    const before = lastBatchGrow();
+    const launched = s.batchId;
+    world.growMult = 0.5;
+    for (let i = 0; i < 50 && s.batchId === launched; i++) tick();
+    assert.ok(s.batchId > launched, "no batch was launched after the change");
+    const after = lastBatchGrow();
+    assert.ok(after >= before * 1.8, `grow per hack thread ${before.toFixed(2)} -> ${after.toFixed(2)}: the plan was not re-made`);
+  });
+
+  test("share.js left by an earlier manager is found and stopped, without a process listing of every host every tick" + label, () => {
+    const { world, ns, advance, deleteServer } = makeWorld({ ...base });
+    const s = freshState();
+    let listings = 0;
+    const ps = ns.ps;
+    ns.ps = host => { listings++; return ps(host); };
+    const tick = () => { step(ns, s, world.clock); advance(H.batchSpacingMs); };
+    const shareJobs = () => world.jobs.filter(j => j.script === SHARE);
+
+    try {
+      // A manager that was killed leaves its share.js running; the next one must
+      // stop it on its first tick (nobody is farming reputation).
+      assert.ok(ns.exec(SHARE, "w2", 3) > 0);
+      tick();
+      assert.equal(shareJobs().length, 0, "the leftover share.js was not stopped on the first tick");
+
+      // With nothing to watch, the network is listed once per networkRescanMs -
+      // not once per tick (ns.ps builds an object per running process).
+      listings = 0;
+      const ticks = 4 * H.networkRescanMs / H.batchSpacingMs;
+      for (let i = 0; i < ticks; i++) tick();
+      const hosts = Object.keys(world.servers).length;
+      assert.ok(listings <= hosts * 4, `${listings} process listings in ${ticks} ticks over ${hosts} hosts`);
+
+      // One that turns up later is still caught by the next sweep.
+      assert.ok(ns.exec(SHARE, "home", 1) > 0);
+      for (let i = 0; i <= H.networkRescanMs / H.batchSpacingMs; i++) tick();
+      assert.equal(shareJobs().length, 0, "a share.js started behind the manager's back was never stopped");
+      assert.deepEqual(world.killed.filter(k => k.script !== SHARE), [], "the sweep killed something that was not share.js");
+
+      // A host this manager shares on can be deleted under it (ns.ps throws on a
+      // gone hostname): the share step must carry on, not fail every tick.
+      globalThis.gordState = { action: "Faction Work (test)" };
+      for (let i = 0; i < 600; i++) tick();
+      assert.ok(shareJobs().length > 0 && shareJobs().every(j => j.host === "w1"), "share should be running on w1");
+      deleteServer("w1");
+      for (let i = 0; i < 10; i++) tick();
+      assert.deepEqual(world.log.filter(l => l.startsWith("[share] disabled")), []);
     } finally {
       delete globalThis.gordState;
       delete globalThis.gordShareState;

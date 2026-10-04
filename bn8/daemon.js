@@ -71,10 +71,10 @@ import {
 } from "../lib/player-actions.js";
 import { getNextAugTarget, getMoneyHoardGoal, factionRepStillUseful } from "../lib/aug-targets.js";
 import { forNode } from "../lib/config.js";
-import { playerMoney, hackingLevel, nextBNOverride, installReason, startBestFactionWork } from "../lib/daemon-lib.js";
+import { playerMoney, hackingLevel, installReason, startBestFactionWork } from "../lib/daemon-lib.js";
 import { managePurchasedServers } from "../lib/pserv.js";
 import { runDaemon, decidePrelude, decideAugFlow, pursueNextFaction } from "../lib/daemon-core.js";
-import { allowanceStep } from "../lib/stocks-logic.js";
+import { liveTrader, treasuryStep } from "../lib/stocks-logic.js";
 
 // Every tunable value comes from lib/config.js, resolved for BitNode 8.
 const CFG = forNode(8);
@@ -86,35 +86,30 @@ const FINAL_HOST = CFG.backdoor.finalHost;
 const STUDY_LOCATION = /** @type {any} */ (PL.studyLocation);
 const STUDY_CLASS = /** @type {any} */ (PL.studyClass);
 
-/**
- * The BitNode to enter when lib/finish-bn.js destroys w0r1d_d43m0n: the player's
- * explicit choice (`run bn8/daemon.js 12`, remembered across installs by
- * nextBNOverride), else the halt sentinel 0 - the node is finished by hand and
- * the player picks what comes next. (Leaving this hook out would hand the choice
- * to the campaign plan, lib/daemon-lib.js plannedNextNode, like the other nodes.)
- * @param {NS} ns
- */
-function plannedNextBN(ns) {
-  return nextBNOverride(ns) ?? 0;
-}
-
 // ── Treasury ─────────────────────────────────────────────────────────────────
 
-/** allowanceStep's state between ticks. */
-let _purse = /** @type {any} */ (null);
-// The trader counts what everyone else spends, but only while it runs, and from
-// zero each time it starts. These keep one continuous total across both.
-let _outflowBase = 0;
-let _traderOutflow = 0;
-let _lastCash = /** @type {number | null} */ (null);
-/** Cash a faction invite needs to see: { amount, until }. */
-let _joinHold = /** @type {{amount: number, until: number} | null} */ (null);
+// Module scope is NOT per run: the game caches a script's module until its
+// source changes (bitburner-src NetscriptJSEvaluator.ts moduleCache), so these
+// survive an aug install exactly as globalThis does. Everything here is
+// therefore tied to the install it belongs to (`epoch`, getResetInfo's
+// lastAugReset) and dropped when that changes - an install takes the money
+// back to $250m, and books that remember the last run's billions pay nothing
+// out of it.
 
-/** The trader's published state, if it is alive. */
-function traderState() {
-  const st = globalThis.gordStockState;
-  if (!st || Date.now() - (st.updatedAt ?? 0) > ST.stateStaleMs) return null;
-  return (st.tier ?? 0) > 0 && st.netWorth > 0 ? st : null;
+/** treasuryStep's book between ticks: the allowance (`purse`) and the running
+ *  total of what everything but the trader has spent. */
+let _book = /** @type {any} */ (null);
+/** Cash a faction invite needs to see: { amount, until, epoch }. */
+let _joinHold = /** @type {{amount: number, until: number, epoch: number} | null} */ (null);
+
+/** The install this run belongs to. (The daemon pays getResetInfo already.) @param {NS} ns */
+function epochOf(ns) {
+  return ns.getResetInfo().lastAugReset;
+}
+
+/** The trader's published state, if it is alive - and this run's. @param {NS} ns */
+function traderState(ns) {
+  return liveTrader(globalThis.gordStockState, { now: Date.now(), staleMs: ST.stateStaleMs, epoch: epochOf(ns) });
 }
 
 /**
@@ -127,7 +122,12 @@ function traderState() {
  */
 function installDue(ns) {
   const snap = globalThis.gordAugSnapshot;
+  const reset = ns.getResetInfo().lastAugReset;
   if (!snap || Date.now() - (snap.updatedAt ?? 0) > 4 * CFG.daemon.tickMs) return false;
+  // The snapshot that TRIGGERED an install is still on globalThis, seconds old,
+  // when the daemon comes back from it - and it still says "twelve queued". On
+  // that first tick it would drop the fence in front of a fresh $250m.
+  if ((snap.updatedAt ?? 0) < reset) return false;
   const installed = new Set(snap.installed ?? []);
   const queued = (snap.owned ?? []).filter(a => !installed.has(a));
   const priority = CFG.augs.installPriority;
@@ -136,7 +136,7 @@ function installDue(ns) {
     redPillQueued: !!snap.redPillQueued,
     hasPriorityAug: priority.some(a => queued.includes(a)),
     allPriorityDone: priority.every(a => installed.has(a)),
-    elapsedMs: Date.now() - ns.getResetInfo().lastAugReset,
+    elapsedMs: Date.now() - reset,
     favor: null, // augs.install.favorInstall is off here: donations are open from the start
   }, CFG.augs.install) !== null;
 }
@@ -151,35 +151,22 @@ function installDue(ns) {
  */
 function runTreasury(ns, hoard) {
   const cash = playerMoney(ns);
-  const trader = traderState();
+  const trader = traderState(ns);
 
-  // Total spent by everything but the trader. While it runs it measures this
-  // exactly (it knows its own trades); before it is up - and BN8's first
-  // minutes are precisely that - any drop in cash is spending.
-  if (trader) {
-    if ((trader.outflow ?? 0) < _traderOutflow) _outflowBase += _traderOutflow; // it restarted
-    _traderOutflow = trader.outflow ?? 0;
-  } else if (_lastCash !== null && cash < _lastCash) {
-    _outflowBase += _lastCash - cash;
-  }
-  _lastCash = cash;
-
-  const netWorth = trader ? trader.netWorth : cash;
-  _purse = allowanceStep(_purse, {
-    netWorth,
-    outflow: _outflowBase + _traderOutflow,
-    has4S: (trader?.tier ?? 0) >= 2,
-    // Cash the trader can't place - every worthwhile stock at its share cap -
-    // costs nothing to spend. Only once it has been idle long enough to be that
-    // rather than cash between two trades.
-    idleCash: trader && (trader.idleTicks ?? 0) >= TR.idleTicks ? trader.idleCash ?? 0 : 0,
-  }, TR);
+  // The books: what everything but the trader has spent (the trader measures
+  // it exactly while it runs - it knows its own trades; before it is up, and
+  // BN8's first minutes are precisely that, any drop in cash is spending), and
+  // the allowance that follows. Started afresh after every install.
+  _book = treasuryStep(_book, { epoch: epochOf(ns), cash, trader }, TR);
+  const purse = _book.purse;
+  const netWorth = _book.netWorth;
 
   const release = hoard <= 0 && installDue(ns);
-  globalThis.gordStockCashWanted = { amount: _purse.wanted, hoard, release, updatedAt: Date.now() };
+  globalThis.gordStockCashWanted = { amount: purse.wanted, hoard, release, updatedAt: Date.now() };
   // The trader republishes the floor after every trade; this is the same line
-  // for the ticks it isn't running (the cold start, a helper that lost its host).
-  if (!trader) globalThis.gordMoneyFloor = release ? 0 : Math.max(0, cash - _purse.wanted);
+  // for the ticks it isn't running (the cold start, the first tick after an
+  // install, a helper that lost its host).
+  if (!trader) globalThis.gordMoneyFloor = release ? 0 : Math.max(0, cash - purse.wanted);
 
   // buyAugs saves for a dear aug when "income" will cover it within the save
   // horizon, and weighs a donation against the time income takes to earn it
@@ -191,7 +178,7 @@ function runTreasury(ns, hoard) {
   const payout = (trader?.tier ?? 0) >= 2 ? TR.payout : TR.payoutPre4S;
   globalThis._incomeRatePerMs = release ? 0 : Math.max(0, trader?.incomePerMs ?? 0) * payout;
 
-  return { allowance: _purse.wanted, netWorth, release, trader };
+  return { allowance: purse.wanted, netWorth, release, trader };
 }
 
 /**
@@ -203,7 +190,7 @@ function runTreasury(ns, hoard) {
  * @param {NS} ns @param {any} target
  */
 function inviteHoard(ns, target) {
-  const netWorth = traderState()?.netWorth ?? playerMoney(ns);
+  const netWorth = traderState(ns)?.netWorth ?? playerMoney(ns);
   let amount = 0;
   let faction = "";
   const big = target ? null : getMoneyHoardGoal(ns);
@@ -211,6 +198,7 @@ function inviteHoard(ns, target) {
     amount = big.money;
     faction = big.faction;
   }
+  if (_joinHold && _joinHold.epoch !== epochOf(ns)) _joinHold = null; // the last run's
   if (_joinHold && Date.now() < _joinHold.until && netWorth >= _joinHold.amount * TR.hoardNetWorthMult) {
     amount = Math.max(amount, _joinHold.amount);
   }
@@ -331,6 +319,7 @@ async function decideNextPriority(ns) {
           _joinHold = {
             amount: playerMoney(ns) + pursuit.joinMoneyMissing + PL.travelCost,
             until: Date.now() + TR.joinHoldMs,
+            epoch: epochOf(ns),
           };
         }
       } else {
@@ -370,12 +359,12 @@ function afterDecide(ns, state) {
 
 /** The book, the allowance and the market cycle. @param {NS} ns */
 function statusLine(ns) {
-  const t = traderState();
+  const t = traderState(ns);
   if (!t) return " | Stocks: trader not running";
   const num = n => ns.format.number(n);
   const mode = t.tier >= 2 ? "4S" : "est";
   const perHour = (t.incomePerMs ?? 0) * 3_600_000;
-  const purse = _purse ? ` | Allowance: $${num(Math.max(0, _purse.wanted))}` : "";
+  const purse = _book?.purse ? ` | Allowance: $${num(Math.max(0, _book.purse.wanted))}` : "";
   const data = t.tier >= 2 ? "" : ` | 4S payback ${Number.isFinite(t.paybackTicks) ? `${Math.round(t.paybackTicks)} ticks` : "n/a"}`;
   return ` | Net worth: $${num(t.netWorth)} (${t.positions.length} pos, ${mode}, ~$${num(perHour)}/h)` +
     purse + data + ` | Cycle in ~${Math.round(t.ticksToCycle ?? 0)}`;
@@ -386,7 +375,8 @@ export async function main(ns) {
   await runDaemon(ns, {
     cfg: CFG,
     self: SELF,
-    plannedNextBN,
+    // What comes after BN8 is the campaign plan's choice (lib/daemon-lib.js
+    // plannedNextNode), like every other node; `run bn8/daemon.js 12` overrides it.
     decide: decideNextPriority,
     // The node's engine goes ahead of everything else that wants off-home RAM,
     // and is worth a warning when nothing has room for it. (The core launches

@@ -10,6 +10,7 @@ import {
   blackOpDecision,
   fallbackAction,
   chooseSkill,
+  spendableSkillPoints,
   chooseCity,
   restAction,
   planSleeveBladeWork,
@@ -152,6 +153,20 @@ test("chooseSkill takes the lowest cost per weight it can afford", () => {
   assert.equal(chooseSkill(skills, 5, weights).name, "B");   // A unaffordable
   assert.equal(chooseSkill(skills, 2, weights), null);
   assert.equal(chooseSkill([{ name: "A", level: 90, cost: Infinity }], 1e9, weights), null); // game cap
+});
+
+test("spendableSkillPoints: a configured bank is kept once the black ops are settled", () => {
+  // No bank configured (the default): every point is spendable, as before.
+  assert.equal(spendableSkillPoints(500, undefined, true), 500);
+  assert.equal(spendableSkillPoints(500, 0, true), 500);
+  // A bank, but a black op still needs skills: nothing is held back.
+  assert.equal(spendableSkillPoints(500, 100_000, false), 500);
+  // Settled: the first 100,000 stay unspent (the achievement reads skillPoints
+  // >= 100000), anything above is spent as usual.
+  assert.equal(spendableSkillPoints(500, 100_000, true), 0);
+  assert.equal(spendableSkillPoints(100_250, 100_000, true), 250);
+  const weights = { A: { weight: 1 } };
+  assert.equal(chooseSkill([{ name: "A", level: 0, cost: 3 }], spendableSkillPoints(90_000, 100_000, true), weights), null);
 });
 
 test("chooseCity moves to a clearly more populous calm city only", () => {

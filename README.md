@@ -13,7 +13,7 @@ from anything (including the deliberately-lean `early/driver.js`).
 - `forNode(n)` — `CONFIG` deep-merged with `BITNODE[n]`. Each `bnX/daemon.js` calls
   `forNode(2)` / `(3)` / `(4)` at module scope, since it knows its node literally.
 
-Two things deliberately stay out: `lib/gang.js`'s gain-formula replicas (they
+Two things deliberately stay out: `lib/gang-logic.js`'s gain-formula replicas (they
 transcribe the game's own `formulas.ts`) and the dashboard's layout CSS.
 
 ## Formulas API
@@ -170,9 +170,59 @@ run tools/hack-status.js
 ## BitNode entry points
 
 Each bitnode gets a thin `bnX/daemon.js` orchestrator; everything reusable lives in `lib/`.
+New to the game or the repo? [docs/GUIDE.md](docs/GUIDE.md) is the on-ramp; this file is
+the reference. The plan for the achievements still missing, the developers' exploits and
+the BitNode order is [docs/ACHIEVEMENTS.md](docs/ACHIEVEMENTS.md).
+
+Fifteen nodes, five engines:
+
+| Engine | Nodes | What it is |
+| --- | --- | --- |
+| [`lib/plain-daemon.js`](lib/plain-daemon.js) | BN1, BN4, and challenge runs | The plain loop: factions, augs, install, hack `w0r1d_d43m0n`. |
+| [`lib/gang-daemon.js`](lib/gang-daemon.js) | BN5, BN11, BN12, BN15 | The plain loop plus a karma grind into a gang (BN5's logic, parameterised by config). |
+| [`lib/blade-daemon.js`](lib/blade-daemon.js) | BN6, BN7, BN13, BN14 | Finish through Bladeburner's black ops instead of hacking. |
+| own daemon | BN2 (gang first), BN3 (corporation), BN9 (hacknet servers), BN10 (sleeves + grafting) | The node's mechanic is the strategy. |
+| [`bn8/daemon.js`](bn8/daemon.js) | BN8 | The stock trader ([`lib/stocks.js`](lib/stocks.js), decisions in [`lib/stocks-logic.js`](lib/stocks-logic.js)) is the only income there. |
+
+The daemons for BN8 and BN11-15 have not been through a live game yet.
+
+### The campaign plan
+
+Which node comes next is one list, `campaign.order` in [`lib/config.js`](lib/config.js),
+read by every daemon when its node is finished
+([`lib/capabilities.js`](lib/capabilities.js) `campaignStep`). A step is
+`[node, level]` - go round until that Source-File level is held, counting the level the
+run being finished awards - or `[node, "challenge"]`: one run of that node entered with the
+BitNode options, and played with the config, that earn its challenge achievement
+(`CHALLENGE` in `lib/config.js`; `forReset(ns.getResetInfo())` resolves the config for the
+run in hand, challenge overlay included). The plan halts (`0`) when the list is done.
+An explicit daemon argument (`run bn7/daemon.js 14`, or `0` to hold) overrides it for the
+rest of that node, the HUD's FINISH switch holds any finish, and BN10 never ends itself.
+
+Whether a challenge is already earned is something only the save knows, so a one-shot
+helper ([`lib/achievements.js`](lib/achievements.js), 2.6GB) reads the held achievements
+out of `singularity.getSaveData()` and publishes them; the HUD's **ACHIEVE** tab shows the
+plan's next steps and what is still missing. Until it has run, a plan that has reached a
+challenge step waits rather than guesses.
+
+### Stanek's Gift
+
+Wherever the Gift exists (BN13, or SF13) the bot takes it, lays out fragments for the
+node's profile (`stanek.profile`: hacking, or Bladeburner) and charges them with RAM the
+botnet is not using: [`lib/stanek.js`](lib/stanek.js) (manager, off-home),
+[`hacking/charge.js`](hacking/charge.js) (the worker), decisions in the pure
+[`lib/stanek-logic.js`](lib/stanek-logic.js), HUD tab STANEK. The Gift can only be accepted
+while no augmentation but NeuroFlux is owned or queued, and with SF7.3 joining the
+Bladeburner division hands one out - so until [`early/stanek-boot.js`](early/stanek-boot.js)
+has asked (`giftStatus`: off / pending / accepted / refused), nothing buys an aug, starts a
+graft or joins the division.
+
+### The daemons
 
 - `bn4/daemon.js` — BN4 (Singularity): faction/aug pipeline, backdoors, install loop.
-  The reference implementation — the other four are this plus one special system.
+  The reference implementation (`lib/plain-daemon.js`) — the others are this plus one
+  special system. `bn1/daemon.js` is the same engine with the config of whatever run it
+  finds itself in, which is what makes it the daemon of the challenge runs too.
 - `bn2/daemon.js` — BN2 (gangs): bootstraps Slum Snakes (30 combat stats, -9 karma, $1M),
   creates the gang, then launches `lib/gang.js` on whatever server has ~35GB free.
 - `lib/gang.js` — standalone BN-agnostic gang manager (recruit/ascend/equip/tasks/territory);
@@ -221,10 +271,9 @@ Each bitnode gets a thin `bnX/daemon.js` orchestrator; everything reusable lives
   Overclock, Reaper, Evasive System, Digital Observer; Datamancer 0, Tracer capped),
   Hands of Midas keeps a real weight because contract money is real income here,
   and installs batch bigger (`augs.install`). SF7 buffs the four `bladeburner_*`
-  multipliers (+8/12/14%) and SF7.3 installs the Simulacrum on joining, so by
-  default the node **re-enters itself until SF7.3** (`bladeburner.reenterUntilSF`,
-  `plannedNodeAfterBlade`); the HUD's FINISH toggle still holds Operation Daedalus,
-  and a daemon arg overrides the plan. Sleeves work for the division on both
+  multipliers (+8/12/14%) and SF7.3 installs the Simulacrum on joining. What comes
+  after the node is the campaign plan's business like everywhere else; the HUD's FINISH
+  toggle still holds Operation Daedalus, and a daemon arg overrides the plan. Sleeves work for the division on both
   Bladeburner nodes — see [Sleeves](#sleeves).
 
 Three things about resets that the daemons rely on, all verified against
@@ -343,8 +392,8 @@ pure, unit-tested [`lib/hacknet-logic.js`](lib/hacknet-logic.js):
   the horizon shrinks to `savingPaybackMs`, so only upgrades that delay the aug by
   less than they speed up everything after it still go through. Cache is bought when
   a wanted hash investment can't fit the capacity we have.
-- **Hash spending** (`planHashSpend`) sells everything not earmarked — a full cache is
-  production thrown away — and takes the *investments* in priority order when
+- **Hash spending** (`planHashSpend`) sells everything not earmarked — the game sells a full cache's
+  overflow for money by itself, at the same rate — and takes the *investments* in priority order when
   affordable: `Improve Studying` / `Improve Gym Training` while the player is doing
   exactly that (hacking level is the node's real gate), `Reduce Minimum Security` /
   `Increase Maximum Money` on the batcher's primary target, a rate-limited
@@ -595,7 +644,7 @@ assigns and a daemon reads — a click handler can't call `ns` without stopping 
 script, so that indirection is the whole mechanism.
 [`lib/toggles.js`](lib/toggles.js) adds the durability: each value is mirrored to a
 one-word file (`CONFIG.paths.focusFile` / `autoFinishFile` / `autoCorpFile`) and
-re-seeded from it, because both an aug install and a page reload wipe `globalThis`,
+re-seeded from it, because a page reload wipes `globalThis` (an aug install does not),
 and a switch you deliberately turned off silently turning itself back on hours later
 is exactly what these exist to prevent. All default **on** — the behaviour from
 before they existed.
@@ -632,6 +681,22 @@ offers under your hands. The `cloud-corp` reservation is dropped too, handing th
 host back to the botnet, and the HUD's CORP tab says the switch is off rather than
 reporting a dead manager. Everything else the bot does is unaffected; flipping it
 back on re-places the managers on the next daemon tick.
+
+## Achievements and exploits
+
+- [`tools/exploits.js`](tools/exploits.js) (1.6GB) earns the Source-File -1 exploits a
+  script can earn and sets up the ones that need a click; `--reality` arms the debugger
+  one. [`tools/debt.js`](tools/debt.js) is the "$1b in debt" achievement (dry run without
+  `--go`).
+- [`offline/`](offline/) holds Node tools that work on save FILES, outside the game:
+  `node offline/achievements.mjs` lists what is missing from the newest save, and
+  `node offline/edit-save.mjs` writes an edited COPY of a save for the EditSaveFile
+  exploit.
+- Script names read back from the game (`ns.ps`, `getScriptName`) have no leading slash,
+  while `CONFIG.paths` has one: compare with `sameScript` from [`lib/net.js`](lib/net.js),
+  never `===`.
+
+Everything else is in [docs/ACHIEVEMENTS.md](docs/ACHIEVEMENTS.md).
 
 ## Self-test
 

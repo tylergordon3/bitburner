@@ -14,13 +14,13 @@
 // further recruiting) is intentionally NOT here - lib/gang.js does that once the
 // full daemon is up. This file just gets the gang earning as early as possible.
 
-import { forNode } from "../lib/config.js";
+import { forReset } from "../lib/config.js";
 
 /** @param {NS} ns */
 export async function main(ns) {
   ns.disableLog("ALL");
 
-  const G = forNode(ns.getResetInfo().currentNode).gang;
+  const G = forReset(ns.getResetInfo()).gang;
   // Cast once here rather than at each call site: config values widen to
   // `string`, which checkJs won't accept for FactionName - including
   // player.factions.includes(), since that array is FactionName[].

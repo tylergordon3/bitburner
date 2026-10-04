@@ -511,3 +511,60 @@ test("landingDelays slips the window, never a negative delay, when the slot is o
   assert.ok(d.slip > 0);
   for (const k of ["hack", "weaken1", "grow", "weaken2"]) assert.ok(d.delays[k] >= 0, k);
 });
+
+// ── RAM ──────────────────────────────────────────────────────────────────────
+
+/**
+ * The identifier tokens of a source file: comments, quoted strings and the TEXT
+ * of template literals dropped, `${...}` expressions kept. That is what the
+ * game's RAM analyser sees - it bills every identifier and every dotted property
+ * name that matches an ns function, whatever object it hangs off.
+ */
+function identifiers(src) {
+  const out = [];
+  const templates = [];   // brace depth at which each open `${` closes
+  let depth = 0;
+  for (let i = 0; i < src.length;) {
+    const c = src[i];
+    const two = src.slice(i, i + 2);
+    if (two === "//") { i = src.indexOf("\n", i); if (i < 0) break; continue; }
+    if (two === "/*") { i = src.indexOf("*/", i) + 2; continue; }
+    if (c === '"' || c === "'") {
+      for (i++; src[i] !== c; i++) if (src[i] === "\\") i++;
+      i++;
+      continue;
+    }
+    if (c === "`" || (c === "}" && templates.at(-1) === depth)) {
+      if (c === "}") templates.pop();
+      for (i++; src[i] !== "`"; i++) {
+        if (src[i] === "\\") i++;
+        else if (src[i] === "$" && src[i + 1] === "{") { templates.push(depth); i++; break; }
+      }
+      i++;
+      continue;
+    }
+    if (c === "{") depth++;
+    else if (c === "}") depth--;
+    const word = /^[A-Za-z_$][\w$]*/.exec(src.slice(i, i + 64));
+    if (word) { out.push(word[0]); i += word[0].length; } else i++;
+  }
+  return out;
+}
+
+test("RAM: nothing the batcher reaches names `share` - an identifier of that name is billed as ns.share (2.4GB)", async () => {
+  const { readFileSync } = await import("node:fs");
+  const read = path => readFileSync(new URL(path, import.meta.url), "utf8");
+  // The tokenizer itself: strings and template text are not identifiers, ${} is.
+  assert.deepEqual(identifiers('a.b("share"); // share\n x = `share ${c.share} share`; /* share */ d["share"]'),
+    ["a", "b", "x", "c", "share", "d"]);
+
+  // hacking/manager.js and everything it pulls in whole (its own functions all
+  // count, as do those of a namespace import), plus the one-shot status tool.
+  // Only hacking/share.js calls ns.share; CONFIG["share"] is how the rest read
+  // its config. (12.35GB -> 9.95GB for the manager when this was fixed.)
+  for (const path of ["../hacking/manager.js", "../lib/batch-logic.js", "../lib/formulas.js", "../lib/net.js",
+    "../lib/events.js", "../lib/ns-utils.js", "../tools/hack-status.js"]) {
+    assert.ok(!identifiers(read(path)).includes("share"), `${path} has an identifier or property named share`);
+  }
+  assert.ok(identifiers(read("../hacking/share.js")).includes("share"), "the tokenizer no longer sees ns.share in share.js");
+});

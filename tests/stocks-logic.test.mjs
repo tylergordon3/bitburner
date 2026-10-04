@@ -26,8 +26,11 @@ import {
   tradingRate,
   fourSPaybackTicks,
   fourSWorthIt,
+  fourSCostMults,
   influenceWishes,
   allowanceStep,
+  liveTrader,
+  treasuryStep,
 } from "../lib/stocks-logic.js";
 import { step, newTrader } from "../lib/stocks.js";
 import { CONFIG, BITNODE, forNode } from "../lib/config.js";
@@ -557,6 +560,58 @@ test("treasury: a dividend of new highs, debited by what is spent", () => {
   assert.equal(p.wanted, 400e6);
 });
 
+test("treasury: a trader's state from before the last install is not a live trader", () => {
+  const state = { tier: 2, netWorth: 50e9, updatedAt: 1_000_000 };
+  const o = { now: 1_010_000, staleMs: 60_000, epoch: 900_000 };
+  assert.equal(liveTrader(state, o), state);
+  assert.equal(liveTrader(state, { ...o, now: 1_100_000 }), null, "stale");
+  // Ten seconds old, but an install happened five seconds ago: those were the
+  // trader's last words, about money that is gone.
+  assert.equal(liveTrader(state, { ...o, epoch: 1_005_000 }), null);
+  assert.equal(liveTrader({ ...state, tier: 0 }, o), null, "no TIX access");
+  assert.equal(liveTrader({ tier: 1, updatedAt: 1_000_000 }, o), null, "no net worth published (the no-TIX stub)");
+  assert.equal(liveTrader(undefined, o), null);
+});
+
+test("treasury: the books start over with every install, and count outflow across trader restarts", () => {
+  const cfg = S.treasury;
+  const trader = (netWorth, outflow, startedAt, extra = {}) => ({ tier: 1, netWorth, outflow, startedAt, ...extra });
+
+  // Cold start, no trader yet: the opening grant, and a drop in cash is spending.
+  let b = treasuryStep(null, { epoch: 1, cash: 250e6, trader: null }, cfg);
+  assert.equal(b.purse.wanted, cfg.startFraction * 250e6);
+  b = treasuryStep(b, { epoch: 1, cash: 245e6, trader: null }, cfg);
+  assert.ok(Math.abs(b.purse.bucket - (cfg.startFraction * 250e6 - 5e6)) < 1, "the $5m spent came out of the grant");
+
+  // The trader comes up and reports its own count; a restart (new startedAt,
+  // counting from zero again - even past where the old one stopped) adds on.
+  b = treasuryStep(b, { epoch: 1, cash: 10e6, trader: trader(245e6, 2e6, 100) }, cfg);
+  assert.equal(b.outflowBase + b.traderOutflow, 7e6);
+  b = treasuryStep(b, { epoch: 1, cash: 10e6, trader: trader(243e6, 3e6, 200) }, cfg);
+  assert.equal(b.outflowBase + b.traderOutflow, 10e6, "the first trader's $2m is kept, not overwritten");
+  b = treasuryStep(b, { epoch: 1, cash: 10e6, trader: trader(243e6, 3e6, 200) }, cfg);
+  assert.equal(b.outflowBase + b.traderOutflow, 10e6, "the same process is not counted twice");
+  // A trader that publishes no startedAt is still caught by a total that went backwards.
+  let old = treasuryStep(null, { epoch: 1, cash: 0, trader: trader(1e9, 5e6, undefined) }, cfg);
+  old = treasuryStep(old, { epoch: 1, cash: 0, trader: trader(1e9, 1e6, undefined) }, cfg);
+  assert.equal(old.outflowBase + old.traderOutflow, 6e6);
+
+  // The run compounds to $50b...
+  b = treasuryStep(b, { epoch: 1, cash: 1e9, trader: trader(50e9, 3e6, 200, { tier: 2 }) }, cfg);
+  assert.ok(b.purse.highWater > 50e9);
+  // ...and an install takes it back to $250m. Carried over, the book would
+  // owe nothing until net worth had passed $50b again, and the grant for the
+  // TOR router and port openers the install just took would never come.
+  const carried = treasuryStep(b, { epoch: 1, cash: 250e6, trader: null }, cfg);
+  assert.ok(carried.purse.highWater > 50e9, "what the old module-scope state did");
+  const fresh = treasuryStep(b, { epoch: 2, cash: 250e6, trader: null }, cfg);
+  assert.equal(fresh.epoch, 2);
+  assert.equal(fresh.purse.wanted, cfg.startFraction * 250e6);
+  assert.equal(fresh.purse.highWater, 250e6);
+  assert.equal(fresh.outflowBase + fresh.traderOutflow, 0);
+  assert.equal(b.epoch, 1, "pure: the previous book is not touched");
+});
+
 // ── The shell: lib/stocks.js step() against the fake market ──────────────────
 
 /** Run the trader for `ticks` market ticks. */
@@ -691,6 +746,29 @@ test("shell: a treasurer's request sets the allowance, the hoard and the fence",
   assert.equal(globalThis.gordMoneyFloor, 0, "no fence without a live treasurer");
 });
 
+test("shell: requests left on globalThis by the run before the last install are not obeyed", () => {
+  // globalThis outlives an aug install. The last run's final words were "an
+  // install is due: fence down, hold $2b, sell everything" - seconds old when
+  // the new run's trader takes its first step with a fresh $250m.
+  resetGlobals();
+  const m = makeMarket({ seed: 3, has4S: true });
+  const now = 1e12;
+  globalThis.gordStockCashWanted = { amount: 2e9, release: true, updatedAt: now - 5_000 };
+  globalThis.gordInstallRequested = now - 5_000;
+  const T = newTrader(BN8, { epoch: now - 1_000 });   // the install was a second ago
+  assert.equal(step(m.ns, T, now), "trading", "not liquidating for an install that already happened");
+  assert.equal(globalThis.gordMoneyFloor, undefined, "and no fence published on a dead treasurer's say-so");
+  assert.equal(globalThis.gordStockState.hold, 0);
+  // The same globals stamped after the install are this run's, and count.
+  globalThis.gordInstallRequested = now + 1;
+  assert.equal(step(m.ns, T, now + 6_000), "liquidating");
+  globalThis.gordInstallRequested = 0;
+  globalThis.gordStockCashWanted = { amount: 5e6, updatedAt: now + 12_000 };
+  m.tick();
+  step(m.ns, T, now + 12_000);
+  assert.equal(globalThis.gordMoneyFloor, Math.max(0, m.player.money - 5e6));
+});
+
 test("shell: publishes the wish list for the batcher", () => {
   resetGlobals();
   const m = makeMarket({ seed: 4, has4S: true, money: 50e9 });
@@ -737,14 +815,98 @@ test("shell: buys 4S when what is left would out-earn the whole - and not before
   run(m, T, 400);
   assert.equal(m.player.has4SDataTixApi, false, "$25b > 30% of ~$60b");
 
-  // A refused purchase (the BitNode option that disables 4S) is not retried.
+  // A purchase the game keeps refusing with the money in hand is given up on -
+  // after three attempts, each at double the price assumed before.
   resetGlobals();
   m = makeMarket({ seed: 1, money: 2e12 });
-  m.ns.stock.purchase4SMarketDataTixApi = () => false;
+  let attempts = 0;
+  m.ns.stock.purchase4SMarketDataTixApi = () => { attempts++; return false; };
   T = newTrader(BN8);
   run(m, T, 400);
   assert.equal(T.fourSBlocked, true);
+  assert.equal(attempts, 3);
+  assert.equal(T.costMult.api, 8);
   assert.ok(globalThis.gordStockState.totalValue > 1e12, "and the money went back to work");
+});
+
+test("4S prices: per BitNode, the UI data priced apart from the API, BN12 by Source-File level", () => {
+  // bitburner-src BitNode.tsx: FourSigmaMarketDataApiCost / FourSigmaMarketDataCost.
+  assert.deepEqual(fourSCostMults(8, 0, forNode(8).stocks), { api: 1, data: 1 });
+  assert.deepEqual(fourSCostMults(7, 0, forNode(7).stocks), { api: 2, data: 2 });
+  assert.deepEqual(fourSCostMults(13, 0, forNode(13).stocks), { api: 10, data: 10 });
+  // BN9 charges x4 for the API and x5 for the data.
+  assert.deepEqual(fourSCostMults(9, 0, { fourSigmaCostMult: 4 }), { api: 4, data: 5 });
+  assert.deepEqual(fourSCostMults(9, 0, { fourSigmaCostMult: 4, fourSigmaDataCostMult: 6 }), { api: 4, data: 6 }, "config wins");
+  // BN12: 1.02^(active SF12 level + 1), whatever config says - it cannot know the level.
+  assert.deepEqual(fourSCostMults(12, 0, { fourSigmaCostMult: 1 }), { api: 1.02, data: 1.02 });
+  const lvl50 = fourSCostMults(12, 50, forNode(12).stocks);
+  assert.ok(Math.abs(lvl50.api - Math.pow(1.02, 51)) < 1e-12 && lvl50.api === lvl50.data);
+  // A trader made without them (the tests' newTrader(cfg)) falls back to config.
+  assert.deepEqual(newTrader(forNode(7).stocks).costMult, { api: 2, data: 2 });
+});
+
+test("shell: a 4S refusal over a wrong price is retried at a higher one, not latched for the run", () => {
+  // The node charges x4 ($100b) and the trader was told x1: the first two
+  // attempts ($25b, $50b in hand) are refused, the third ($100b) goes through.
+  resetGlobals();
+  let m = makeMarket({ seed: 1, money: 2e12, fourSCostMult: 4 });
+  let T = newTrader(BN8);
+  run(m, T, 400);
+  assert.equal(m.player.has4SDataTixApi, true);
+  assert.equal(T.fourSBlocked, false);
+  assert.equal(T.refusals.api, 2);
+  assert.equal(T.costMult.api, 4);
+  assert.ok(m.player.money >= 0);
+  // The UI data is priced by its own multiplier and learns the same way.
+  assert.equal(m.player.has4SData, true);
+  assert.equal(T.dataBlocked, false);
+
+  // Told the right price, it is bought on the first attempt.
+  resetGlobals();
+  m = makeMarket({ seed: 1, money: 2e12, fourSCostMult: 4 });
+  T = newTrader(BN8, { costMult: { api: 4, data: 4 } });
+  run(m, T, 400);
+  assert.equal(m.player.has4SDataTixApi, true);
+  assert.equal(T.refusals.api, 0);
+
+  // Where the BitNode option switches 4S off, it is never asked for: no cash
+  // is raised for it and nothing is attempted.
+  resetGlobals();
+  m = makeMarket({ seed: 1, money: 2e12 });
+  let asked = 0;
+  m.ns.stock.purchase4SMarketDataTixApi = () => { asked++; return false; };
+  T = newTrader(BN8, { fourSDisabled: true });
+  run(m, T, 400, () => assert.equal(T.want4S, false));
+  assert.equal(asked, 0);
+  assert.equal(T.fourSBlocked, true);
+  assert.equal(T.dataBlocked, true);
+});
+
+test("shell: 4S is not wanted while the allowance leaves too little to pay for it", () => {
+  // $26b, of which a treasurer wants everything above $24b liquid: selling the
+  // whole book raises $24b of spendable cash, never the $25b. Wanting the data
+  // anyway held its price in cash every tick - everything sold, nothing bought,
+  // for ever (cash does not grow, so the condition never cleared itself).
+  resetGlobals();
+  const m = makeMarket({ seed: 1, money: 26e9 });
+  const T = newTrader({ ...BN8, fourSGainRealized: 1000 }); // the payback test is trivially true
+  let invested = 0;
+  const ask = now => { globalThis.gordStockCashWanted = { amount: Math.max(0, m.netWorth() - 24e9), updatedAt: now }; };
+  ask(1e12);
+  run(m, T, 400, (t, now) => {
+    ask(now + MARKET.msPerStockUpdate);
+    if (t > 300 && globalThis.gordStockState.totalValue > 0) invested++;
+  });
+  assert.equal(m.player.has4SDataTixApi, false);
+  assert.equal(T.want4S, false);
+  assert.ok(invested > 50, `still trading on estimates (${invested} of the last 100 ticks invested)`);
+
+  // The same book with the allowance out of the way buys it.
+  resetGlobals();
+  const m2 = makeMarket({ seed: 1, money: 26e9 });
+  const T2 = newTrader({ ...BN8, fourSGainRealized: 1000 });
+  run(m2, T2, 400);
+  assert.equal(m2.player.has4SDataTixApi, true);
 });
 
 // ── End to end ───────────────────────────────────────────────────────────────

@@ -1,7 +1,7 @@
 // hacking/manager.js
 //
 // The HGW batching botnet - the daemon's core money engine, run OFF-home (exec'd
-// by each bnX/daemon.js via ensureHelper) so its ~12GB never competes with the
+// by each bnX/daemon.js via ensureHelper) so its ~10GB never competes with the
 // daemon for home RAM. globalThis is shared across hosts, so from wherever it
 // lands it drives the whole rooted network.
 //
@@ -64,12 +64,17 @@ import * as F from "../lib/formulas.js";
 import * as B from "../lib/batch-logic.js";
 
 const H = CONFIG.hacking;
-const SH = CONFIG.share;
+// ["share"], not .share - here and for the script path below. The game's RAM
+// analyser bills identifiers and dotted property names by NAME, so a `.share`
+// anywhere in this file (or a local variable called `share`) is charged as
+// ns.share: 2.4GB for a call only share.js makes. A string key is not an
+// identifier and is free. (tests/batch-logic.test.mjs keeps it that way.)
+const SH = CONFIG["share"];
 const HOME = CONFIG.paths.home;
 const HACK = CONFIG.paths.hack;
 const GROW = CONFIG.paths.grow;
 const WEAKEN = CONFIG.paths.weaken;
-const SHARE = CONFIG.paths.share;
+const SHARE = CONFIG.paths["share"];
 
 // Per-thread RAM of the worker scripts, read once in main(); config fallbacks
 // until then.
@@ -216,6 +221,13 @@ function applyAllocation(snap, alloc) {
 
 // Last-published share hosts + thread count, so we only log on change (see manageShare).
 let _lastShareHosts = "";
+// Hosts that may be running share.js: the ones this manager started it on, plus
+// whatever the last sweep of the network found (a previous manager's leftovers).
+// ns.ps builds an object per process on the host, and with a few thousand batch
+// legs in the air a sweep of every rooted host on every tick was the manager's
+// largest allocation; only these hosts need looking at between sweeps.
+const _shareHosts = new Set();
+let _shareSweepAt = -Infinity;
 
 /** true when the daemon's current action is faction WORK. */
 function farmingRep() {
@@ -300,17 +312,31 @@ function manageShare(ns, snap) {
 
   // Stop share on any host no longer in the plan. Kill by pid (via ns.ps/ns.kill,
   // already used here) rather than ns.scriptKill, so this adds no manager RAM.
-  for (const host of snap.rooted) {
+  // Every rooted host is swept on the first tick and then every networkRescanMs
+  // (share.js left behind by a manager that was killed); in between, only the
+  // hosts known to hold it (_shareHosts).
+  const sweep = snap.now - _shareSweepAt >= H.networkRescanMs;
+  if (sweep) _shareSweepAt = snap.now;
+  for (const host of sweep ? snap.rooted : [..._shareHosts]) {
     if (plan[host]) continue;
+    _shareHosts.delete(host);
+    // A tracked host can have been deleted since (ns.ps would throw on it).
+    if (!sweep && !snap.rooted.includes(host)) continue;
     for (const p of ns.ps(host)) {
       if (sameScript(p.filename, SHARE)) { ns.kill(p.pid); touched.push(host); }
     }
   }
 
   // Start, or top up, share on the planned hosts - out of free RAM only.
+  // `running` is what each ends up with (below the plan while a busy host is
+  // still filling).
+  /** @type {Map<string, number>} */
+  const running = new Map();
   for (const [host, gb] of Object.entries(plan)) {
     const want = Math.floor(gb / _shareThreadRam);
     const have = shareThreadsOn(ns, host);
+    running.set(host, have);
+    if (have > 0) _shareHosts.add(host);
     if (want <= have) continue;
 
     // The snapshot's free RAM, not max - used: it already leaves out whatever the
@@ -328,15 +354,16 @@ function manageShare(ns, snap) {
       if (ns.exec(SHARE, host, start, performance.now()) !== 0) {
         started = start;
         touched.push(host);
+        running.set(host, have + started);
+        _shareHosts.add(host);
       }
     }
     const missing = want - have - started;
     if (missing > 0) holds.set(host, missing * _shareThreadRam);
   }
 
-  // Actual running totals (below the plan while a busy host is still filling).
-  const servers = Object.keys(plan).filter(h => shareThreadsOn(ns, h) > 0);
-  const threads = servers.reduce((s, h) => s + shareThreadsOn(ns, h), 0);
+  const servers = Object.keys(plan).filter(h => running.get(h) > 0);
+  const threads = servers.reduce((s, h) => s + running.get(h), 0);
   const bonus = B.shareBonus(threads);
 
   // Log only on change (a host set, or a top-up) so the per-tick loop doesn't spam.
@@ -397,16 +424,18 @@ function applyShareHolds(snap, holds) {
  */
 function targetMath(ns, target) {
   const useFormulas = F.hasFormulas(ns);
+  const minSecurity = ns.getServerMinSecurityLevel(target);
 
-  let times, hackPct, growThreadsFor;
+  let times, hackPct, growThreadsFor, security = 0;
   if (useFormulas) {
     times = F.batchTimes(ns, target);
     hackPct = F.hackPercent(ns, target);
     growThreadsFor = (remaining) => F.growThreadsToFull(ns, target, remaining);
   } else {
+    security = ns.getServerSecurityLevel(target);
     const k = B.preppedScale({
-      security: ns.getServerSecurityLevel(target),
-      minSecurity: ns.getServerMinSecurityLevel(target),
+      security,
+      minSecurity,
       requiredLevel: ns.getServerRequiredHackingLevel(target),
     });
     times = {
@@ -417,19 +446,34 @@ function targetMath(ns, target) {
     hackPct = ns.hackAnalyze(target) * k.hackPct;
     growThreadsFor = (remaining) => Math.ceil(ns.growthAnalyze(target, 1 / Math.max(0.01, remaining)) * k.growThreads);
   }
-  const hackChance = useFormulas ? F.hackChance(ns, target) : 1;
-
-  const plan = (hackThreads) => B.planBatch({
-    hackThreads,
-    hackPct,
-    growThreadsFor,
-    ramPerThread: RAM,
-    securityPerHack: H.securityPerHack,
-    securityPerGrow: H.securityPerGrow,
-    weakenAmount: weakenAmount(ns),
-    maxHackFraction: H.maxHackFraction,
-    growPadding: H.growPadding,
-  });
+  // A batch plan is a pure function of its hack thread count and of inputs that
+  // hardly ever move (planCacheFor), while the sizing searches ask for the same
+  // few dozen thread counts on every tick - so each is planned once and kept.
+  // (On the ns.* path each security reading gets its own entry: the target swings
+  // between the same few values as batches land, and they should not evict each
+  // other.)
+  const plans = planCacheFor(useFormulas ? target : `${target}@${security}`, [
+    hackPct, ns.getServerMaxMoney(target), minSecurity,
+    _growMult, weakenAmount(ns), RAM.hack, RAM.grow, RAM.weaken,
+  ].join("|"));
+  const plan = (hackThreads) => {
+    let batch = plans.get(hackThreads);
+    if (batch === undefined) {
+      batch = B.planBatch({
+        hackThreads,
+        hackPct,
+        growThreadsFor,
+        ramPerThread: RAM,
+        securityPerHack: H.securityPerHack,
+        securityPerGrow: H.securityPerGrow,
+        weakenAmount: weakenAmount(ns),
+        maxHackFraction: H.maxHackFraction,
+        growPadding: H.growPadding,
+      });
+      plans.set(hackThreads, batch);
+    }
+    return batch;
+  };
 
   // Grow threads a PREP needs: from the current money, at the CURRENT security
   // (the prep's grow legs land before their accompanying weaken does) - which is
@@ -441,7 +485,43 @@ function targetMath(ns, target) {
   };
 
   const maxThreads = B.maxHackThreads(hackPct, H.maxHackFraction);
-  return { times, hackPct, hackChance, useFormulas, maxThreads, plan, growNeeded };
+  // Only the ranking reads the success chance, so it is worked out on demand
+  // rather than on every tick of every target.
+  let chance;
+  return {
+    times, hackPct, useFormulas, maxThreads, plan, growNeeded,
+    get hackChance() { return chance ??= useFormulas ? F.hackChance(ns, target) : 1; },
+  };
+}
+
+// ── Plan cache ───────────────────────────────────────────────────────────────
+//
+// largestBatch / efficientThreads / incomeCurve size a target by trying thread
+// counts, and every try is a grow-thread question to the game: ~23 per target
+// per tick, each one a mock server built from four getters. The answers only
+// change with the inputs in the key targetMath builds - the hack % (hacking
+// level, money multipliers), the target's max money and min security (hash
+// upgrades move both), the player's grow multiplier (grafts, Stanek charges,
+// IPvGO), the weaken rate and the worker RAM; on the ns.* path also the
+// target's current security, which growthAnalyze reads. Server growth and the
+// BitNode multipliers never change under a running script.
+//
+// A changed key drops that target's plans, and every re-rank drops them all
+// (rankTargets), so nothing is trusted for longer than targetRescoreMs and the
+// maps cannot grow without bound.
+/** @type {Map<string, {key: string, plans: Map<number, any>}>} */
+const _planCache = new Map();
+// The player's grow multiplier, read once per tick in step().
+let _growMult = 1;
+
+/** @param {string} id target (and security, on the ns.* path) @param {string} key @returns {Map<number, any>} */
+function planCacheFor(id, key) {
+  let entry = _planCache.get(id);
+  if (!entry || entry.key !== key) {
+    entry = { key, plans: new Map() };
+    _planCache.set(id, entry);
+  }
+  return entry.plans;
 }
 
 /** @param {NS} ns @param {string} target */
@@ -538,6 +618,7 @@ function rankTargets(ns, snap, capacity, now, incumbents) {
     || Math.abs(capacity - _rank.ram) > _rank.ram * 0.5;
   if (_rank.list.length && !stale) return _rank.list;
 
+  _planCache.clear();
   const curves = [];
   /** @type {Map<string, number>} what each target's income per GB is multiplied by */
   const weight = new Map();
@@ -738,7 +819,11 @@ export function resetCaches() {
   _rootAt = 0;
   _copied.clear();
   _rank = { at: 0, ram: 0, list: [] };
+  _planCache.clear();
+  _growMult = 1;
   _lastShareHosts = "";
+  _shareHosts.clear();
+  _shareSweepAt = -Infinity;
   _weakenAmount = 0;
 }
 
@@ -861,13 +946,14 @@ function serviceTarget(ns, s, snap, target, budgetRam, now, prepRam = budgetRam)
  */
 export function step(ns, s, now) {
   const snap = buildSnapshot(ns, now);
+  _growMult = ns.getPlayer().mults?.hacking_grow ?? 1;
 
   // Share is an optional side mode and must NEVER be able to stop the core
   // hacking loop (e.g. a stale config on a runner). On error, log and keep going.
   try {
-    const share = manageShare(ns, snap);
-    refreshWorkers(ns, snap, share.touched);
-    applyShareHolds(snap, share.holds);
+    const sharing = manageShare(ns, snap);
+    refreshWorkers(ns, snap, sharing.touched);
+    applyShareHolds(snap, sharing.holds);
   } catch (e) {
     ns.print(`[share] disabled this tick (error): ${String(e)}`);
   }
@@ -1013,6 +1099,10 @@ export function step(ns, s, now) {
 /** @param {NS} ns */
 export async function main(ns) {
   ns.disableLog("ALL");
+  // Module variables outlive the process (the game reuses a compiled module while
+  // its source is unchanged), so a restarted manager starts from clean caches
+  // rather than from the last one's network walk, ranking and plans.
+  resetCaches();
   readWorkerRam(ns);
   if (ns.args.includes("--reset")) killOldHackScripts(ns);
 

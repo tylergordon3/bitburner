@@ -31,10 +31,16 @@
 // bladeburner.enabled, as in BN6/BN7. Next BitNode: the shared plan (a daemon
 // arg, else `campaign.order`). Never run live as of writing.
 
-import { forNode } from "../lib/config.js";
+// The config is resolved with forReset, not forNode(14): BN14's challenge run
+// (CHALLENGE in lib/config.js - finish the node without a move on the Go board)
+// is this same daemon with `go.enabled` overlaid to false, and with forNode the
+// core would launch lib/go.js as a required helper. Outside a challenge run
+// forReset IS forNode(14).
+
+import { forReset } from "../lib/config.js";
 import { runBladeDaemon } from "../lib/blade-daemon.js";
 
 /** @param {NS} ns */
 export async function main(ns) {
-  await runBladeDaemon(ns, forNode(14));
+  await runBladeDaemon(ns, forReset(ns.getResetInfo()));
 }

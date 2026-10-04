@@ -11,10 +11,73 @@ import {
   territoryTickSeen,
   chooseTrainers,
   TERRITORY_TICK_MS,
+  moneyGain,
+  respectGain,
+  wantedGain,
+  inferSoftcap,
 } from "../lib/gang-logic.js";
 import { CONFIG } from "../lib/config.js";
 
 const TABLE = /** @type {[number, number][]} */ (CONFIG.gang.ascendThresholds);
+
+// ── The game's gain formulas (bitburner-src Gang/formulas/formulas.ts) ───────
+
+// A strength-only task, so the stat weight is just the member's strength.
+const TASK = {
+  baseMoney: 10, baseRespect: 0.001, baseWanted: 0.5, difficulty: 5,
+  hackWeight: 0, strWeight: 100, defWeight: 0, dexWeight: 0, agiWeight: 0, chaWeight: 0,
+  territory: { money: 1.5, respect: 1, wanted: 1 },
+};
+const MEMBER = { hack: 1, str: 100, def: 1, dex: 1, agi: 1, cha: 1 };
+// territory 25% -> exponent 0.2 * 0.25 + 0.8 = 0.85; wanted penalty 900 / 1000.
+const GANG = { respect: 900, wantedLevel: 100, territory: 0.25 };
+const near = (a, b) => assert.ok(Math.abs(a - b) <= 1e-9 * Math.max(1, Math.abs(b)), `${a} vs ${b}`);
+
+test("money and respect are raised to the territory power - both of them", () => {
+  // money: (5 * base * (str - 3.2 * difficulty) * territoryMult * penalty) ^ 0.85,
+  // territoryMult = 25^1.5 / 100 = 1.25. The old replica returned the bare
+  // product (4725) - the game's figure is its 0.85th power (~1330).
+  near(moneyGain(GANG, MEMBER, TASK), Math.pow(5 * 10 * 84 * 1.25 * 0.9, 0.85));
+  // respect: (11 * base * (str - 4 * difficulty) * (25 / 100) * penalty) ^ 0.85
+  near(respectGain(GANG, MEMBER, TASK), Math.pow(11 * 0.001 * 80 * 0.25 * 0.9, 0.85));
+  // wanted: 7 * base / (3 * (str - 3.5 * difficulty) * territoryMult) ^ 0.8, no floor
+  near(wantedGain(GANG, MEMBER, TASK), (7 * 0.5) / Math.pow(3 * 82.5 * 0.25, 0.8));
+});
+
+test("the BitNode's GangSoftcap multiplies that power", () => {
+  near(moneyGain(GANG, MEMBER, TASK, 0.7), Math.pow(4725, 0.85 * 0.7));     // BN6/7/14
+  near(respectGain(GANG, MEMBER, TASK, 0.3), Math.pow(0.198, 0.85 * 0.3)); // BN13
+  // A base under 1 GROWS under a softcap (0.198^0.255 > 0.198^0.85): the wanted
+  // filter in lib/gang.js compares respect with wanted, so this is not cosmetic.
+  assert.ok(respectGain(GANG, MEMBER, TASK, 0.3) > respectGain(GANG, MEMBER, TASK));
+});
+
+test("gains are zero below the task's stat floor, and wanted is capped and signed", () => {
+  const weak = { ...MEMBER, str: 10 };
+  assert.equal(moneyGain(GANG, weak, TASK), 0);      // 10 - 16 <= 0
+  assert.equal(respectGain(GANG, weak, TASK), 0);    // 10 - 20 <= 0
+  assert.equal(wantedGain(GANG, weak, TASK), 0);     // 10 - 17.5 <= 0
+  assert.equal(moneyGain(GANG, MEMBER, { ...TASK, baseMoney: 0 }), 0);
+  assert.equal(wantedGain(GANG, { ...MEMBER, str: 17.501 }, TASK), 100); // tiny denominator -> the game's cap
+  // Vigilante-style tasks lower it: 0.4 * base * weight * territoryMult.
+  near(wantedGain(GANG, MEMBER, { ...TASK, baseWanted: -0.001 }), 0.4 * -0.001 * 82.5 * 0.25);
+});
+
+test("inferSoftcap recovers the node's multiplier from a member's reported gain", () => {
+  for (const cap of [1, 0.9, 0.7, 0.3]) {
+    const reported = { ...MEMBER, moneyGain: moneyGain(GANG, MEMBER, TASK, cap), respectGain: 0 };
+    near(inferSoftcap(GANG, reported, TASK), cap);
+    // Respect alone (a respect-only task) works too.
+    const viaRespect = { ...MEMBER, moneyGain: 0, respectGain: respectGain(GANG, MEMBER, TASK, cap) };
+    near(inferSoftcap(GANG, viaRespect, TASK), cap);
+  }
+  // Nothing to read: idle, training (no money or respect), or an unknown task.
+  assert.equal(inferSoftcap(GANG, { ...MEMBER, moneyGain: 0, respectGain: 0 }, TASK), null);
+  assert.equal(inferSoftcap(GANG, { ...MEMBER, moneyGain: 5, respectGain: 5 }, undefined), null);
+  // A base of ~1 fits every exponent - no reading, rather than a wild one.
+  const flat = { ...TASK, baseMoney: 1 / (5 * 84 * 1.25 * 0.9), baseRespect: 0 };
+  assert.equal(inferSoftcap(GANG, { ...MEMBER, moneyGain: 1, respectGain: 0 }, flat), null);
+});
 
 test("the ascension bar falls as the member's multiplier grows", () => {
   assert.equal(ascendThreshold(1, TABLE), 1.6326);

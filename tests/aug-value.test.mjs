@@ -249,3 +249,45 @@ test("getAllAugCandidates marks no-work factions' unearned reputation as passive
     assert.equal(list[0].faction, "Hackers");
   });
 });
+
+test("REGRESSION: an aug still short of money is ranked with the measured income, however fresh the snapshot", () => {
+  withGlobals(() => {
+    // Exactly what a daemon tick leaves behind: decidePrelude has just refreshed
+    // the income snapshot (estimateIncomeRate), and the candidates are asked for
+    // a few milliseconds later. The rate used to read 0 whenever the snapshot was
+    // younger than incomeSnapshotMs - i.e. always - so every aug short of money
+    // was an unknown wait, scored 0, and fell back to the static faction order.
+    globalThis._incomeSnap = { time: Date.now(), money: 123 };
+    globalThis._incomeRatePerMs = 1_000; // $1m/s
+    const ns = fakeNs(4);
+    ns.getPlayer = () => ({ factions: ["Hackers", "Fighters"], money: 0 });
+    ns.singularity.getFactionRep = () => 50_000; // reputation met: money is the only gap
+    const list = getAllAugCandidates(ns);
+    for (const c of list) {
+      assert.equal(c.moneyMissing, 1e6);
+      assert.equal(c.estimatedMs, 1_000, "the HUD's ETA is the shortfall over the income");
+      assert.equal(c.rankMs, 1_000);
+      assert.ok(c.score > 0, `${c.aug} has a real score`);
+    }
+    // No rate at all is still an unknown wait.
+    delete globalThis._incomeRatePerMs;
+    assert.ok(getAllAugCandidates(ns).every(c => c.estimatedMs === Infinity && c.score === 0));
+  });
+});
+
+test("hoardWithinReach: a money hoard is only held while income can fill it", async () => {
+  const { hoardWithinReach } = await import("../lib/aug-targets.js");
+  const hour = 3_600_000;
+  const daedalus = { faction: "Daedalus", money: 100e9, moneyMissing: 90e9 };
+  // $5m/s fills $90b in five hours: inside an 8-hour horizon, outside a 4-hour one.
+  assert.equal(hoardWithinReach(daedalus, 5_000, 8 * hour), true);
+  assert.equal(hoardWithinReach(daedalus, 5_000, 4 * hour), false);
+  // A node that pays a fraction of that never gets there: no hold, so augs are
+  // still bought and installs still happen.
+  assert.equal(hoardWithinReach(daedalus, 50, 8 * hour), false);
+  // No measured income reaches nothing; no goal is no hold; nothing missing is fine.
+  assert.equal(hoardWithinReach(daedalus, 0, 8 * hour), false);
+  assert.equal(hoardWithinReach(daedalus, undefined, 8 * hour), false);
+  assert.equal(hoardWithinReach(null, 5_000, 8 * hour), false);
+  assert.equal(hoardWithinReach({ moneyMissing: 0 }, 0, 8 * hour), true);
+});

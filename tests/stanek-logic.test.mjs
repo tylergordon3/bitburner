@@ -1086,6 +1086,44 @@ test("manager: a charged layout that differs from the plan is kept and still cha
   resetGlobals();
 });
 
+test("manager: a gift emptied behind its back is laid out again; a refused piece is not retried for ever", async () => {
+  // The once-per-(have > want) guard exists for a plan the game refuses part of.
+  // It used to be left set after a layout that went down whole, so the same
+  // transition a second time - an empty gift, the planned layout - read as
+  // "already tried", and a gift cleared by hand stayed empty until a restart.
+  resetGlobals();
+  const game = makeGame();
+  const sleep = game.ns.sleep;
+  let emptied = 0;
+  game.ns.sleep = async ms => {
+    if (emptied === 0 && game.world.fragments.length > 0) {
+      game.world.fragments = [];
+      emptied++;
+    }
+    return sleep(ms);
+  };
+  await runManager(game, 4);
+  assert.equal(emptied, 1);
+  assert.equal(game.world.clears, 2, "laid out, emptied by hand, laid out again");
+  const S = forNode(1).stanek;
+  const plan = planLayout(FRAGMENTS, 6, 5, { ...S.layout, priorities: S.profiles[S.profile] });
+  assert.equal(layoutKey(game.world.fragments), layoutKey(plan.placements));
+  resetGlobals();
+
+  // The guard's own case still holds: the game refuses one planned piece, the
+  // manager tries the partial result once more and then leaves it alone.
+  const stubborn = makeGame();
+  const place = stubborn.ns.stanek.placeFragment;
+  const last = plan.placements[plan.placements.length - 1];
+  stubborn.ns.stanek.placeFragment = (x, y, rotation, id) =>
+    (id === last.id && x === last.x && y === last.y ? false : place(x, y, rotation, id));
+  await runManager(stubborn, 6);
+  assert.equal(stubborn.world.clears, 2, "once from empty, once more from the partial layout, then no more");
+  assert.equal(globalThis.gordStanekState.layout.failed, 1);
+  assert.equal(stubborn.world.fragments.length, plan.placements.length - 1, "what the game took stays on the gift");
+  resetGlobals();
+});
+
 test("manager: a refusal is published as final and the script exits; a broken tick never kills it", async () => {
   resetGlobals();
   const refused = makeGame({ canAccept: false });
@@ -1231,6 +1269,21 @@ test("giftStatus: off where the node or the Source-Files rule the gift out, else
   assert.equal(giftStatus(withSF13, on, { gate: "accepted", resetAt: 110 }), "pending");
   assert.equal(giftStatus(inBN13, on, { gate: "accepted", resetAt: 111 }), "accepted");
   assert.equal(giftStatus(withSF13, on, { gate: "refused", resetAt: 111 }), "refused");
+});
+
+test("the gift is declined in BN8, where the grid holds one fragment and no booster", async () => {
+  // BitNode.tsx: StaneksGiftExtraSize -99 in BN8 -> the 2x3 floor, at any SF13 level.
+  assert.deepEqual(gridSize(9 - 99 + 3), { width: 2, height: 3 });
+  const plan = planLayout(FRAGMENTS, 2, 3, { priorities: HACKING });
+  assert.equal(plan.stats, 1);
+  assert.equal(plan.boosters, 0, "no pentomino fits a 2x3 grid");
+  // One fragment against Genesis's -10% on everything: config turns it down,
+  // so nothing accepts it even with Source-File 13.
+  assert.equal(forNode(8).stanek.enabled, false);
+  const { giftStatus } = await import("../lib/stanek-logic.js");
+  const reset = { currentNode: 8, lastNodeReset: 5, ownedSF: new Map([[13, 3]]) };
+  assert.equal(giftStatus(reset, forNode(8).stanek, undefined), "off");
+  assert.equal(giftStatus({ ...reset, currentNode: 5 }, forNode(5).stanek, undefined), "pending", "elsewhere SF13 offers it");
 });
 
 test("the gift is wanted in BN13 with the Bladeburner profile and half the botnet", () => {

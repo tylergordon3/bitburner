@@ -28,13 +28,19 @@
 // Simulacrum. early/stanek-boot.js does that from the cold-start driver, ahead
 // of early/blade-boot.js; see `stanek` in lib/config.js.
 //
-// Next BitNode: the shared plan (a daemon arg, else `campaign.order`). BN13 is
-// not on the campaign by default. Never run live as of writing.
+// Next BitNode: the shared plan (a daemon arg, else `campaign.order`). Never run
+// live as of writing.
+//
+// The config is resolved with forReset, not forNode(13): BN13's challenge run
+// (CHALLENGE in lib/config.js - finish the node WITHOUT the Gift) is this same
+// daemon with `stanek.enabled` overlaid to false, and with forNode the core's
+// gate would launch early/stanek-boot.js and accept the Gift in its first tick.
+// Outside a challenge run forReset IS forNode(13).
 
-import { forNode } from "../lib/config.js";
+import { forReset } from "../lib/config.js";
 import { runBladeDaemon } from "../lib/blade-daemon.js";
 
 /** @param {NS} ns */
 export async function main(ns) {
-  await runBladeDaemon(ns, forNode(13));
+  await runBladeDaemon(ns, forReset(ns.getResetInfo()));
 }

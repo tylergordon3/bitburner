@@ -107,12 +107,25 @@ function maybeSetupGang(ns) {
 
 // ── Hacknet coordination ─────────────────────────────────────────────────────
 
+// 3000 (bitburner-src Server/data/servers.ts) x BN9's WorldDaemonDifficulty of 2
+// (BitNode.tsx). Only used until the game will answer for itself - see below.
+const WORLD_LEVEL_BEFORE_RED_PILL = 6000;
 let _worldLevel = 0;
-/** The world daemon's hacking requirement (3000 x WorldDaemonDifficulty). @param {NS} ns */
+/**
+ * The world daemon's hacking requirement (3000 x WorldDaemonDifficulty).
+ *
+ * Until The Red Pill is INSTALLED the world daemon has no network connection,
+ * and the game treats a server with none as nonexistent: every ns call on it
+ * throws "Invalid host" (Netscript/NetscriptHelpers getServer). Reading that as
+ * "no requirement" switched the endgame study off for the whole stretch before
+ * the Red Pill - which is most of the node, and when the hacking level for the
+ * Daedalus invite (2500) is the thing being waited for.
+ * @param {NS} ns
+ */
 function worldDaemonLevel(ns) {
   if (_worldLevel > 0) return _worldLevel;
   try { _worldLevel = ns.getServerRequiredHackingLevel(FINAL_HOST); } catch { _worldLevel = 0; }
-  return _worldLevel;
+  return _worldLevel > 0 ? _worldLevel : WORLD_LEVEL_BEFORE_RED_PILL;
 }
 
 /**

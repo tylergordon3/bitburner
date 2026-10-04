@@ -17,5 +17,12 @@ export async function main(ns) {
   // batch's hack->weaken window, where the security bump stretches the action
   // and it lands out of order. This way the duration locks at launch, when the
   // manager computed the delay from that same current duration.
-  await ns.grow(target, { additionalMsec: delay });
+  // Stock manipulation: a grow with { stock: true } nudges the forecast of the
+  // stock tied to this server up. The trader (lib/stocks.js) publishes which
+  // servers it wants pushed which way - `up` are the ones whose stock it is
+  // long - and a list older than two minutes is nobody's wish any more. Free:
+  // globalThis costs no RAM and the flag changes nothing else about the action.
+  const wishes = globalThis.gordStockWishes;
+  const stock = !!wishes && Date.now() - wishes.updatedAt < 120_000 && (wishes.up ?? []).includes(target);
+  await ns.grow(target, { additionalMsec: delay, stock });
 }

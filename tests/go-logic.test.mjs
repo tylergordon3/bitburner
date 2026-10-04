@@ -195,6 +195,60 @@ test("areaScore: a region bigger than n*n - 3 belongs to nobody", () => {
   assert.deepEqual(areaScore(board5("XXX..")), { black: 25, white: 0 });
 });
 
+/** A random position: `fill` of the points stones, a few dead nodes. */
+function randomBoard(n, rng, fill) {
+  const cells = new Uint8Array(n * n);
+  for (let i = 0; i < cells.length; i++) {
+    const r = rng();
+    cells[i] = r < 0.04 ? DEAD : r < 0.04 + fill / 2 ? BLACK : r < 0.04 + fill ? WHITE : EMPTY;
+  }
+  return { n, cells };
+}
+
+test("areaScore counts exactly the regions emptyRegions lists (it no longer builds them)", () => {
+  const rng = rngOf(41);
+  for (let i = 0; i < 300; i++) {
+    // Sizes interleaved on purpose: the fills share scratch buffers per board size.
+    const n = [5, 13, 7, 9][i % 4];
+    const board = randomBoard(n, rng, 0.2 + 0.6 * rng());
+    let black = 0;
+    let white = 5.5;
+    for (const c of board.cells) {
+      if (c === BLACK) black++;
+      else if (c === WHITE) white++;
+    }
+    for (const region of emptyRegions(board).regions) {
+      if (region.owner === BLACK) black += region.points.length;
+      else if (region.owner === WHITE) white += region.points.length;
+    }
+    assert.deepEqual(areaScore(board, 5.5), { black, white }, boardColumns(board).join("/"));
+  }
+});
+
+test("shared scratch buffers: an analysis is not disturbed by the ones run in between", () => {
+  const rng = rngOf(43);
+  const small = randomBoard(5, rng, 0.5);
+  const large = randomBoard(13, rng, 0.5);
+  const read = (board) => ({
+    chains: allChains(board).chains,
+    estimate: territoryEstimate(board),
+    score: areaScore(board, 5.5),
+    move: chooseMove(board, { komi: 5.5 }),
+  });
+  const smallFirst = read(small);
+  const largeFirst = read(large);
+  // Again, the other way round and with the other board's fills in between.
+  assert.deepEqual(read(large), largeFirst);
+  assert.deepEqual(read(small), smallFirst);
+  // A chain read survives later fills (it is returned as plain arrays).
+  const stone = large.cells.findIndex(c => c === BLACK);
+  const chain = chainAt(large, stone);
+  const copy = structuredClone(chain);
+  read(small);
+  read(large);
+  assert.deepEqual(chain, copy);
+});
+
 test("territoryEstimate: nearer stones claim a point; a chain short of liberties claims nothing", () => {
   const even = parseBoard([".....", "..X..", ".....", "..O..", "....."]);
   assert.equal(territoryEstimate(even), 0);

@@ -63,3 +63,24 @@ test("returns the ranked list alongside the pick, best rate first", () => {
   assert.deepEqual(ranked.map(c => c.crime), ["Homicide", "Mug"]);
   assert.equal(ranked[0].rate, 15);
 });
+
+// The PLAYER's failed crime still pays a quarter of its karma (bitburner-src
+// Work/CrimeWork.ts commit(): `karma /= 4`); a sleeve's pays none.
+test("failFraction: a failed attempt that still pays is counted", () => {
+  // 3 karma * (0.2 + 0.8 * 0.25) / 3s
+  assert.ok(Math.abs(crimeRate(homicide(0.2), "karma", 0.25) - (3 * 0.4) / 3000) < 1e-15);
+  assert.equal(crimeRate(homicide(0.2), "karma"), (0.2 * 3) / 3000); // default: success only
+  assert.equal(crimeRate(homicide(1), "karma", 0.25), 0.001);         // nothing to add at 100%
+});
+
+test("for the player's karma, a hopeless homicide beats a perfect mug", () => {
+  const candidates = [homicide(0.02), mug(1)];
+  // Success-only (the sleeves' rule): mug's 0.0625/s beats homicide's 0.02/s.
+  assert.equal(pickBestCrime(candidates, { metric: "karma" }).crime, "Mug");
+  // The player's rule: 3 * (0.02 + 0.98 / 4) / 3s = 0.265/s, over four times the mug.
+  const pick = pickBestCrime(candidates, { metric: "karma", failFraction: 0.25 });
+  assert.equal(pick.crime, "Homicide");
+  assert.ok(pick.rate > 4 * crimeRate(mug(1), "karma", 0.25));
+  // Money is unaffected by default - a failed crime pays none.
+  assert.equal(pickBestCrime(candidates).crime, "Mug");
+});

@@ -33,7 +33,7 @@
 // Args: [0] the current BitNode (the driver passes it). Optional - getResetInfo
 // is paid for anyway, for the stamp.
 
-import { forNode } from "../lib/config.js";
+import { forReset } from "../lib/config.js";
 import { emitEvent } from "../lib/events.js";
 import { hasApiAccess } from "../lib/capabilities.js";
 import { giftGate } from "../lib/stanek-logic.js";
@@ -45,8 +45,10 @@ export async function main(ns) {
   const node = Number.isFinite(fromArg) && fromArg > 0 ? fromArg : reset.currentNode;
   const resetAt = reset.lastNodeReset;
 
-  if (!forNode(node).stanek.enabled) {
-    ns.tprint("stanek-boot.js: Stanek's Gift is off for this BitNode (stanek.enabled) - nothing accepted.");
+  // forReset, not forNode(node): the BN13 challenge run is BN13 with the gift OFF
+  // (CHALLENGE in lib/config.js), and accepting it here could not be taken back.
+  if (!forReset(reset).stanek.enabled) {
+    ns.tprint("stanek-boot.js: Stanek's Gift is off for this run (stanek.enabled) - nothing accepted.");
     return;
   }
 

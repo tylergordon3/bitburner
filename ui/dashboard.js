@@ -15,6 +15,8 @@
 //             wherever lib/bladeburner.js runs (BN6/7).
 //   GO      - the IPvGO game in hand and the stat bonuses earned (ui/go.js),
 //             wherever lib/go.js runs (every node, when it finds ~10GB).
+//   ACHIEVE - the campaign's next steps and the planned achievements still
+//             missing (ui/achievements.js), read from the save by lib/achievements.js.
 //   STANEK  - Stanek's Gift: the layout, each fragment's charge, the RAM the
 //             charge workers hold (ui/stanek.js), in BN13 or with SF13.
 //
@@ -45,6 +47,7 @@ import { extraCards as hacknetExtraCards } from "./bn9.js";
 import { extraCards as bladeExtraCards } from "./bn6.js";
 import { extraCards as goExtraCards } from "./go.js";
 import { extraCards as stanekExtraCards } from "./stanek.js";
+import { extraCards as achievementCards } from "./achievements.js";
 import { updateJournal, journalPanel } from "./journal.js";
 
 // Everything below comes from CONFIG.ui / CONFIG.factions - see lib/config.js.
@@ -77,6 +80,7 @@ const TABS = [
   { id: "blade",   label: "BLADE" },
   { id: "go",      label: "GO" },
   { id: "stanek",  label: "STANEK" },
+  { id: "achieve", label: "ACHIEVE" },
 ];
 
 // Module UI state. The HUD paints via the script loop (clearLog + printRaw); a
@@ -387,6 +391,7 @@ function activePanel(ns, C) {
     if (activeTab === "blade")   return wrapCards(bladePanel(ns, C), C, "No Bladeburner loop running (BN6/7 - lib/bladeburner.js).");
     if (activeTab === "go")      return wrapCards(goExtraCards(ns, C) ?? [], C, "No IPvGO player running (lib/go.js - needs a host with ~10GB free, and go.enabled).");
     if (activeTab === "stanek")  return wrapCards(stanekExtraCards(ns, C) ?? [], C, "No Stanek's Gift manager running (BN13 / SF13 only - lib/stanek.js).");
+    if (activeTab === "achieve") return wrapCards(achievementCards(ns, C) ?? [], C, "Achievements not read yet (lib/achievements.js reads them out of the save - needs Singularity and ~3GB free somewhere).");
     if (!statsData) return el("div", { style: { color: C.dim, fontSize: "13px", padding: "8px 2px" } }, "Gathering stats...");
     return el("div", {}, ...statsPanel(ns, C, statsData));
   } catch (e) {
@@ -502,12 +507,13 @@ function progressionCard(ns, C, d) {
  * @param {NS} ns
  */
 function buildOperationalCards(ns, C, data) {
-  const { player, money, hack, incomeHour, ram, cloud, final,
+  // (`hack: hackLevel` - a local called `hack` is billed as ns.hack, 0.1GB.)
+  const { player, money, hack: hackLevel, incomeHour, ram, cloud, final,
           state, target, goal, moneyRate, moneyEta, ramRate,
           augQueue, network, stocks, combat, augsOwned } = data;
 
   // Derived
-  const hackPct     = Math.min(1, hack / Math.max(1, Number(final.required) || hack));
+  const hackPct     = Math.min(1, hackLevel / Math.max(1, Number(final.required) || hackLevel));
   const ramPct      = ram.max > 0 ? ram.used / ram.max : 0;
   const repPct      = target.repReq  > 0 ? Math.min(1, (target.rep  ?? 0) / target.repReq)  : 1;
   const moneyPct    = target.price   > 0 ? Math.min(1, money / target.price)                 : 1;
@@ -528,7 +534,7 @@ function buildOperationalCards(ns, C, data) {
       // Player card
       card(C, "PLAYER", [
         statRow(C, "$", `${ns.format.number(money)}`, `+${ns.format.number(incomeHour)}/hr`, C.green),
-        statRow(C, "~", `Hack ${hack}`, final.missing <= 0 ? "[OK]" : `${final.eta} to BN`, hack >= (Number(final.required) || hack) ? C.green : C.yellow),
+        statRow(C, "~", `Hack ${hackLevel}`, final.missing <= 0 ? "[OK]" : `${final.eta} to BN`, hackLevel >= (Number(final.required) || hackLevel) ? C.green : C.yellow),
         progressBar(hackPct, C.blue),
 
         // Combat stats - gate for Slum Snakes/Tetrads/Syndicate/etc.
