@@ -6,6 +6,7 @@ import {
   planBatch, legSchedule, landingDelays, batchDepth, maxHackThreads, largestBatch, planCycle, incomeRate,
   prepPlan, allocate, splitGrowPadding, isPrepped, driftDetected, stillDraining, preppedScale,
   shareBonus, shareThreadsFor, shareTopUp, pruneInFlight,
+  efficientThreads, threadLadder, concaveHull, incomeCurve, allocateRam, prepDiscount,
 } from "../lib/batch-logic.js";
 
 // Game constants and a plausible grow model: threads to restore from `remaining`
@@ -113,18 +114,150 @@ test("largestBatch fills the budget to within one hack thread", () => {
   assert.equal(largestBatch({ ramBudget: 1, maxThreads: 250, planFor: planThreads }), null);
 });
 
-test("planCycle fills RAM at full depth, or trims depth when even a one-thread batch won't fit it", () => {
+test("planCycle fills RAM at full depth when the budget carries efficient batches", () => {
   const sched = { lastLanding: 40_600, launchInterval: 1200, maxThreads: 250, planFor: planThreads };  // depth 34
-  const rich = planCycle({ totalRam: planThreads(25).ram * 34 + 1, ...sched });
+  const eff = efficientThreads(sched);
+  const rich = planCycle({ totalRam: planThreads(eff + 10).ram * 34 + 1, ...sched });
   assert.equal(rich.depth, 34);
-  assert.equal(rich.plan.hackThreads, 25);
-  assert.ok(rich.depth * rich.plan.ram <= planThreads(25).ram * 34 + 1);
-
-  const poor = planCycle({ totalRam: planThreads(1).ram * 5 + 1, ...sched });
-  assert.equal(poor.plan.hackThreads, 1);
-  assert.equal(poor.depth, 5);
+  assert.equal(rich.plan.hackThreads, eff + 10);
+  assert.ok(rich.depth * rich.plan.ram <= planThreads(eff + 10).ram * 34 + 1);
 
   assert.equal(planCycle({ totalRam: 1, ...sched }), null);
+});
+
+test("efficientThreads: the smallest batch that is near the best steal per GB", () => {
+  const p = { maxThreads: 250, planFor: planThreads };
+  const eff = efficientThreads(p);
+  const rate = h => planThreads(h).hackedFraction / planThreads(h).ram;
+  // A one-thread batch is mostly overhead (a grow and two weakens for one hack).
+  assert.ok(eff > 4, `efficient size ${eff}`);
+  assert.ok(rate(eff) > rate(1) * 2);
+  // Within tolerance of the best on the ladder, and no smaller rung is.
+  const ladder = threadLadder(64);
+  const best = Math.max(...ladder.map(rate));
+  assert.ok(rate(eff) >= best * 0.95);
+  for (const h of ladder.filter(x => x < eff)) assert.ok(rate(h) < best * 0.95);
+  // A target one thread nearly empties has no choice.
+  assert.equal(efficientThreads({ maxThreads: 1, planFor: planThreads }), 1);
+});
+
+test("REGRESSION: a small budget buys fewer efficient batches, not a full window of tiny ones", () => {
+  // 440GB against a target whose window holds 34 batches: the old plan was 34
+  // batches of a hack thread or two each (0.4% bites) - most of the RAM on the
+  // grow and weaken threads every batch needs regardless. Simulated, the thin
+  // window stole 3x as much from the same RAM.
+  const sched = { lastLanding: 40_600, launchInterval: 1200, maxThreads: 250, planFor: planThreads };
+  const eff = efficientThreads(sched);
+  const totalRam = planThreads(eff).ram * 6.5;
+  const c = planCycle({ totalRam, ...sched });
+  assert.equal(c.plan.hackThreads, eff);
+  assert.equal(c.depth, 6);
+  assert.ok(c.depth * c.plan.ram <= totalRam);
+  // More stolen per window than the full-depth alternative on the same RAM.
+  const tiny = largestBatch({ ramBudget: totalRam / 34, maxThreads: 250, planFor: planThreads });
+  assert.ok(c.depth * c.plan.hackedFraction > 34 * (tiny?.hackedFraction ?? 0));
+  // Less than one efficient batch: the largest single batch that fits.
+  const one = planCycle({ totalRam: planThreads(3).ram + 0.1, ...sched });
+  assert.equal(one.depth, 1);
+  assert.equal(one.plan.hackThreads, 3);
+});
+
+// ── Sharing RAM between targets ──────────────────────────────────────────────
+
+test("threadLadder climbs to maxThreads in ~1.5x steps", () => {
+  assert.deepEqual(threadLadder(1), [1]);
+  assert.deepEqual(threadLadder(4), [1, 2, 3, 4]);
+  assert.deepEqual(threadLadder(30), [1, 2, 3, 4, 6, 9, 14, 21, 30]);
+});
+
+test("concaveHull: from the origin, slopes strictly falling, dominated points dropped", () => {
+  const hull = concaveHull([
+    { ram: 10, income: 1 },    // under the chord origin -> (20, 6)
+    { ram: 20, income: 6 },
+    { ram: 40, income: 9 },
+    { ram: 50, income: 9 },    // more RAM, no more income
+    { ram: 80, income: 12 },
+  ]);
+  assert.deepEqual(hull.map(p => p.ram), [0, 20, 40, 80]);
+  const slopes = hull.slice(1).map((p, i) => (p.income - hull[i].income) / (p.ram - hull[i].ram));
+  for (let i = 1; i < slopes.length; i++) assert.ok(slopes[i] < slopes[i - 1]);
+  assert.deepEqual(concaveHull([]), [{ ram: 0, income: 0 }]);
+});
+
+test("incomeCurve: income is linear in the bite, RAM is not", () => {
+  const pts = incomeCurve({
+    maxMoney: 1e9, hackChance: 1, lastLanding: 40_600, launchInterval: 1200, maxThreads: 250, planFor: planThreads,
+  });
+  assert.equal(pts.at(-1).threads, 250);
+  const at = h => pts.find(p => p.threads === h);
+  assert.ok(Math.abs(at(250).income / at(1).income - 250) < 1e-6);
+  // A fat bite costs more RAM per thread than a moderate one (its grow is bigger
+  // out of proportion), and a one-thread batch more than either (all overhead).
+  assert.ok(at(250).ram / 250 > at(72).ram / 72);
+  assert.ok(at(1).ram > at(72).ram / 72 * 2);
+  // maxDepth stretches the interval: fewer batches in the window, less RAM and income.
+  const capped = incomeCurve({
+    maxMoney: 1e9, hackChance: 1, lastLanding: 40_600, launchInterval: 1200, maxThreads: 250, planFor: planThreads, maxDepth: 10,
+  });
+  assert.ok(capped.at(-1).ram < pts.at(-1).ram && capped.at(-1).income < pts.at(-1).income);
+});
+
+// Two-segment curves: `a` RAM at slope `s1`, then `b` more at slope `s2`.
+const curve = (key, a, s1, b, s2, minRam = 1) => ({
+  key, minRam, points: [{ ram: a, income: a * s1 }, { ram: a + b, income: a * s1 + b * s2 }],
+});
+const shares = list => Object.fromEntries(list.map(e => [e.key, e.ram]));
+
+test("REGRESSION: allocateRam takes the best gigabytes of each target, not all of the best target", () => {
+  // "rich" pays 10/GB on its first 100GB and 1/GB on the next 400; "next" pays
+  // 5/GB on 100GB. The old spill gave rich all 200GB (income 1,100).
+  const list = allocateRam({ totalRam: 200, maxTargets: 6, curves: [curve("rich", 100, 10, 400, 1), curve("next", 100, 5, 100, 0.5)] });
+  assert.deepEqual(shares(list), { rich: 100, next: 100 });
+  assert.equal(list.reduce((s, e) => s + e.income, 0), 1500);
+  assert.equal(list[0].key, "rich", "best earner first");
+});
+
+test("allocateRam: a small botnet goes on one target, a huge one saturates them all", () => {
+  const curves = [curve("rich", 100, 10, 400, 1), curve("next", 100, 5, 100, 0.5)];
+  assert.deepEqual(shares(allocateRam({ totalRam: 60, maxTargets: 6, curves })), { rich: 60 });
+  assert.deepEqual(shares(allocateRam({ totalRam: 1e6, maxTargets: 6, curves })), { rich: 500, next: 200 });
+  assert.deepEqual(allocateRam({ totalRam: 0, maxTargets: 6, curves }), []);
+});
+
+test("allocateRam: opening a target needs a whole batch, and a worthwhile slice after the first", () => {
+  // 30GB left for "next", whose smallest batch is 50GB: it stays shut.
+  const curves = [curve("rich", 100, 10, 400, 1), curve("next", 100, 5, 100, 0.5, 50)];
+  assert.deepEqual(shares(allocateRam({ totalRam: 130, maxTargets: 6, curves })), { rich: 130 });
+  // minTargetRam binds on the second target only - the first is always served.
+  const small = [curve("rich", 100, 10, 0.001, 1), curve("next", 100, 5, 100, 0.5)];
+  assert.deepEqual(Object.keys(shares(allocateRam({ totalRam: 140, maxTargets: 6, minTargetRam: 64, curves: small }))), ["rich"]);
+  assert.deepEqual(shares(allocateRam({ totalRam: 20, maxTargets: 6, minTargetRam: 64, curves: small })), { rich: 20 });
+});
+
+test("allocateRam: with RAM to spare, the slots go to the richest targets, not the most efficient", () => {
+  // "cheap" is the better use of a gigabyte but can only ever absorb 10 of them.
+  const curves = [curve("cheap", 10, 20, 0.001, 1), curve("big", 1000, 5, 1000, 2)];
+  // RAM-bound: efficiency decides, and both fit anyway.
+  assert.deepEqual(shares(allocateRam({ totalRam: 100, maxTargets: 2, curves })), { cheap: 10, big: 90 });
+  // One slot, plenty of RAM: the efficient-first greedy would spend it on "cheap".
+  assert.deepEqual(shares(allocateRam({ totalRam: 5000, maxTargets: 1, curves })), { big: 2000 });
+  // One slot, 8GB: now "cheap" really is the better target.
+  assert.deepEqual(shares(allocateRam({ totalRam: 8, maxTargets: 1, curves })), { cheap: 8 });
+});
+
+test("allocateRam: the bonus tilts the choice without inflating the reported income", () => {
+  const curves = [curve("held", 100, 5, 100, 1), curve("rival", 100, 5.5, 100, 1)];
+  assert.equal(shares(allocateRam({ totalRam: 100, maxTargets: 6, curves })).rival, 100);
+  const sticky = allocateRam({ totalRam: 100, maxTargets: 6, curves, bonus: k => (k === "held" ? 1.15 : 1) });
+  assert.deepEqual(shares(sticky), { held: 100 });
+  assert.equal(sticky[0].income, 500);
+});
+
+test("prepDiscount: a target that must be prepped first is worth less, never nothing", () => {
+  assert.equal(prepDiscount(0, 3_600_000), 1);
+  assert.equal(prepDiscount(3_600_000, 3_600_000), 0.5);
+  assert.ok(prepDiscount(60_000, 3_600_000) > 0.98);
+  assert.ok(prepDiscount(1e9, 3_600_000) > 0);
 });
 
 test("planCycle stretches the launch interval to honour maxDepth", () => {

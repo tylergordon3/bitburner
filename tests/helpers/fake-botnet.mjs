@@ -337,9 +337,14 @@ export function defineScenarios(test, assert, base = {}) {
     assert.equal(sim.modes.filter(m => m.startsWith("Draining")).length, 0, "drift detector tripped in a clean run");
     assert.equal(world.execFailures, 0, "exec was asked for more RAM than a host had");
 
-    // Continuous launching: ~one batch per launch interval over the run.
-    const expected = Math.floor((10 * 60_000) / sim.state.launchIntervalMs);
+    // Continuous launching: the window is refilled as fast as it empties. 440GB
+    // can't carry a full window of efficient batches, so the window is THIN
+    // (batch-logic planCycle): `depth` batches per weaken-time, not one per
+    // launch interval.
+    const cadence = Math.max(sim.state.launchIntervalMs, sim.state.weakenTimeMs / sim.state.depth);
+    const expected = Math.floor((10 * 60_000) / cadence);
     assert.ok(sim.s.batchId >= expected * 0.9, `launched ${sim.s.batchId}, expected ~${expected}`);
+    assert.ok(sim.state.fraction >= 0.02, `a thin window takes real bites, got ${sim.state.fraction}`);
 
     // The correctness condition: each hack lands on a prepped server.
     assert.ok(world.hackLandings.length > 50, "hacks actually landed");
@@ -405,9 +410,13 @@ export function defineScenarios(test, assert, base = {}) {
       assert.ok(passes[i].money >= passes[i - 1].money, `pass ${i} lost money: ${JSON.stringify(passes)}`);
     }
 
-    for (const h of world.hackLandings) {
-      assert.ok(h.moneyFrac >= 0.995 && h.secOver <= 0.01, `hack at t=${h.t} on unprepped state (${(h.moneyFrac * 100).toFixed(1)}%, +${h.secOver.toFixed(2)})`);
-    }
+    // A prep counts as done from prepMoneyThreshold, so the first batches may
+    // land a point or two under full; each one's padded grow closes the gap
+    // (growPadding), and from the fourth on the server is back at max.
+    world.hackLandings.forEach((h, i) => {
+      const bar = i < 3 ? H.prepMoneyThreshold : 0.995;
+      assert.ok(h.moneyFrac >= bar && h.secOver <= 0.01, `hack ${i} at t=${h.t} on unprepped state (${(h.moneyFrac * 100).toFixed(1)}%, +${h.secOver.toFixed(2)})`);
+    });
     assert.equal(sim.modes.filter(m => m.startsWith("Draining")).length, 0);
   });
 
@@ -515,7 +524,8 @@ export function defineScenarios(test, assert, base = {}) {
     // hasRootAccess on the cached name threw "Invalid host" - an error modal
     // in-game. The fake throws exactly the same way; buildSnapshot must drop
     // the casualty via serverExists and carry on.
-    const { world, ns, advance, deleteServer } = makeWorld({ ...base });
+    // (6TB, so the 4TB that survives still carries a full window of batches.)
+    const { world, ns, advance, deleteServer } = makeWorld({ ...base, w1Ram: 4096, w2Ram: 2048 });
     const s = freshState();
     const modes = [];
     const tick = () => { modes.push(step(ns, s, world.clock)); advance(H.batchSpacingMs); };
@@ -543,7 +553,9 @@ export function defineScenarios(test, assert, base = {}) {
     // the same window (in the field: Draining/Batching flapping every second,
     // and never the re-prep). Latched, the target is left alone until every
     // batch in flight has landed - a whole weaken-time - and only then re-read.
-    const { world, ns, advance } = makeWorld({ ...base });
+    // (6TB, so the window is full: batches land continuously and "all landed"
+    // really is a weaken-time away. On a thin window they land in one bunch.)
+    const { world, ns, advance } = makeWorld({ ...base, w1Ram: 4096, w2Ram: 2048 });
     const s = freshState();
     const modes = [];
     const launched = [];

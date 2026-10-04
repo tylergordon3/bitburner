@@ -13,6 +13,8 @@
 //             lib/hacknet.js runs (BN9 / SF9).
 //   BLADE   - the Bladeburner rank / black-op / skills cards (ui/bn6.js),
 //             wherever lib/bladeburner.js runs (BN6/7).
+//   GO      - the IPvGO game in hand and the stat bonuses earned (ui/go.js),
+//             wherever lib/go.js runs (every node, when it finds ~10GB).
 //
 // The header also carries the switches (TOGGLES / toggleButton) - the only
 // controls in here that change what the BOT does rather than what the HUD shows:
@@ -39,6 +41,7 @@ import { extraCards as corpExtraCards } from "./bn3.js";
 import { extraCards as sleeveExtraCards } from "./bn10.js";
 import { extraCards as hacknetExtraCards } from "./bn9.js";
 import { extraCards as bladeExtraCards } from "./bn6.js";
+import { extraCards as goExtraCards } from "./go.js";
 import { updateJournal, journalPanel } from "./journal.js";
 
 // Everything below comes from CONFIG.ui / CONFIG.factions - see lib/config.js.
@@ -69,6 +72,7 @@ const TABS = [
   { id: "sleeve",  label: "SLEEVE" },
   { id: "hacknet", label: "HACKNET" },
   { id: "blade",   label: "BLADE" },
+  { id: "go",      label: "GO" },
 ];
 
 // Module UI state. The HUD paints via the script loop (clearLog + printRaw); a
@@ -377,6 +381,7 @@ function activePanel(ns, C) {
     if (activeTab === "sleeve")  return wrapCards(sleevePanel(ns, C), C, "No sleeve activity (needs BN10 or SF10, and a host with ~72GB free for the manager).");
     if (activeTab === "hacknet") return wrapCards(hacknetPanel(ns, C), C, "No hacknet-server manager running (BN9 / SF9 only - lib/hacknet.js).");
     if (activeTab === "blade")   return wrapCards(bladePanel(ns, C), C, "No Bladeburner loop running (BN6/7 - lib/bladeburner.js).");
+    if (activeTab === "go")      return wrapCards(goExtraCards(ns, C) ?? [], C, "No IPvGO player running (lib/go.js - needs a host with ~10GB free, and go.enabled).");
     if (!statsData) return el("div", { style: { color: C.dim, fontSize: "13px", padding: "8px 2px" } }, "Gathering stats...");
     return el("div", {}, ...statsPanel(ns, C, statsData));
   } catch (e) {
@@ -688,6 +693,10 @@ function buildOperationalCards(ns, C, data) {
                           : `${ns.format.number(a.repMissing)} rep`;
             return el("div", {
               key: i,
+              // Why it ranks where it does (lib/aug-value.js): hover for the numbers.
+              title: a.value == null ? undefined
+                : `${a.faction} - value ${a.value.toFixed(2)}` +
+                  (a.bundleValue > a.value ? `, ${a.bundleValue.toFixed(2)} with the cheaper augs its rep unlocks` : ""),
               style: {
                 display: "flex",
                 justifyContent: "space-between",

@@ -66,7 +66,10 @@ a "launch the largest batch that fits, every tick" loop:
   `hacking.maxDepth`), and each batch is the fattest that lets that many share the
   target's RAM budget — sized **to the hack thread** by a binary search
   (`largestBatch` / `planCycle`), up to `hacking.maxHackFraction` of the target's
-  money. (It used to pick from a ladder of fractions 2–2.5x apart: a budget just
+  money. When the budget can't carry a full window of *efficient* batches the
+  window is **thinned** instead (`efficientThreads`): a one-thread batch still
+  needs a grow and two weaken threads, so a 440GB botnet stole three times as much
+  from 7 batches of 4% as from 34 batches of 0.4%. (It used to pick from a ladder of fractions 2–2.5x apart: a budget just
   short of a rung fell to the one below, leaving the best target on ~40–65% of the
   RAM it had been handed.) The grow carries `hacking.growPadding` extra threads: a
   batch's grow only repairs its own hack, so an exact count lets any shortfall — the
@@ -79,19 +82,29 @@ a "launch the largest batch that fits, every tick" loop:
 - What a weaken thread removes is asked of the game (`ns.weakenAnalyze`, 1GB), not
   taken as 0.05: the `ServerWeakenRate` BitNode multiplier doubles it in BN11 and
   shrinks it with every level of BN12.
-- Targets are ranked by the **income each would earn with the whole botnet behind
-  it** (`incomeRate`, $/ms). Two earlier metrics were wrong here:
-  `maxMoney / minSec / hackTime` ignored what a batch costs, and $ per GB-second
-  (its replacement) ranked by RAM *efficiency* — and the most efficient target is
-  the cheapest, not the richest.
+- The botnet's RAM is **split between targets so the last gigabyte earns the same
+  on each** (`allocateRam`, over every target's `incomeCurve`). A target's income
+  is linear in its bite but its RAM is not — the grow that repairs 50% costs far
+  more than five that repair 10% — so income per GB falls as the bite fattens.
+  Three earlier rankings were wrong here: `maxMoney / minSec / hackTime` ignored
+  what a batch costs; $ per GB-second parked a big fleet on the cheapest server;
+  and income-with-the-whole-fleet handed the winner the fattest bite it could take
+  and spilled only the remainder, spending most of a large fleet on the worst
+  gigabytes of one server. Simulated against nine targets the split earns 5–12%
+  more up to 100TB and ~45% more at 200–400TB; on a fleet big enough to saturate
+  every target the two agree.
 - **One target cannot absorb a big botnet.** Its launch interval is fixed by
   timing, so it pays at most `maxHackFraction` of its money every ~1.2s however
-  much RAM exists — which at a low hacking level, where n00dles is the best server
-  in reach, is a few hundred GB against a multi-TB fleet. So the manager services
-  the top `hacking.maxTargets` targets in rank order, each planned against the RAM
-  the ones above it don't claim (down to `hacking.minTargetRam`). Same scheduler
-  per target, own launch clock, own prep and drift state; the primary still takes
-  the fattest bite it can, and only what it can't absorb spills down.
+  much RAM exists. Up to `hacking.maxTargets` targets are worked, each within its
+  share (a further target is only opened for `hacking.minTargetRam` or more), with
+  its own launch clock, prep and drift state. When there are more candidates than
+  slots and RAM to spare, the slots go to the targets that can earn the most
+  rather than the most RAM-efficient ones.
+- A target already being worked gets an edge when the split is re-cut
+  (`hacking.targetStickiness`), and one that would first have to be prepped is
+  marked down by how long that takes (`hacking.prepHorizonMs`) — so a small fleet
+  fresh from an install starts on a server it can prep in minutes, not on the
+  richest one in reach.
 - Prep is one joint weaken+grow pass sized so the weaken also covers the grow's
   own security (`prepPlan`), and it does **not** block the loop: the manager keeps
   ticking (share, the other targets) and simply doesn't launch against that target
@@ -230,6 +243,20 @@ bitburner-src:
 - **`globalThis` survives installs and BitNode changes** (only a page load clears
   it). The core deletes the state that gates irreversible decisions at boot, and
   readers of helper state check its age.
+
+The aug to **work toward** is the one worth the most per unit of time
+([`lib/aug-value.js`](lib/aug-value.js)), not the one with the soonest ETA. An
+aug's value is a weighted sum of ln(multiplier) over its stats, with the weights
+per node (`augs.value.weights`: hacking first by default, combat and the
+Bladeburner multipliers in BN6/7, hacknet in BN9) plus a flat `special` value for
+effects that aren't multipliers. A candidate is scored on the whole **bundle** its
+reputation unlocks — every cheaper aug the same faction sells comes with the
+grind — over the wait for it, and the current target gets a 25% bonus so rate
+noise can't flip the work slot. The stat table comes from a one-shot off-home
+helper ([`lib/aug-stats.js`](lib/aug-stats.js), 11.6GB for a second, once per page
+load); until it has run every aug counts the same. Hover a PIPELINE row on the HUD
+for an aug's value. This decides where the work slot and savings go, not what is
+bought: everything ready is still bought.
 
 Augmentations are bought **dearest first** (`nextAugPurchase`): every purchase raises
 the price of everything still unbought by 1.9x, so {100, 50, 10} costs 231 in that
@@ -398,7 +425,8 @@ faction you belong to — does survive.)
   player wins ~45% against Tetrads on 9×9.
 
 It publishes `globalThis.gordGoState` (opponent, wins/losses, the last result, the
-game's per-faction bonus percentages) and writes at most one journal line per 15
+game's per-faction bonus percentages), which the HUD's **GO** tab
+([`ui/go.js`](ui/go.js)) shows, and writes at most one journal line per 15
 minutes. `go.enabled: false` hands the board back for manual play.
 
 ## Sleeves

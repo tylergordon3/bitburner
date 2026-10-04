@@ -464,7 +464,26 @@ function prepped(state) {
 
 // ── Target ranking ───────────────────────────────────────────────────────────
 
-let _rank = { at: 0, ram: 0, list: /** @type {{target: string, score: number}[]} */ ([]) };
+/**
+ * Roughly how long until `target` could carry its first batch: 0 when it is
+ * prepped, otherwise one weaken-time (at its current security) per prep pass,
+ * the passes being how many times the whole botnet has to be thrown at it. An
+ * estimate for ranking only - later passes are faster than the first, and the
+ * prep rarely gets the whole botnet.
+ * @param {NS} ns @param {string} target @param {TargetMath} math @param {number} capacity
+ */
+function prepEstimateMs(ns, target, math, capacity) {
+  const state = readTarget(ns, target);
+  if (prepped(state)) return 0;
+  const grow = math.growNeeded(state.money, state.maxMoney, state.security);
+  const excess = Math.max(0, state.security - state.minSecurity);
+  const weaken = Math.ceil((excess + grow * H.securityPerGrow) / weakenAmount(ns));
+  const threads = Math.floor(capacity / Math.max(RAM.grow, RAM.weaken));
+  const passes = Math.max(1, Math.ceil((grow + weaken) / Math.max(1, threads)));
+  return passes * ns.getWeakenTime(target);
+}
+
+let _rank = { at: 0, ram: 0, list: /** @type {{target: string, score: number, ram: number}[]} */ ([]) };
 
 /**
  * The batch plan for one target given `ramBudget`: the leg schedule (fixed by
@@ -487,29 +506,41 @@ function cycleFor(math, ramBudget) {
 }
 
 /**
- * Hackable targets ranked by the INCOME each would yield with the whole botnet
- * behind it ($/ms, batch-logic incomeRate) - by what we would actually earn, not
- * by how efficiently the RAM is spent.
+ * The targets worth working and how much of the botnet each should hold: the
+ * fleet's RAM split so that the last gigabyte earns the same on every target
+ * (batch-logic allocateRam, over each target's income curve). Best earner first.
  *
- * This is the second correction to this ranking. money/minSec/hackTime ignored
- * what a batch costs; $ per GB-second (the version before this one) fixed that
- * but maximised RAM EFFICIENCY, and the most efficient target is not the richest
- * - it is usually the cheapest, which on a botnet with RAM to spare means
- * parking on n00dles and leaving the fleet idle. Income ranking prefers the
- * server that pays most with the RAM we have, and step() spills what that target
- * cannot absorb onto the next ones in this same list.
+ * This is the third version of this ranking. money/minSec/hackTime ignored what
+ * a batch costs. $ per GB-second fixed that but parked a big botnet on the most
+ * RAM-efficient server with most of the fleet idle. Income-with-the-whole-fleet
+ * fixed THAT, but handed the winner the fattest bite it could take and spilled
+ * only the remainder - and a fat bite is the expensive end of a target's curve
+ * (the grow that repairs 50% costs far more than five grows that repair 10%),
+ * so most of a large fleet went on the worst gigabytes of one server while the
+ * next-best target got scraps. The allocation spends each gigabyte where it
+ * earns most, which reduces to "the most efficient target" on a tiny botnet and
+ * to "everything, as fat as it goes" on a huge one.
+ *
+ * Targets we are already working get an edge (targetStickiness), and one that
+ * would have to be prepped first is marked down by how long that takes
+ * (prepEstimateMs / prepDiscount): a re-rank must not swap a prepped target for
+ * an unprepped one that is a hair better, and a small fleet fresh from an
+ * install must not spend its first hour growing the richest server in reach.
  *
  * Re-ranked every targetRescoreMs, and immediately when the botnet's usable RAM
  * moves by more than half (a purchased-server upgrade, an aug install wiping the
- * fleet), since the ranking is now a function of that RAM.
+ * fleet), since the split is a function of that RAM.
  * @param {NS} ns @param {Snapshot} snap @param {number} capacity @param {number} now
+ * @param {Set<string>} incumbents targets with batches in flight or a prep under way
  */
-function rankTargets(ns, snap, capacity, now) {
+function rankTargets(ns, snap, capacity, now, incumbents) {
   const stale = now - _rank.at >= H.targetRescoreMs
     || Math.abs(capacity - _rank.ram) > _rank.ram * 0.5;
   if (_rank.list.length && !stale) return _rank.list;
 
-  const list = [];
+  const curves = [];
+  /** @type {Map<string, number>} what each target's income per GB is multiplied by */
+  const weight = new Map();
   for (const server of snap.rooted) {
     if (server.startsWith(H.excludeTargetPrefix)) continue;
     const maxMoney = ns.getServerMaxMoney(server);
@@ -517,17 +548,31 @@ function rankTargets(ns, snap, capacity, now) {
     if (ns.getServerRequiredHackingLevel(server) > snap.hacking) continue;
 
     const m = targetMath(ns, server);
-    const { cycle } = cycleFor(m, capacity);
-    if (!cycle) continue;                       // not even the smallest batch fits
-    const score = B.incomeRate({
+    const schedule = B.legSchedule({ ...m.times, spacing: H.batchSpacingMs, margin: H.launchMarginMs });
+    const points = B.incomeCurve({
       maxMoney,
       hackChance: m.hackChance,
-      plan: cycle.plan,
-      launchInterval: cycle.launchInterval,
+      lastLanding: schedule.lastLanding,
+      launchInterval: schedule.launchInterval,
+      maxDepth: H.maxDepth,
+      maxThreads: m.maxThreads,
+      planFor: m.plan,
     });
-    if (score > 0) list.push({ target: server, score });
+    if (!points.length) continue;
+    // The smallest thing this target can run at all: a single one-thread batch.
+    curves.push({ key: server, points, minRam: m.plan(1)?.ram ?? Infinity });
+    weight.set(server, incumbents.has(server)
+      ? 1 + H.targetStickiness
+      : B.prepDiscount(prepEstimateMs(ns, server, m, capacity), H.prepHorizonMs));
   }
-  list.sort((a, b) => b.score - a.score);
+
+  const list = B.allocateRam({
+    totalRam: capacity,
+    curves,
+    maxTargets: H.maxTargets,
+    minTargetRam: H.minTargetRam,
+    bonus: key => weight.get(key) ?? 1,
+  }).map(a => ({ target: a.key, score: a.income, ram: a.ram }));
   _rank = { at: now, ram: capacity, list };
   return list;
 }
@@ -725,9 +770,10 @@ function readWorkerRam(ns) {
  *
  * @param {NS} ns @param {ReturnType<typeof newSchedulerState>} s
  * @param {Snapshot} snap @param {string} target
- * @param {number} budgetRam @param {number} now
+ * @param {number} budgetRam the RAM its batches may hold @param {number} now
+ * @param {number} [prepRam] the RAM a prep pass may use (defaults to the budget)
  */
-function serviceTarget(ns, s, snap, target, budgetRam, now) {
+function serviceTarget(ns, s, snap, target, budgetRam, now, prepRam = budgetRam) {
   const math = targetMath(ns, target);
   const state = readTarget(ns, target);
   const open = s.inFlight.filter(b => b.target === target);
@@ -756,7 +802,7 @@ function serviceTarget(ns, s, snap, target, budgetRam, now) {
   if ((s.prepUntil.get(target) ?? 0) > now) {
     mode = "Prepping";
   } else if (open.length === 0 && !prepped(state)) {
-    const res = launchPrep(ns, snap, target, state, math, budgetRam, now);
+    const res = launchPrep(ns, snap, target, state, math, prepRam, now);
     s.prepUntil.set(target, res.until);
     mode = res.launched ? "Prepping" : "Waiting for RAM (prep)";
     if (res.launched) {
@@ -831,9 +877,15 @@ export function step(ns, s, now) {
   // What the botnet can plan with right now: RAM free this tick plus what our own
   // in-flight batches are holding (they release it as they land). Ranking uses
   // snap.capacity instead - see buildSnapshot.
-  const budgetRam = snap.totalUsable + s.inFlight.reduce((sum, b) => sum + b.ram, 0);
+  // Capped at capacity: a batch counts its whole RAM until its LAST leg lands,
+  // though its earlier legs freed theirs on landing, so the sum runs a little
+  // over - enough to plan one batch more than the botnet can ever hold.
+  const budgetRam = Math.min(snap.capacity, snap.totalUsable + s.inFlight.reduce((sum, b) => sum + b.ram, 0));
 
-  const ranked = rankTargets(ns, snap, snap.capacity, now);
+  // Targets we are committed to: batches in flight, or a prep whose legs are out.
+  const incumbents = new Set(s.inFlight.map(b => b.target));
+  for (const [target, until] of s.prepUntil) if (until > now) incumbents.add(target);
+  const ranked = rankTargets(ns, snap, snap.capacity, now, incumbents);
   if (!ranked.length) {
     // No rooted server scored anything: nothing can carry even the smallest
     // batch (a fresh node, or the fleet just vanished with an aug install), or
@@ -870,20 +922,24 @@ export function step(ns, s, now) {
     // window would launch straight into its previous batch's landings.
   }
 
-  // Service targets in rank order, each budgeted with the RAM the ones above it
-  // don't claim. The best target takes the fattest bite it can (its own income is
-  // what the ranking maximises) and only what it CANNOT absorb spills down - so
-  // this never trades primary income for secondary income, it only stops the
-  // remainder from idling.
+  // Service the targets best earner first, each within its share of the botnet
+  // (rankTargets). The shares were cut from the botnet's capacity; scale them to
+  // what is actually plannable this tick, and never past what is left.
+  const scale = _rank.ram > 0 ? budgetRam / _rank.ram : 1;
+  // Nothing of ours in the air at all (a cold start, or after an install): there
+  // are no batches to starve, so a prep may use everything not yet claimed and
+  // finish in one pass. Once batches fly, a prep stays inside its target's share.
+  const coldStart = s.inFlight.length === 0;
   const serviced = [];
   let claimed = 0;
-  for (const { target } of ranked) {
+  for (const { target, ram } of ranked) {
     if (serviced.length >= H.maxTargets) break;
-    const budget = budgetRam - claimed;
+    const left = budgetRam - claimed;
     // The primary always gets serviced, however little RAM there is; opening a
     // further target is only worth it above minTargetRam.
-    if (serviced.length > 0 && budget < H.minTargetRam) break;
-    const res = serviceTarget(ns, s, snap, target, budget, now);
+    if (serviced.length > 0 && left < H.minTargetRam) break;
+    const budget = Math.min(ram * scale, left);
+    const res = serviceTarget(ns, s, snap, target, budget, now, coldStart ? left : budget);
     serviced.push(res);
     if (res.cycle) {
       claimed += res.claim;

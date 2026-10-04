@@ -90,7 +90,18 @@ function describe(ns, target, ramBudget, ramPerThread, weakenAmount) {
   const maxMoney = ns.getServerMaxMoney(target);
   const income = cycle ? B.incomeRate({ maxMoney, hackChance, plan: cycle.plan, launchInterval: cycle.launchInterval }) : 0;
 
-  return { target, maxMoney, cycle, income, weakenTime: times.weakenTime, hackChance };
+  // The curve the manager splits the botnet's RAM by (batch-logic allocateRam).
+  const points = B.incomeCurve({
+    maxMoney,
+    hackChance,
+    lastLanding: schedule.lastLanding,
+    launchInterval: schedule.launchInterval,
+    maxDepth: H.maxDepth,
+    maxThreads: B.maxHackThreads(hackPct, H.maxHackFraction),
+    planFor,
+  });
+
+  return { target, maxMoney, cycle, income, weakenTime: times.weakenTime, hackChance, points, minRam: planFor(1)?.ram ?? Infinity };
 }
 
 /** @param {NS} ns */
@@ -216,24 +227,38 @@ export async function main(ns) {
     if (ns.getServerRequiredHackingLevel(host) > level) continue;
     ranked.push(describe(ns, host, capacity, workerRam, weakenAmount));
   }
-  ranked.sort((a, b) => b.income - a.income);
+  // The manager's split of the fleet between them: each gigabyte where it earns
+  // most. (Its own split also favours targets it is already working and marks
+  // down ones that need a long prep, so the live one can differ at the margin -
+  // the State lines above say what it actually chose.)
+  const share = new Map(B.allocateRam({
+    totalRam: capacity,
+    curves: ranked.filter(r => r.points.length).map(r => ({ key: r.target, points: r.points, minRam: r.minRam })),
+    maxTargets: H.maxTargets,
+    minTargetRam: H.minTargetRam,
+  }).map(a => [a.key, a]));
+  // Targets with a share first (best earner first), then the rest by what each
+  // would earn alone.
+  ranked.sort((a, b) =>
+    (share.get(b.target)?.income ?? -1) - (share.get(a.target)?.income ?? -1) || b.income - a.income);
 
   ns.tprint("-".repeat(72));
-  ns.tprint(`Targets, ranked by income with the whole ${ram(capacity)} behind each ` +
-    `(top ${Math.min(top, ranked.length)} of ${ranked.length}; the manager works the first ${H.maxTargets}):`);
-  ns.tprint(`  ${"target".padEnd(20)} ${"$/sec".padStart(10)} ${"bite".padStart(7)} ${"chance".padStart(7)} ` +
+  ns.tprint(`Targets (top ${Math.min(top, ranked.length)} of ${ranked.length}). "share" is the manager's split of the ` +
+    `${ram(capacity)}; the other columns are each target ALONE with all of it:`);
+  ns.tprint(`  ${"target".padEnd(20)} ${"share".padStart(10)} ${"$/sec".padStart(10)} ${"bite".padStart(7)} ${"chance".padStart(7)} ` +
     `${"batch".padStart(10)} ${"depth".padStart(6)} ${"would hold".padStart(11)}`);
   for (const r of ranked.slice(0, top)) {
     const hold = r.cycle ? r.cycle.depth * r.cycle.plan.ram : 0;
-    ns.tprint(`  ${r.target.padEnd(20)} ${$(r.income * 1000).padStart(10)} ` +
+    ns.tprint(`  ${r.target.padEnd(20)} ${(share.has(r.target) ? ram(share.get(r.target).ram) : "-").padStart(10)} ${$(r.income * 1000).padStart(10)} ` +
       `${(r.cycle ? (r.cycle.plan.hackedFraction * 100).toFixed(1) + "%" : "-").padStart(7)} ` +
       // A chance of 0.0% across the board means the math is being asked about an
       // unrooted server, not that the targets are hard - see lib/formulas.js.
       `${(r.hackChance * 100).toFixed(1) + "%"}`.padStart(7) +
       ` ${(r.cycle ? ram(r.cycle.plan.ram) : "-").padStart(10)} ${String(r.cycle?.depth ?? "-").padStart(6)} ${ram(hold).padStart(11)}`);
   }
-  const spread = ranked.slice(0, H.maxTargets).reduce((sum, r) => sum + (r.cycle ? r.cycle.depth * r.cycle.plan.ram : 0), 0);
-  ns.tprint(`  Those ${Math.min(H.maxTargets, ranked.length)} would hold ~${ram(spread)} of ${ram(capacity)} ` +
-    `(${capacity > 0 ? ((spread / capacity) * 100).toFixed(0) : 0}% of the fleet).`);
+  const spread = [...share.values()].reduce((sum, a) => sum + a.ram, 0);
+  const earning = [...share.values()].reduce((sum, a) => sum + a.income, 0);
+  ns.tprint(`  The ${share.size} with a share hold ~${ram(spread)} of ${ram(capacity)} ` +
+    `(${capacity > 0 ? ((spread / capacity) * 100).toFixed(0) : 0}% of the fleet) for ~${$(earning * 1000)}/sec.`);
   ns.tprint("=".repeat(72));
 }
