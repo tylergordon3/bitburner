@@ -102,7 +102,11 @@ export function updateJournal(ns) {
 
   // Purchase events fire on the tick an aug is bought; log them as they land.
   const purch = (state.purchases ?? []).join(" | ");
-  if (purch && purch !== lastPurchases) {
+  // Keyed on the tick that made the purchase, not on the text alone: the same
+  // aug bought again later (NeuroFlux, every level) is the same string, and was
+  // silently dropped.
+  const purchKey = `${state.updatedAt ?? ""}|${purch}`;
+  if (purch && purchKey !== lastPurchases) {
     for (const p of state.purchases) {
       const [aug, faction] = String(p).split(" from ");
       push(`${clock()}  [+] Bought ${p}`, "buy", {
@@ -110,7 +114,7 @@ export function updateJournal(ns) {
         factions: [faction].filter(Boolean),
       });
     }
-    lastPurchases = purch;
+    lastPurchases = purchKey;
   }
 
   const { key, text } = narrate(ns, state);

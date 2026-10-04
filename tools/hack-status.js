@@ -34,41 +34,57 @@ const WORKERS = [P.hack, P.grow, P.weaken];
 
 /**
  * The manager's own view of one target, mirrored here rather than imported:
- * importing hacking/manager.js would pull its whole ~11GB of Netscript into this
- * tool. The pure parts (planCycle, incomeRate) ARE the manager's, so the numbers
- * below are the ones it ranks by.
+ * importing hacking/manager.js would pull its whole ~12GB of Netscript into this
+ * tool. The pure parts (preppedScale, planCycle, incomeRate) ARE the manager's,
+ * so the numbers below are the ones it ranks by.
  * @param {NS} ns @param {string} target @param {number} ramBudget
  * @param {{hack: number, grow: number, weaken: number}} ramPerThread
+ * @param {number} weakenAmount security one weaken thread removes in this node
  */
-function describe(ns, target, ramBudget, ramPerThread) {
+function describe(ns, target, ramBudget, ramPerThread, weakenAmount) {
   const useFormulas = F.hasFormulas(ns);
-  const times = useFormulas
-    ? F.batchTimes(ns, target)
-    : { hackTime: ns.getHackTime(target), growTime: ns.getGrowTime(target), weakenTime: ns.getWeakenTime(target) };
-  const hackPct = useFormulas ? F.hackPercent(ns, target) : ns.hackAnalyze(target);
+  let times, hackPct, growThreadsFor;
+  if (useFormulas) {
+    times = F.batchTimes(ns, target);
+    hackPct = F.hackPercent(ns, target);
+    growThreadsFor = (remaining) => F.growThreadsToFull(ns, target, remaining);
+  } else {
+    // No Formulas.exe: the ns.* readings describe the CURRENT security, so scale
+    // them to the prepped one, exactly as the manager's targetMath does.
+    const k = B.preppedScale({
+      security: ns.getServerSecurityLevel(target),
+      minSecurity: ns.getServerMinSecurityLevel(target),
+      requiredLevel: ns.getServerRequiredHackingLevel(target),
+    });
+    times = {
+      hackTime: ns.getHackTime(target) * k.time,
+      growTime: ns.getGrowTime(target) * k.time,
+      weakenTime: ns.getWeakenTime(target) * k.time,
+    };
+    hackPct = ns.hackAnalyze(target) * k.hackPct;
+    growThreadsFor = (remaining) => Math.ceil(ns.growthAnalyze(target, 1 / Math.max(0.01, remaining)) * k.growThreads);
+  }
   const hackChance = useFormulas ? F.hackChance(ns, target) : 1;
-  const growThreadsFor = useFormulas
-    ? (remaining) => F.growThreadsToFull(ns, target, remaining)
-    : (remaining) => Math.ceil(ns.growthAnalyze(target, 1 / Math.max(0.01, remaining)));
 
-  const planFor = (fraction) => B.planBatch({
-    moneyFraction: fraction,
+  const planFor = (hackThreads) => B.planBatch({
+    hackThreads,
     hackPct,
     growThreadsFor,
     ramPerThread,
     securityPerHack: H.securityPerHack,
     securityPerGrow: H.securityPerGrow,
-    weakenAmount: H.weakenAmount,
+    weakenAmount,
     maxHackFraction: H.maxHackFraction,
+    growPadding: H.growPadding,
   });
 
   const schedule = B.legSchedule({ ...times, spacing: H.batchSpacingMs, margin: H.launchMarginMs });
   const cycle = B.planCycle({
-    fractions: H.moneyFractions,
     totalRam: ramBudget,
     lastLanding: schedule.lastLanding,
     launchInterval: schedule.launchInterval,
     maxDepth: H.maxDepth,
+    maxThreads: B.maxHackThreads(hackPct, H.maxHackFraction),
     planFor,
   });
   const maxMoney = ns.getServerMaxMoney(target);
@@ -92,6 +108,9 @@ export async function main(ns) {
     grow: ns.getScriptRam(P.grow, HOME) || H.fallbackRam.grow,
     weaken: ns.getScriptRam(P.weaken, HOME) || H.fallbackRam.weaken,
   };
+  // What a weaken thread removes HERE (a BitNode multiplier scales it) - asked
+  // of the game, as the manager does.
+  const weakenAmount = ns.weakenAnalyze(1) || H.weakenAmount;
 
   const servers = allServers(ns);
   const rooted = servers.filter(h => ns.hasRootAccess(h));
@@ -195,7 +214,7 @@ export async function main(ns) {
     if (host.startsWith(H.excludeTargetPrefix)) continue;
     if (ns.getServerMaxMoney(host) <= 0) continue;
     if (ns.getServerRequiredHackingLevel(host) > level) continue;
-    ranked.push(describe(ns, host, capacity, workerRam));
+    ranked.push(describe(ns, host, capacity, workerRam, weakenAmount));
   }
   ranked.sort((a, b) => b.income - a.income);
 

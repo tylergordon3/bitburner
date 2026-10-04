@@ -16,7 +16,10 @@
 // Returns [] when neither state exists (the managers haven't started yet, or this
 // run has no sleeves) so the tab shows its placeholder.
 
-import { card, stat, label, progressBar, statRow, el } from "./dashboard-lib.js";
+import { card, stat, label, progressBar, statRow, el, fresh } from "./dashboard-lib.js";
+import { CONFIG } from "../lib/config.js";
+
+const STALE = CONFIG.ui.staleMs;
 
 /**
  * @param {NS} ns
@@ -26,10 +29,12 @@ import { card, stat, label, progressBar, statRow, el } from "./dashboard-lib.js"
 export function extraCards(ns, C) {
   const cards = [];
 
-  const s = globalThis.gordSleeveState;
+  // Fresh state only (see dashboard-lib.js fresh): a manager that died, or one
+  // from before the last install, must read as "not running", not as a roster.
+  const s = fresh(globalThis.gordSleeveState, STALE.helper);
   if (s) cards.push(rosterCard(ns, C, s), ...(s.sleeves?.length ? [sleeveListCard(ns, C, s)] : []));
 
-  const g = globalThis.gordGraftState;
+  const g = fresh(globalThis.gordGraftState, STALE.graft);
   if (g) cards.push(graftCard(ns, C, g));
 
   return cards;

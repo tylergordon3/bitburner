@@ -1,9 +1,13 @@
 // bn10/daemon.js
 //
 // BN10 ("Digital Carbon") orchestrator. The shared skeleton is lib/daemon-core.js
-// (runDaemon + decideAugFlow); BN10 has no punishing multiplier overrides - the
-// ordinary economy runs like BN4 - so what makes this node different is one
-// thing: duplicate SLEEVES.
+// (runDaemon + decideAugFlow). BN10's multipliers are not gentle (BitNode.tsx:
+// augs cost 5x the money and 2x the reputation, hacking level 0.35, combat 0.4,
+// hack/crime money halved, fewer and smaller purchased servers, world daemon
+// 2x) - but none of them changes the STRATEGY, only how long it takes: the aug
+// pipeline reads prices and rep requirements live, and buys reputation by
+// donation where favor allows. What makes this node different is one thing:
+// duplicate SLEEVES.
 //
 // BN10 is the only place you can BUY extra sleeves and their memory, from The
 // Covenant, and the whole value of sleeves is in their number + memory rather

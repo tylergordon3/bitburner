@@ -1,7 +1,7 @@
 // hacking/manager.js
 //
 // The HGW batching botnet - the daemon's core money engine, run OFF-home (exec'd
-// by each bnX/daemon.js via ensureHelper) so its ~11GB never competes with the
+// by each bnX/daemon.js via ensureHelper) so its ~12GB never competes with the
 // daemon for home RAM. globalThis is shared across hosts, so from wherever it
 // lands it drives the whole rooted network.
 //
@@ -34,14 +34,16 @@
 //      landing follows batch N's last. That ordering is the whole correctness
 //      condition: each batch restores the prepped state before the next one's
 //      hack lands. Timing then fixes how many batches are in flight
-//      (batchDepth), and the money fraction per batch is the largest that lets
-//      that many batches share the target's RAM budget (planCycle). A batch is
+//      (batchDepth), and the bite per batch is the fattest that lets that many
+//      batches share the target's RAM budget, sized to the hack thread
+//      (planCycle / largestBatch). A batch is
 //      allocated across hosts as a whole (allocate) and launched entirely or not
 //      at all, so targets never end up sharing a half-launched batch.
 //   7. DRIFT    - while batches fly, each target is checked against the worst
-//      case one OPEN batch of its own can explain (driftDetected). Real drift
-//      stops launching against it, its window drains in ~one weaken-time, and
-//      step 5 re-preps it; the other targets carry on.
+//      case one OPEN batch of its own can explain (driftDetected). Drift LATCHES
+//      (stillDraining): nothing more is launched against the target until every
+//      batch in flight has landed (~one weaken-time), then step 5 re-preps it;
+//      the other targets carry on.
 //
 // The old loop launched "the largest batch that fits" every 200ms; those batches
 // interleaved (each hack after the first hit an already-hacked server) and the
@@ -49,7 +51,8 @@
 //
 // Formulas.exe (lib/formulas.js) gives exact steal-%, grow threads, success
 // chance and leg timings at the prepped state; without it the ns.* analysis
-// approximations are used and hack chance is taken as 1 for ranking. Publishes
+// readings are scaled from the current security to the prepped one
+// (preppedScale) and hack chance is taken as 1 for ranking. Publishes
 // globalThis.gordHackState for the dashboard. Pass --reset to kill stale worker
 // scripts across the network before starting.
 
@@ -73,6 +76,25 @@ const SHARE = CONFIG.paths.share;
 const RAM = { hack: H.fallbackRam.hack, grow: H.fallbackRam.grow, weaken: H.fallbackRam.weaken };
 // share.js per-thread RAM: 1.6 (base) + 2.4 (ns.share) = 4.0GB; real value read in main().
 let _shareThreadRam = 4.0;
+
+// Security one weaken thread removes (1-core host). ASKED of the game rather
+// than taken as the 0.05 constant, because a BitNode multiplier scales it
+// (ServerWeakenRate): x2 in BN11, where the constant would waste half of every
+// weaken leg, and x1/1.02^level in BN12, where it would leave every batch
+// under-weakened and the target climbing. ns.weakenAnalyze is 1GB; the manager
+// is not told which node it is in, and learning that (ns.getResetInfo) costs the
+// same 1GB while still not giving BN12's level-dependent rate. Read once.
+let _weakenAmount = 0;
+
+/** @param {NS} ns */
+function weakenAmount(ns) {
+  if (!(_weakenAmount > 0)) {
+    let perThread = 0;
+    try { perThread = ns.weakenAnalyze(1); } catch { /* fall back to the constant */ }
+    _weakenAmount = perThread > 0 ? perThread : H.weakenAmount;
+  }
+  return _weakenAmount;
+}
 
 // ── Network snapshot ─────────────────────────────────────────────────────────
 
@@ -186,11 +208,13 @@ function applyAllocation(snap, alloc) {
 //
 // While the daemon is farming faction rep, dedicate a small capped slice of the
 // botnet to share.js. Running share.js occupies real RAM (it shows up in each
-// host's usedRam), so the snapshot's free RAM already excludes it - the botnet
-// naturally works around the shared portion without any separate reservation.
+// host's usedRam), so the snapshot's free RAM already excludes it. The part of
+// the plan that ISN'T running yet - a busy host fills up as its legs land - is
+// held back from the botnet's view of that host (applyShareHolds), so new legs
+// stop landing there and the share can grow into it.
 // See CONFIG.share for the full rationale and the diminishing-returns math.
 
-// Last-published set of share hosts, so we only log on change (see manageShare).
+// Last-published share hosts + thread count, so we only log on change (see manageShare).
 let _lastShareHosts = "";
 
 /** true when the daemon's current action is faction WORK. */
@@ -209,16 +233,16 @@ function shareEligibleHosts(snap) {
 /**
  * Total share RAM (GB) to dedicate this tick. A fraction of eligible network RAM
  * (the "use a couple, not all" cap), further capped by targetBonus so we never
- * chase the flat tail of the 1 + ln(threads)/25 curve. Returns 0 below the floor.
+ * chase the flat tail of the 1 + ln(1 + threads)/25 curve. Returns 0 below the floor.
  * @param {Worker[]} hosts
  */
 function shareBudgetRam(hosts) {
   const totalRam = hosts.reduce((sum, h) => sum + h.max, 0);
   if (totalRam <= 0) return 0;
 
-  // Invert bonus = 1 + ln(T)/25 at targetBonus to get the thread count past
-  // which extra share isn't worth the money-RAM, then convert to RAM.
-  const targetThreads = Math.exp(25 * (SH.targetBonus - 1));
+  // The thread count at targetBonus - past it extra share isn't worth the
+  // money-RAM - converted to RAM.
+  const targetThreads = B.shareThreadsFor(SH.targetBonus);
   const budget = Math.min(SH.fraction * totalRam, targetThreads * _shareThreadRam, SH.maxRam);
   return budget >= SH.minRam ? budget : 0;
 }
@@ -254,19 +278,25 @@ function shareThreadsOn(ns, host) {
 
 /**
  * Reconcile running share.js against the current plan. Runs BEFORE the botnet
- * allocation each tick, and returns the hosts it touched so the caller can
- * refresh their free RAM in the snapshot.
+ * allocation each tick, and returns the hosts it touched (so the caller can
+ * refresh their free RAM in the snapshot) plus, per host, the RAM the plan
+ * still wants there and couldn't take yet.
  *
- * Each host is started at most once (while it has 0 share threads) and left
- * alone thereafter - we accept whatever thread count actually fit rather than
- * re-evicting to chase an exact number, so a host that also runs another helper
- * never thrashes. share stops on a host only when it leaves the plan.
- * @param {NS} ns @param {Snapshot} snap @returns {string[]} hosts touched
+ * Share only ever takes FREE RAM. It used to evict the botnet's legs from a
+ * full host, which killed one or two legs out of every batch in flight there -
+ * on every target - and left each of those batches' hack or grow to land
+ * without its weaken. Now a planned host is topped up as its legs land
+ * (batch-logic shareTopUp decides when a chunk is worth a process), and the
+ * shortfall is held out of the botnet's free RAM meanwhile so nothing new lands
+ * in its way. share stops on a host only when it leaves the plan.
+ * @param {NS} ns @param {Snapshot} snap
+ * @returns {{touched: string[], holds: Map<string, number>}}
  */
 function manageShare(ns, snap) {
   const eligible = shareEligibleHosts(snap);
   const plan = farmingRep() ? planShare(eligible, shareBudgetRam(eligible)) : {};
   const touched = [];
+  const holds = new Map();
 
   // Stop share on any host no longer in the plan. Kill by pid (via ns.ps/ns.kill,
   // already used here) rather than ns.scriptKill, so this adds no manager RAM.
@@ -277,47 +307,67 @@ function manageShare(ns, snap) {
     }
   }
 
-  // Start share on wanted hosts that aren't sharing yet.
+  // Start, or top up, share on the planned hosts - out of free RAM only.
   for (const [host, gb] of Object.entries(plan)) {
     const want = Math.floor(gb / _shareThreadRam);
-    if (want <= 0 || shareThreadsOn(ns, host) > 0) continue;
+    const have = shareThreadsOn(ns, host);
+    if (want <= have) continue;
 
-    if (host !== HOME) ns.scp(SHARE, host, HOME);
-
-    const capacity = () =>
-      Math.floor((ns.getServerMaxRam(host) - ns.getServerUsedRam(host)) / _shareThreadRam);
-
-    let threads = Math.min(want, capacity());
-    if (threads <= 0) {
-      // No free room - this host is dedicated to share now, so evict its botnet
-      // scripts (rep is the priority) and take what the plan wants.
-      for (const p of ns.ps(host)) {
-        if ([HACK, GROW, WEAKEN].includes(p.filename)) ns.kill(p.pid);
+    // The snapshot's free RAM, not max - used: it already leaves out whatever the
+    // daemon reserved on this host (gordReservedRam).
+    const free = snap.workers.find(w => w.host === host)?.free ?? 0;
+    const start = B.shareTopUp({
+      want, have,
+      freeThreads: Math.floor(free / _shareThreadRam),
+      maxProcesses: SH.maxProcessesPerHost,
+    });
+    let started = 0;
+    if (start > 0) {
+      if (host !== HOME) ns.scp(SHARE, host, HOME);
+      // The trailing arg only makes each top-up's args unique (see execAll).
+      if (ns.exec(SHARE, host, start, performance.now()) !== 0) {
+        started = start;
+        touched.push(host);
       }
-      threads = Math.min(want, capacity());
     }
-    if (threads > 0) ns.exec(SHARE, host, threads);
-    touched.push(host);
+    const missing = want - have - started;
+    if (missing > 0) holds.set(host, missing * _shareThreadRam);
   }
 
-  // Actual running totals (may be < plan if a host was partly occupied).
+  // Actual running totals (below the plan while a busy host is still filling).
   const servers = Object.keys(plan).filter(h => shareThreadsOn(ns, h) > 0);
   const threads = servers.reduce((s, h) => s + shareThreadsOn(ns, h), 0);
-  const bonus = 1 + Math.log(Math.max(1, threads)) / 25;
+  const bonus = B.shareBonus(threads);
 
-  // Log only on change so the per-tick loop doesn't spam.
-  const key = servers.slice().sort().join(",");
+  // Log only on change (a host set, or a top-up) so the per-tick loop doesn't spam.
+  const planned = Object.keys(plan).length;
+  const key = servers.length ? `${servers.slice().sort().join(",")}:${threads}` : (planned ? "waiting" : "");
   if (key !== _lastShareHosts) {
     _lastShareHosts = key;
-    if (key) {
+    if (servers.length) {
       ns.print(`[share] ${servers.length} server(s), ${threads} threads -> faction rep x${bonus.toFixed(3)} (+${((bonus - 1) * 100).toFixed(1)}%)`);
+    } else if (planned) {
+      ns.print(`[share] ${planned} server(s) planned - waiting for botnet legs to land and free the RAM`);
     } else {
       ns.print("[share] off (not farming faction rep)");
     }
   }
 
   globalThis.gordShareState = { active: servers.length > 0, servers, threads, bonus };
-  return touched;
+  return { touched, holds };
+}
+
+/**
+ * Take the share plan's not-yet-running RAM out of what the botnet may use on
+ * those hosts this tick (see manageShare).
+ * @param {Snapshot} snap @param {Map<string, number>} holds
+ */
+function applyShareHolds(snap, holds) {
+  for (const w of snap.workers) {
+    const hold = holds.get(w.host);
+    if (hold > 0) w.free = Math.max(0, w.free - hold);
+  }
+  snap.totalUsable = snap.workers.reduce((s, w) => s + w.free, 0);
 }
 
 // ── Per-target math (Formulas when present, ns.* approximations otherwise) ───
@@ -325,59 +375,73 @@ function manageShare(ns, snap) {
 /**
  * @typedef {{hackTime: number, growTime: number, weakenTime: number}} Times
  * @typedef {{times: Times, hackPct: number, hackChance: number, useFormulas: boolean,
- *            plan: (fraction: number) => any,
+ *            maxThreads: number, plan: (hackThreads: number) => any,
  *            growNeeded: (money: number, maxMoney: number, security: number) => number}} TargetMath
  */
 
 /**
  * Everything batch-logic needs to know about one target, evaluated at the
- * PREPPED state a batch actually hits. Without Formulas.exe the current-state
- * ns.* approximations are used (hackAnalyze reads current security,
- * growthAnalyze ignores it) and hack chance is taken as 1.
+ * PREPPED state a batch actually hits.
  *
- * That fallback is noticeably worse on FAST targets - the small servers this
- * scheduler now also works. Their whole cycle is a couple of seconds, so the
- * "current" state is never the prepped one (a previous batch's hack has just
- * landed), the hack is planned ~0.5% smaller than the one that lands, and the
- * grow sized to match leaves the target a little short each cycle; money settles
- * a few percent under max rather than at it. It self-limits well inside the
- * prepped threshold, and SF-5 grants Formulas.exe - the exact path - at the start
- * of every node, so this is an edge-case cost, not the normal one.
+ * Without Formulas.exe the ns.* analysis functions are all there is, and every
+ * one of them describes the target at its CURRENT security (growthAnalyze too -
+ * the game's numCycleForGrowth reads the live server). With batches in flight
+ * that is rarely the prepped state: a hack or a grow has just landed. So the
+ * readings are scaled to min security with the game's own formulas
+ * (batch-logic preppedScale), from calls this function already makes. What the
+ * fallback still lacks is the hack's success chance (taken as 1 for ranking)
+ * and the exact grow thread count: growthAnalyze ignores the $1-per-thread the
+ * game adds before multiplying, so it asks for a thread or so too many - the
+ * safe direction.
  * @param {NS} ns @param {string} target @returns {TargetMath}
  */
 function targetMath(ns, target) {
   const useFormulas = F.hasFormulas(ns);
 
-  const times = useFormulas
-    ? F.batchTimes(ns, target)
-    : { hackTime: ns.getHackTime(target), growTime: ns.getGrowTime(target), weakenTime: ns.getWeakenTime(target) };
-  const hackPct = useFormulas ? F.hackPercent(ns, target) : ns.hackAnalyze(target);
+  let times, hackPct, growThreadsFor;
+  if (useFormulas) {
+    times = F.batchTimes(ns, target);
+    hackPct = F.hackPercent(ns, target);
+    growThreadsFor = (remaining) => F.growThreadsToFull(ns, target, remaining);
+  } else {
+    const k = B.preppedScale({
+      security: ns.getServerSecurityLevel(target),
+      minSecurity: ns.getServerMinSecurityLevel(target),
+      requiredLevel: ns.getServerRequiredHackingLevel(target),
+    });
+    times = {
+      hackTime: ns.getHackTime(target) * k.time,
+      growTime: ns.getGrowTime(target) * k.time,
+      weakenTime: ns.getWeakenTime(target) * k.time,
+    };
+    hackPct = ns.hackAnalyze(target) * k.hackPct;
+    growThreadsFor = (remaining) => Math.ceil(ns.growthAnalyze(target, 1 / Math.max(0.01, remaining)) * k.growThreads);
+  }
   const hackChance = useFormulas ? F.hackChance(ns, target) : 1;
 
-  const growThreadsFor = useFormulas
-    ? (remaining) => F.growThreadsToFull(ns, target, remaining)
-    : (remaining) => Math.ceil(ns.growthAnalyze(target, 1 / Math.max(0.01, remaining)));
-
-  const plan = (fraction) => B.planBatch({
-    moneyFraction: fraction,
+  const plan = (hackThreads) => B.planBatch({
+    hackThreads,
     hackPct,
     growThreadsFor,
     ramPerThread: RAM,
     securityPerHack: H.securityPerHack,
     securityPerGrow: H.securityPerGrow,
-    weakenAmount: H.weakenAmount,
+    weakenAmount: weakenAmount(ns),
     maxHackFraction: H.maxHackFraction,
+    growPadding: H.growPadding,
   });
 
   // Grow threads a PREP needs: from the current money, at the CURRENT security
-  // (the prep's grow legs run before their accompanying weaken lands).
+  // (the prep's grow legs land before their accompanying weaken does) - which is
+  // exactly what growthAnalyze reads, so the fallback needs no scaling here.
   const growNeeded = (money, maxMoney, security) => {
     if (maxMoney <= 0 || money >= maxMoney) return 0;
     if (useFormulas) return F.growThreadsToFull(ns, target, money / maxMoney, security);
     return Math.ceil(ns.growthAnalyze(target, maxMoney / Math.max(money, 1)));
   };
 
-  return { times, hackPct, hackChance, useFormulas, plan, growNeeded };
+  const maxThreads = B.maxHackThreads(hackPct, H.maxHackFraction);
+  return { times, hackPct, hackChance, useFormulas, maxThreads, plan, growNeeded };
 }
 
 /** @param {NS} ns @param {string} target */
@@ -405,18 +469,18 @@ let _rank = { at: 0, ram: 0, list: /** @type {{target: string, score: number}[]}
 /**
  * The batch plan for one target given `ramBudget`: the leg schedule (fixed by
  * the target's leg times) and the cycle that fills the budget (depth from
- * timing, money fraction from RAM). cycle is null when not even the smallest
+ * timing, hack threads from RAM). cycle is null when not even a one-thread
  * batch fits.
  * @param {TargetMath} math @param {number} ramBudget
  */
 function cycleFor(math, ramBudget) {
   const schedule = B.legSchedule({ ...math.times, spacing: H.batchSpacingMs, margin: H.launchMarginMs });
   const cycle = B.planCycle({
-    fractions: H.moneyFractions,
     totalRam: ramBudget,
     lastLanding: schedule.lastLanding,
     launchInterval: schedule.launchInterval,
     maxDepth: H.maxDepth,
+    maxThreads: math.maxThreads,
     planFor: math.plan,
   });
   return { schedule, cycle };
@@ -503,15 +567,16 @@ function launchPrep(ns, snap, target, state, math, ramCap, now) {
   const threadRam = Math.max(RAM.grow, RAM.weaken);
   const totalThreads = Math.floor(Math.min(snap.totalUsable, ramCap) / threadRam);
   const excess = Math.max(0, state.security - state.minSecurity);
-  const growNeeded = state.money >= state.maxMoney * H.prepMoneyThreshold
-    ? 0
-    : math.growNeeded(state.money, state.maxMoney, state.security);
+  // All the way to max money, even from inside the "prepped" money threshold: a
+  // prep is running anyway (for security, say), and a batch's grow only repairs
+  // its own hack, so a target that starts batching at 96% STAYS at 96%.
+  const growNeeded = math.growNeeded(state.money, state.maxMoney, state.security);
 
   const plan = B.prepPlan({
     excessSecurity: excess,
     growNeeded,
     totalThreads,
-    weakenAmount: H.weakenAmount,
+    weakenAmount: weakenAmount(ns),
     securityPerGrow: H.securityPerGrow,
   });
   if (plan.weaken + plan.grow <= 0) {
@@ -541,18 +606,38 @@ function launchPrep(ns, snap, target, state, math, ramCap, now) {
  * Returns the in-flight record, or null if it didn't fit / launch.
  * @param {NS} ns @param {Snapshot} snap @param {string} target
  * @param {any} cycle @param {ReturnType<typeof B.landingDelays>} timing
- * @param {number} id @param {number} now
+ * @param {number} minSecurity the target's @param {number} id @param {number} now
  */
-function launchBatch(ns, snap, target, cycle, timing, id, now) {
+function launchBatch(ns, snap, target, cycle, timing, minSecurity, id, now) {
   const plan = cycle.plan;
   // Delays from the CURRENT leg times (lib/batch-logic.js landingDelays), so each
   // leg lands on its slot whatever the target's security is right now.
   const d = timing.delays;
+
+  // The grow should go whole onto one host (batch-logic allocate does that when
+  // it can). When no host has the room it gets split, and a split grow lands
+  // weaker than planned - so that batch carries extra grow threads, and the
+  // weaken to cover them (splitGrowPadding).
+  let growThreads = plan.growThreads;
+  let weaken2Threads = plan.weaken2Threads;
+  if (!snap.workers.some(w => Math.floor(w.free / RAM.grow) >= growThreads)) {
+    const padded = B.splitGrowPadding({
+      growThreads, minSecurity, securityPerGrow: H.securityPerGrow, weakenAmount: weakenAmount(ns),
+    });
+    growThreads = padded.growThreads;
+    weaken2Threads = Math.max(weaken2Threads, padded.weaken2Threads);
+  }
+  const extraGrow = growThreads - plan.growThreads;
+  const extraRam = extraGrow * RAM.grow + (weaken2Threads - plan.weaken2Threads) * RAM.weaken;
+
+  // PLACEMENT order, not landing order (the delays decide that): the grow first,
+  // while the hosts are at their roomiest; the weakens, which split harmlessly,
+  // take what is left.
   const legs = [
+    { script: GROW, threads: growThreads, ram: RAM.grow, delay: d.grow },
     { script: HACK, threads: plan.hackThreads, ram: RAM.hack, delay: d.hack },
     { script: WEAKEN, threads: plan.weaken1Threads, ram: RAM.weaken, delay: d.weaken1 },
-    { script: GROW, threads: plan.growThreads, ram: RAM.grow, delay: d.grow },
-    { script: WEAKEN, threads: plan.weaken2Threads, ram: RAM.weaken, delay: d.weaken2 },
+    { script: WEAKEN, threads: weaken2Threads, ram: RAM.weaken, delay: d.weaken2 },
   ];
   const alloc = B.allocate(snap.workers, legs);
   if (!alloc.ok) return null;
@@ -562,9 +647,9 @@ function launchBatch(ns, snap, target, cycle, timing, id, now) {
   return {
     target,
     id,
-    ram: plan.ram,
+    ram: plan.ram + extraRam,
     moneyFraction: plan.hackedFraction,
-    securityAdded: plan.securityAdded,
+    securityAdded: plan.securityAdded + extraGrow * H.securityPerGrow,
     launchedAt: now,
     doneAt: timing.lastLanding + H.landingPadMs,
   };
@@ -588,6 +673,7 @@ export function newSchedulerState() {
     inFlight: /** @type {any[]} */ ([]),  // batches whose legs haven't all landed (any target)
     prepUntil: new Map(),                  // target -> time its prep legs will have landed
     nextWindowAt: new Map(),               // target -> when its next batch's first leg is due to LAND
+    draining: new Set(),                   // targets latched in a drift drain (no launches until empty)
     currentTarget: "",                     // the primary, for logging a switch
     batchId: 0,
     lastMode: "",
@@ -606,8 +692,9 @@ export function resetCaches() {
   _netServers = [];
   _rootAt = 0;
   _copied.clear();
-  _rank = { at: 0, list: [] };
+  _rank = { at: 0, ram: 0, list: [] };
   _lastShareHosts = "";
+  _weakenAmount = 0;
 }
 
 /**
@@ -646,6 +733,25 @@ function serviceTarget(ns, s, snap, target, budgetRam, now) {
   const open = s.inFlight.filter(b => b.target === target);
   const { schedule, cycle } = cycleFor(math, budgetRam);
 
+  // Drift: is the target worse off than its own open batches can explain? Once
+  // it is, it stays "draining" until nothing of ours is in flight (stillDraining).
+  const drift = open.length > 0 && B.driftDetected({
+    ...state,
+    openMoneyFraction: Math.max(...open.map(b => b.moneyFraction)),
+    openSecurity: Math.max(...open.map(b => b.securityAdded)),
+    moneyTolerance: H.driftMoneyTolerance,
+    securityTolerance: H.driftSecurityTolerance,
+  });
+  const wasDraining = s.draining.has(target);
+  const draining = B.stillDraining({ wasDraining, openCount: open.length, drift });
+  if (draining && !wasDraining) {
+    s.draining.add(target);
+    ns.print(`[drift] ${target}: money ${((state.money / Math.max(1, state.maxMoney)) * 100).toFixed(0)}% ` +
+      `sec +${(state.security - state.minSecurity).toFixed(2)} - no launches until its ${open.length} batch(es) land`);
+  } else if (!draining) {
+    s.draining.delete(target);
+  }
+
   let mode;
   if ((s.prepUntil.get(target) ?? 0) > now) {
     mode = "Prepping";
@@ -657,13 +763,7 @@ function serviceTarget(ns, s, snap, target, budgetRam, now) {
       ns.print(`[prep] ${target}: weaken x${res.weaken}, grow x${res.grow}${res.complete ? "" : " (partial)"} | ` +
         `sec ${state.security.toFixed(2)}/${state.minSecurity} money ${((state.money / state.maxMoney) * 100).toFixed(0)}%`);
     }
-  } else if (open.length > 0 && B.driftDetected({
-    ...state,
-    openMoneyFraction: Math.max(...open.map(b => b.moneyFraction)),
-    openSecurity: Math.max(...open.map(b => b.securityAdded)),
-    moneyTolerance: H.driftMoneyTolerance,
-    securityTolerance: H.driftSecurityTolerance,
-  })) {
+  } else if (draining) {
     // Stop launching against this target; its window drains within a weaken-time
     // and the branch above re-preps it once nothing of ours is in flight.
     mode = "Draining (drift)";
@@ -683,7 +783,7 @@ function serviceTarget(ns, s, snap, target, budgetRam, now) {
     // for that while the lead lasts; after it, take the slip.
     const raised = cur.weakenTime - math.times.weakenTime > H.batchSpacingMs / 4;
     const waitForCalm = timing.slip > 1 && raised && now < windowAt - schedule.firstLanding + H.launchLeadMs;
-    const batch = waitForCalm ? null : launchBatch(ns, snap, target, cycle, timing, s.batchId, now);
+    const batch = waitForCalm ? null : launchBatch(ns, snap, target, cycle, timing, state.minSecurity, s.batchId, now);
     if (waitForCalm) {
       mode = "Batching";
     } else if (batch) {
@@ -719,7 +819,9 @@ export function step(ns, s, now) {
   // Share is an optional side mode and must NEVER be able to stop the core
   // hacking loop (e.g. a stale config on a runner). On error, log and keep going.
   try {
-    refreshWorkers(ns, snap, manageShare(ns, snap));
+    const share = manageShare(ns, snap);
+    refreshWorkers(ns, snap, share.touched);
+    applyShareHolds(snap, share.holds);
   } catch (e) {
     ns.print(`[share] disabled this tick (error): ${String(e)}`);
   }

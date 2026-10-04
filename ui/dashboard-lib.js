@@ -45,6 +45,24 @@ export function card(C, title, children) {
   );
 }
 
+/**
+ * A helper's published state, or null once it is older than `maxAgeMs`.
+ *
+ * Everything on the HUD is read off globalThis, and globalThis outlives the
+ * script that wrote it - through a crash, a kill, an aug install, even a change
+ * of BitNode. A card that reads its state unguarded therefore keeps showing a
+ * dead helper's last words as if they were live. Every helper stamps
+ * `updatedAt`; this is the one check for it.
+ * @template T
+ * @param {T} state @param {number} maxAgeMs
+ * @returns {T | null}
+ */
+export function fresh(state, maxAgeMs) {
+  if (!state) return null;
+  const at = /** @type {any} */ (state).updatedAt ?? 0;
+  return Date.now() - at <= maxAgeMs ? state : null;
+}
+
 export function label(C, text) {
   return el("div", {
     style: { fontSize: "12px", color: C.dim, marginBottom: "3px", letterSpacing: "0.5px" },

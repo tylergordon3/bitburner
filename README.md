@@ -31,7 +31,10 @@ case, insurance otherwise. The `ns.formulas.*` calls themselves cost 0GB.
 Today the HGW botnet ([`hacking/manager.js`](hacking/manager.js)) uses it to size
 batches and score targets at the **prepped** (min-security, max-money) state a
 batch actually farms — exact steal-%, exact grow threads, and min-security batch
-timings — instead of the target's current-security state. `lib/gang.js`'s replicas
+timings. Without Formulas.exe the same prepped-state figures are derived from the
+`ns.*` analysis calls by scaling them from the current security to the minimum with
+the game's own formulas (`preppedScale`), so both paths plan for the state a batch
+lands on. `lib/gang.js`'s replicas
 and `lib/econ.js`'s hacknet buys remain candidates for the same treatment.
 
 ## HGW batcher
@@ -60,10 +63,22 @@ a "launch the largest batch that fits, every tick" loop:
   stretched any leg started inside it by seconds against a 200 ms spacing, batches
   landed `W1, G, H, W2`, and the target spent ~40% of its time draining.
 - Timing then fixes how many batches are in flight (`batchDepth`, capped by
-  `hacking.maxDepth`), and the money fraction per batch is the largest in
-  `hacking.moneyFractions` that lets that many batches share the target's RAM
-  budget (`planCycle`). A batch is allocated across hosts as a whole and launched
-  entirely or not at all (`allocate`).
+  `hacking.maxDepth`), and each batch is the fattest that lets that many share the
+  target's RAM budget — sized **to the hack thread** by a binary search
+  (`largestBatch` / `planCycle`), up to `hacking.maxHackFraction` of the target's
+  money. (It used to pick from a ladder of fractions 2–2.5x apart: a budget just
+  short of a rung fell to the one below, leaving the best target on ~40–65% of the
+  RAM it had been handed.) The grow carries `hacking.growPadding` extra threads: a
+  batch's grow only repairs its own hack, so an exact count lets any shortfall — the
+  hacking level rising while the batch is in flight — stack until the target drifts.
+- A batch is allocated across hosts as a whole and launched entirely or not at all
+  (`allocate`). Each leg goes onto one host when any has room — the tightest fit —
+  because a grow **split** across hosts lands weaker than planned (its parts land
+  one after another, each raising security for the next); when a split can't be
+  avoided that batch's grow is padded for it (`splitGrowPadding`).
+- What a weaken thread removes is asked of the game (`ns.weakenAnalyze`, 1GB), not
+  taken as 0.05: the `ServerWeakenRate` BitNode multiplier doubles it in BN11 and
+  shrinks it with every level of BN12.
 - Targets are ranked by the **income each would earn with the whole botnet behind
   it** (`incomeRate`, $/ms). Two earlier metrics were wrong here:
   `maxMoney / minSec / hackTime` ignored what a batch costs, and $ per GB-second
@@ -83,9 +98,23 @@ a "launch the largest batch that fits, every tick" loop:
   until its legs land. A target that can't plan a cycle at all (mid-prep, or a
   botnet too small) claims its whole budget, so a prep is never starved by the
   targets below it.
+  A prep always grows to **full** money, even from inside the 95% "prepped"
+  threshold — a target that starts batching at 96% stays at 96%.
 - While batches fly, the target is checked against the worst case one open batch
-  can explain (`driftDetected`); real drift stops launching, the window drains in
-  a weaken-time, and the target is re-prepped.
+  can explain (`driftDetected`). Drift **latches** (`stillDraining`): nothing more
+  is launched until every batch in flight has landed (a weaken-time), and then the
+  target is re-prepped. Unlatched, launching resumed the moment a grow put the
+  reading back in bounds, and the target flapped Draining/Batching without ever
+  being re-prepped.
+- Without Formulas.exe the `ns.*` analysis calls all describe the target at its
+  **current** security. They are scaled to min security with the game's own
+  formulas (`preppedScale`), so the fallback also sizes and times its batches for
+  the prepped state; all it lacks is the hack's success chance (taken as 1 for
+  ranking).
+- The faction-rep share (`ns.share`, `CONFIG.share`) takes only **free** RAM: it
+  never kills a batch leg to make room. A planned host is topped up as its legs
+  land (`shareTopUp`), and the part of the plan not yet running is held out of the
+  botnet's view of that host so nothing new lands in its way.
 - One network snapshot per tick; rooting, script copies and target re-ranking are
   throttled (`networkRescanMs`, `rootRetryMs`, `targetRescoreMs`).
 - The loop body is exported as `step(ns, state, now)`, so
@@ -93,11 +122,14 @@ a "launch the largest batch that fits, every tick" loop:
   scheduler under Node against a fake `ns` (a model network whose money, security
   and leg durations respond to landings) and asserts the promises above: every
   hack lands on a prepped server, launches are continuous and never exceed the
-  depth, the drift detector is quiet in a clean run and fires/recovers on an
-  outside hit, prep converges monotonically (one or two passes with ample RAM),
-  and — the reason the spill exists — a 16TB botnet whose only reachable targets
-  are n00dles-alikes earns several times more, on several times the RAM, than the
-  same world limited to one target.
+  depth, the drift detector is quiet in a clean run, latches on a nudge and
+  recovers from an outside hit, prep converges monotonically (one pass with ample
+  RAM) and tops money up to full, a share start-up kills no batch leg and fills to
+  its plan, a halved weaken rate still lands every hack on min security, and — the
+  reason the spill exists — a 16TB botnet whose only reachable targets are
+  n00dles-alikes earns several times more, on several times the RAM, than the same
+  world limited to one target. The fake's dependence on security is the game's own
+  formulas, and every scenario runs on both the Formulas and the `ns.*` path.
 
 After syncing a change to **any** helper, run `run /tools/kill-helpers.js all` before
 restarting: helpers run off-home, so `killall` on home leaves the old copies running
@@ -131,7 +163,20 @@ Each bitnode gets a thin `bnX/daemon.js` orchestrator; everything reusable lives
 - `bn2/daemon.js` — BN2 (gangs): bootstraps Slum Snakes (30 combat stats, -9 karma, $1M),
   creates the gang, then launches `lib/gang.js` on whatever server has ~35GB free.
 - `lib/gang.js` — standalone BN-agnostic gang manager (recruit/ascend/equip/tasks/territory);
-  reusable in any bitnode with SF2 gang access.
+  reusable in any bitnode with SF2 gang access. Its decisions are the pure, tested
+  [`lib/gang-logic.js`](lib/gang-logic.js):
+  - **Territory by the tick.** Power is credited only at the 20-second territory
+    tick, and only from members on Territory Warfare at that instant. So the manager
+    follows the tick (another gang's power changing marks it; processed gang time
+    from `ns.gang.nextUpdate()` predicts the next) and sends the *whole* roster to
+    warfare for the one update that contains it — twice the power of a standing
+    half-roster crew for a tenth of the income instead of half.
+  - **Ascension on a falling bar** (`gang.ascendThresholds`): x1.63 for a fresh
+    member down to x1.06 past x8, one member per update. A flat x1.5 was out of
+    reach for anyone past ~x4.
+  - **Training through the early ascensions.** Once the roster is full, the lowest
+    multipliers (up to `gang.maxTrainFraction`) keep training until
+    `gang.trainUntilAscMult`; the rest earn.
 - `bn9/daemon.js` — BN9 (Hacktocracy): the hacknet-server fleet is the economy (see
   below); installs are batched bigger, hashes are sold before every reset, and idle
   time studies toward the world daemon's doubled hacking gate.
@@ -186,10 +231,34 @@ bitburner-src:
   it). The core deletes the state that gates irreversible decisions at boot, and
   readers of helper state check its age.
 
+Augmentations are bought **dearest first** (`nextAugPurchase`): every purchase raises
+the price of everything still unbought by 1.9x, so {100, 50, 10} costs 231 in that
+order and 466 cheapest-first. While a ready aug is unaffordable but within
+`augs.saveHorizonMs` of income, nothing cheaper is bought — the status line says what
+is being saved for — and NeuroFlux is left to the pre-install dump while any real aug
+remains.
+
 Installs follow `augs.install` for the node (`installReason`): the default is 5
 queued (2 with a priority aug); BN7 and BN9 batch 8 / 4 with a floor of 4. An
 install first asks the stock trader to liquidate (the market is wiped by a reset)
 and waits up to a minute for it.
+
+Reputation is **bought** where a faction takes donations (favor at
+`ns.getFavorToDonate()`, 150 x the node's multiplier): an aug whose only gap is
+reputation with such a faction rides the same dearest-first list, costed at price +
+donation (`donationCost`; Formulas.exe gives the exact rate, without it the first
+donation is a $1m probe), and the donation is made only at the moment the aug is
+bought — both must fit above `gordMoneyFloor`, or be within the save horizon. The
+pre-install NeuroFlux dump buys the reputation its extra levels need the same way.
+Two things get a faction to that favor: the **`favor` install reason** — with
+something queued, an install that would itself carry the faction being ground over
+the threshold fires early when at least `favorMinGrindMs` of grind is left and income
+buys that reputation in a quarter of the time (BN7/BN9 want 2 queued; BN9 also a
+6-hour grind and a tenth) — and **idle rep banking** (`pickFavorBankFaction`), which
+takes the idle slot ahead of crime for a faction still selling a wanted aug, or for
+one NeuroFlux seller until a donor exists. The favor curve is the game's own,
+transcribed in `lib/aug-targets.js`; the whole feature costs the daemon 6.1GB
+(`donateToFaction` 5, `getFactionFavor` 1, `getFavorToDonate` 0.1).
 
 [`lib/daemon-lib.js`](lib/daemon-lib.js) holds the building blocks that are
 identical across every node: rooting, darkweb buys, accepting invites, off-home helper
@@ -281,6 +350,56 @@ ignores. The solver set in [`lib/contract-solvers.js`](lib/contract-solvers.js) 
 **pure** (0GB, unit-tested) and covers all 30 current contract types; unknown/future
 types are **skipped without spending a limited attempt**, so it can never destroy a
 contract by guessing.
+
+## IPvGO
+
+[`lib/go.js`](lib/go.js) is an off-home helper (9.6GB, launched `optional` by every
+daemon next to the contract solver) that plays the IPvGO subnet game back to back
+for the whole node. IPvGO needs no Source-File, and each finished game adds *node
+power* for the faction played, which multiplies one stat: Tetrads the four combat
+stat levels, Daedalus faction and company reputation gain, The Black Hand hacking
+money, Illuminati hack/grow/weaken speed, Netburners hacknet production, Slum
+Snakes crime success. The bonus is `1 + ln(p+1)·(p+1)^0.3·0.002·power` — about +8%
+combat stats at 1,000 node power against Tetrads and +20% at 10,000 — and a game
+pays black's score × `(komi+0.5)/4` × a win-streak multiplier (up to 3×; 0.5× for
+a loss). **An aug install resets node power to zero**, which is why this is a
+standing helper rather than a one-off: the bonus is re-earned after every reset.
+(Favor from win streaks — 500 rep-worth per second consecutive win against a
+faction you belong to — does survive.)
+
+- **RAM.** Only `getBoardState` and `makeMove` cost anything (4GB each). The
+  analysis calls — `getChains`, `getLiberties`, `getControlledEmptyNodes` at 16GB
+  each and `getValidMoves` at 8GB — are never used: the pure, unit-tested
+  [`lib/go-logic.js`](lib/go-logic.js) derives chains, liberties, legality (suicide
+  and the game's positional-superko repeat rule, checked against the free
+  `getMoveHistory`), territory and eyes from the board itself. Its legality agrees
+  with the game's own `evaluateIfMoveIsValid` on every point of every position it
+  was compared on.
+- **The player** scores each candidate by the position it leaves: a Voronoi
+  territory estimate (which stones each empty point is nearest) in which chains
+  short of liberties claim nothing, plus what is hanging in atari on either side,
+  captures, liberties gained, connections and new eyes. The best few are then
+  re-ranked by the opponent's best reply to each (the faction AIs always capture
+  what is capturable). It never fills its own eyes or sealed territory, never
+  plays into small sealed enemy territory, and passes when nothing is worth a
+  point — or when the opponent has passed and it is ahead, which banks the win
+  and the streak.
+- **Who it plays** is `go.opponents` in [`lib/config.js`](lib/config.js), a
+  weighted rotation resolved per node: Daedalus / The Black Hand / Illuminati by
+  default, **Tetrads 3 : Daedalus 1 in BN6/BN7**, where combat stats are the
+  Bladeburner success chance. A game found in progress is always finished rather
+  than reset, because abandoning one breaks the win streak.
+- **Strength**, measured against the game's own faction AIs (`goAI.ts`, run
+  headless outside the game, 50–200 games each) on 13×13: ~98% against The Black
+  Hand, ~90% Netburners, ~85% Daedalus, ~70% Slum Snakes, ~60–65% Tetrads, ~50%
+  Illuminati (which starts with five stones down). Batches of 50 scatter by ±10
+  points, and none of it has been measured in the live game yet. The board size
+  matters more than any weight: komi is a fixed number of points, and the same
+  player wins ~45% against Tetrads on 9×9.
+
+It publishes `globalThis.gordGoState` (opponent, wins/losses, the last result, the
+game's per-faction bonus percentages) and writes at most one journal line per 15
+minutes. `go.enabled: false` hands the board back for manual play.
 
 ## Sleeves
 
@@ -404,6 +523,42 @@ via the valuation exponent; product design invest is 1% of funds (it scales as
 x^0.1), the lowest-rated product is recycled once slots are full, and Advert's
 funds share steps up from 20% to 50% past ~1e18/s profit (the manual's
 "threshold of focusing on Advert").
+
+Money discipline, because the offer is a share of a valuation that prices
+`Funds/3 + max(AssetDelta, 0) × 315000` averaged over 10 cycles:
+
+- **A ready round is held, not sold on the spot** (`offerHold` in `corp-invest`),
+  and while it is held *every* spender stands down — corp-steady's Wilson/Advert/
+  upgrades, corp-expand's purchases, corp-office's seats and Advert, round-3+ boost
+  orders. Tea/parties and product development carry on, and rounds 1–2 boost
+  orders deliberately keep going: there they are the round's closing move and
+  cost no AssetDelta. The hold flag is only honoured while
+  corp-invest keeps re-stamping it (`offerHoldActive`), so a rotation that stops
+  placing corp-invest can't freeze the corp.
+- **corp-steady spends once per cycle**, on the START tick (`isSpendTick`) — it used
+  to run every budget fraction on all five states.
+- **Boosts**: in rounds 1–2 nothing is ordered until the division has banked its RP
+  (it produces nothing before that, and debt blocks tea, parties and every seat);
+  from round 3 a pass may commit only `boostBudgetFraction` of the surplus above
+  the reserve and the banked objective (`boostSpendBudget`) — the order used to be
+  sized by the warehouse alone, i.e. bought on credit.
+- **Round-2 order**: Export is tried before Smart Supply (`optionalUnlockOrder`), and
+  in rounds 1–2 Agriculture's warehouse climb leaves untouched what the offices
+  still need for seats + Advert (`gordCorpOfficeNeed` → `warehouseClimbFloor`).
+
+Other mechanics: **products are priced without Market-TA.II**
+(`nextProductPrice` in `corp-steady`, 0 extra RAM) — each cycle the last SALE's own
+figures give the price that sells the shelf, `MP + (P − MP)·√(sold / target)`,
+probing upward while it sells out; TA.II takes over if it's ever researched.
+**Manual input orders** (before Smart Supply) follow consumption minus imports
+(`orderRate`), not just the shortfall, so they neither cap production nor buy on
+the market what an export route delivers. **Export routes are kept in config
+order** (`exportPlan`) — the game serves them FIFO and has no reorder, so a route
+added later is cancelled and re-created behind Tobacco's. **Support divisions
+research from their own list** (`researchPrioritySupport`, no Market-TA bundle).
+The build phases skip their pass until corp-invest has published the round
+(`roundKnown`), and the daemon journals a warning when a phase has found no RAM
+for `phaseMissWarnRotations` rotations.
 
 ## HUD toggles
 

@@ -29,7 +29,7 @@
 // one tail replaces the old separate dashboard + journal windows.
 
 import { CONFIG, forNode } from "../lib/config.js";
-import { COLORS, el, card, label, progressBar, stat, statRow, formatDuration, shortenAugNames } from "./dashboard-lib.js";
+import { COLORS, el, card, label, progressBar, stat, statRow, formatDuration, shortenAugNames, fresh } from "./dashboard-lib.js";
 // Gang + corp panels reuse the existing per-node card modules. bn5's extraCards
 // already composes the running-gang card (via bn2.js) with the BN5 karma
 // bootstrap card and returns [] elsewhere, so it doubles as a universal gang
@@ -106,10 +106,25 @@ function makeTrend(alpha = 0.2) {
   let last = 0;
   let lastAt = Date.now();
   let perHour = 0;
+  let lastKey = /** @type {any} */ (undefined);
   return {
-    /** @param {number} value @returns {number} the smoothed per-hour rate */
-    update(value) {
+    /**
+     * @param {number} value
+     * @param {any} [key] what the value belongs to (the faction being ground, the
+     *   run since the last reset). A new key starts the trend over: without it a
+     *   switch from a 10k-rep faction to a 500k one read as 490k gained in one
+     *   tick, and a rate from before an install carried into the run after it.
+     * @returns {number} the smoothed per-hour rate
+     */
+    update(value, key) {
       const now = Date.now();
+      if (key !== lastKey) {
+        lastKey = key;
+        last = value;
+        lastAt = now;
+        perHour = 0;
+        return perHour;
+      }
       if (last > 0 && now > lastAt) {
         const gain = value - last;
         const hours = (now - lastAt) / 3_600_000;
@@ -202,6 +217,12 @@ function renderHud(ns) {
   }
 }
 
+/** How long since the daemon last published its state (0 before it ever has). */
+function daemonSilentMs() {
+  const at = globalThis.gordState?.updatedAt;
+  return at ? Date.now() - at : 0;
+}
+
 /** @param {NS} ns */
 function headerBar(ns, C) {
   const node = ns.getResetInfo().currentNode;
@@ -214,6 +235,13 @@ function headerBar(ns, C) {
   },
     el("span", { style: { fontSize: "17px", fontWeight: "bold", letterSpacing: "2px", color: C.green } }, "[ GORDNET ]"),
     el("div", { style: { display: "flex", gap: "14px", alignItems: "baseline" } },
+      // The daemon stamps gordState every tick. Without this, a daemon that died
+      // left its last GOAL and PIPELINE on screen under a clock that kept ticking,
+      // and nothing said the bot had stopped.
+      ...(daemonSilentMs() > UI.daemonStaleMs
+        ? [el("span", { style: { fontSize: "13px", fontWeight: "bold", color: C.red } },
+            `DAEMON DOWN ${Math.round(daemonSilentMs() / 1000)}s`)]
+        : []),
       el("span", { style: { fontSize: "13px", color: C.blue } }, `BN${node}${name ? " " + name : ""}`),
       el("span", { style: { fontSize: "13px", color: C.yellow } }, `run ${getRunDuration(ns)}`),
       ...TOGGLES.map(t => toggleButton(ns, C, t)),
@@ -839,7 +867,7 @@ function botnetCard(ns, C) {
  * @param {NS} ns
  */
 function contractsCard(ns, C) {
-  const s = globalThis.gordContractState;
+  const s = fresh(globalThis.gordContractState, UI.staleMs.contracts);
   if (!s) {
     return card(C, "CONTRACTS", [
       el("div", { style: { color: C.dim, fontSize: "13px" } }, "contracts.js not running"),
@@ -954,7 +982,7 @@ function gatherStats(ns) {
     ramRate:     updateRamTrend(ns, ram.max),
     augQueue:    getAugQueueInfo(ns),
     network:     getNetworkStatus(ns),
-    stocks:      globalThis.gordStockState ?? null,
+    stocks:      fresh(globalThis.gordStockState, UI.staleMs.stocks),
     combat:      getCombatStats(ns),
     // From the daemon's aug snapshot (lib/daemon-lib.js maybeInstall) rather than
     // getOwnedAugmentations here - 5GB the HUD doesn't need to carry.
@@ -984,7 +1012,9 @@ const ROOTING_PROGRAMS = CONFIG.programs.portOpeners.map(name => ({
 function getNetworkStatus(ns) {
   // Backdoor status comes from lib/backdoor.js's published state, not from
   // ns.getServer (2GB): the helper is what installs them, so it's the authority.
-  const bd = globalThis.gordBackdoorState;
+  // Fresh only: after an install the previous run's backdoors would otherwise
+  // stay ticked until (and unless) the helper is placed again.
+  const bd = fresh(globalThis.gordBackdoorState, UI.staleMs.helper);
   const backdoored = new Set(bd?.done ?? []);
   const backdoors = BACKDOOR_CHECKLIST.map(({ server, label }) => {
     const exists = ns.serverExists(server);
@@ -1080,7 +1110,7 @@ function getHackTargetEstimate(ns, host) {
   const required = ns.getServerRequiredHackingLevel(host);
   const current  = ns.getPlayer().skills.hacking;
   const missing  = Math.max(0, required - current);
-  const hackLevelsPerHour = hackTrend.update(current);
+  const hackLevelsPerHour = hackTrend.update(current, ns.getResetInfo().lastAugReset);
 
   const eta = missing <= 0           ? "ready now"
             : hackLevelsPerHour > 0  ? formatDuration((missing / hackLevelsPerHour) * 3_600_000)
@@ -1096,7 +1126,7 @@ function getGoalEstimate(ns, target) {
   // The daemon refreshes target.rep every tick (getAllAugCandidates), which is
   // plenty for an hourly-rate EMA - no getFactionRep (1GB) needed here.
   const currentRep = Number(target.rep ?? 0);
-  const factionRepPerHour = repTrend.update(currentRep);
+  const factionRepPerHour = repTrend.update(currentRep, target.faction);
 
   const eta = (target.repMissing ?? 0) <= 0  ? "complete"
             : factionRepPerHour > 0           ? formatDuration((target.repMissing / factionRepPerHour) * 3_600_000)
@@ -1107,12 +1137,12 @@ function getGoalEstimate(ns, target) {
 
 /** @param {NS} ns */
 function updateMoneyTrend(ns) {
-  return moneyTrend.update(ns.getPlayer().money);
+  return moneyTrend.update(ns.getPlayer().money, ns.getResetInfo().lastAugReset);
 }
 
 /** @param {NS} ns */
 function updateRamTrend(ns, totalRam) {
-  return ramTrend.update(totalRam);
+  return ramTrend.update(totalRam, ns.getResetInfo().lastAugReset);
 }
 
 /** @param {NS} ns */

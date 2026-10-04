@@ -96,3 +96,35 @@ test("REGRESSION: `kill-helpers all` covers every helper the daemon can place", 
   for (const key of ["driver", "worker", "hack", "grow", "weaken"]) assert.ok(!scripts.includes(P[key]), key);
   assert.ok(scripts.every(s => s.endsWith(".js")));
 });
+
+// ── Aug buy order ────────────────────────────────────────────────────────────
+
+test("nextAugPurchase: dearest ready aug first", async () => {
+  const { nextAugPurchase } = await import("../lib/daemon-lib.js");
+  const ready = [{ aug: "cheap", price: 10 }, { aug: "dear", price: 100 }, { aug: "mid", price: 50 }];
+  const o = { spendable: 500, incomePerMs: 0, horizonMs: 3_600_000 };
+  assert.equal(nextAugPurchase(ready, o).buy.aug, "dear");
+
+  // The whole set, bought in this order at x1.9 per purchase, costs 231; bought
+  // cheapest-first it costs 466.
+  const cost = order => order.reduce((sum, p, i) => sum + p * Math.pow(1.9, i), 0);
+  assert.ok(Math.abs(cost([100, 50, 10]) - 231.1) < 0.01);
+  assert.ok(Math.abs(cost([10, 50, 100]) - 466) < 0.01);
+});
+
+test("REGRESSION: nothing cheaper is bought while a dearer aug is within reach", async () => {
+  const { nextAugPurchase } = await import("../lib/daemon-lib.js");
+  const ready = [{ aug: "cheap", price: 50e6 }, { aug: "dear", price: 1e9 }];
+  // $100m short, earning $1m/s: 100 seconds away. Buying the $50m aug now would
+  // make the $1b one cost $1.9b.
+  const near = nextAugPurchase(ready, { spendable: 900e6, incomePerMs: 1_000, horizonMs: 3_600_000 });
+  assert.equal(near.buy, null);
+  assert.equal(near.savingFor.aug, "dear");
+  // Hours away instead: don't freeze the cheap one behind it.
+  const far = nextAugPurchase(ready, { spendable: 60e6, incomePerMs: 10, horizonMs: 3_600_000 });
+  assert.equal(far.buy.aug, "cheap");
+  // No income estimate yet: nothing is "within reach", so buy what we can.
+  assert.equal(nextAugPurchase(ready, { spendable: 900e6, incomePerMs: 0, horizonMs: 3_600_000 }).buy.aug, "cheap");
+  // Nothing affordable, nothing near: nothing.
+  assert.deepEqual(nextAugPurchase(ready, { spendable: 1, incomePerMs: 0, horizonMs: 1 }), { buy: null, savingFor: null });
+});

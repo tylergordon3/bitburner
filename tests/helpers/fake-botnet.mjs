@@ -2,9 +2,11 @@
 //
 // A fake `ns` + model world for driving hacking/manager.js's exported step()
 // under Node: a couple of worker hosts, two targets whose money, security and
-// leg durations respond to hack/grow/weaken landings the way the game's do (in
-// shape, not in exact constants), RAM accounting that refuses over-commits, and
-// a clock the tests advance by hand. Optionally a fake ns.formulas so the
+// leg durations respond to hack/grow/weaken landings the way the game's do -
+// with the game's own dependence on SECURITY (transcribed from its source, see
+// the models below), since that is what the scheduler's timing and the
+// fallback's prepped-state scaling both rest on - RAM accounting that refuses
+// over-commits, and a clock the tests advance by hand. Optionally a fake ns.formulas so the
 // Formulas.exe path in lib/formulas.js (the one that actually runs in-game) is
 // exercised as well as the ns.* fallback.
 //
@@ -22,13 +24,18 @@ import { step, newSchedulerState, resetCaches } from "../../hacking/manager.js";
 import { CONFIG } from "../../lib/config.js";
 
 export const H = CONFIG.hacking;
-const RAM = { "/hacking/hack.js": 1.7, "/hacking/grow.js": 1.75, "/hacking/weaken.js": 1.75, "/hacking/share.js": 4 };
+const SHARE = "/hacking/share.js";
+const RAM = { "/hacking/hack.js": 1.7, "/hacking/grow.js": 1.75, "/hacking/weaken.js": 1.75, [SHARE]: 4 };
+// The game's cap on a grow thread's log-growth (ServerMaxGrowthLog = log1p(0.0035)).
+const GROW_MAX_LOG = 0.00349388925425578;
 
 /**
  * @param {object} [opts]
  * @param {number} [opts.t1Sec] @param {number} [opts.t1Money]
  * @param {number} [opts.w1Ram] @param {number} [opts.w2Ram]
  * @param {boolean} [opts.formulas] expose a fake ns.formulas + Formulas.exe
+ * @param {number} [opts.weakenRate] the BitNode's ServerWeakenRate (default 1):
+ *        scales what a weaken thread removes AND what ns.weakenAnalyze reports
  */
 /**
  * The n00dles-alikes for a world (see opts.tinyCount). Money varies a little per
@@ -55,8 +62,10 @@ export function makeWorld(opts = {}) {
       home: { maxRam: 64, used: 0 },
       w1: { maxRam: opts.w1Ram ?? 256, used: 0 },
       w2: { maxRam: opts.w2Ram ?? 128, used: 0 },
-      t1: { maxRam: 0, maxMoney: 1e9, minSec: 10, sec: opts.t1Sec ?? 10, money: opts.t1Money ?? 1e9, reqHack: 1, growth: 50 },
-      t2: { maxRam: 0, maxMoney: 4e8, minSec: 20, sec: 40, money: 4e8 * 0.04, reqHack: 1, growth: 30 },
+      // reqHack 20 makes a leg 5% longer per point of security at t1's minimum
+      // (2.5*20 / (2.5*20*10 + 500)) - a mid-game server's sensitivity.
+      t1: { maxRam: 0, maxMoney: 1e9, minSec: 10, sec: opts.t1Sec ?? 10, money: opts.t1Money ?? 1e9, reqHack: 20, growth: 50 },
+      t2: { maxRam: 0, maxMoney: 4e8, minSec: 20, sec: 40, money: 4e8 * 0.04, reqHack: 20, growth: 30 },
       // opts.tinyCount adds N n00dles-alikes: little money, but legs land in a
       // twentieth of the time and one hack thread takes 20x the bite - the
       // cheapest dollars on the network, and each able to absorb only a sliver
@@ -68,8 +77,12 @@ export function makeWorld(opts = {}) {
     hackLandings: /** @type {{t: number, moneyFrac: number, secOver: number, target: string}[]} */ ([]),
     stolen: 0,
     execFailures: 0,
+    // Every process ns.kill() took down, so a scenario can assert that nothing
+    // killed the botnet's own legs.
+    killed: /** @type {{script: string, host: string, t: number}[]} */ ([]),
     log: /** @type {string[]} */ ([]),
   };
+  const weakenPerThread = 0.05 * (opts.weakenRate ?? 1);
 
   if (opts.onlyTiny) {
     delete world.servers.t1;
@@ -88,16 +101,25 @@ export function makeWorld(opts = {}) {
   };
   const target = name => world.servers[name];
 
-  // Models (shape-faithful, not the game's constants). All take a {sec, minSec,
-  // money, maxMoney} view so the Formulas fake can evaluate them on a mock server.
-  const timeMult = s => (s.speed ?? 1) * (1 + 0.05 * (s.sec - s.minSec));
+  // Models. The magnitudes are the fake's own (a 10s hack, 0.2% per hack thread,
+  // 0.45% per grow thread, all at MIN security), but how each one moves with
+  // security is the game's formula, term for term:
+  //   leg time  ∝ 2.5·requiredLevel·security + 500        (src/Hacking.ts)
+  //   hack %    ∝ (100 − security) / 100                  (src/Hacking.ts)
+  //   grow log  ∝ min(log1p(0.03 / security), cap)        (src/Server/formulas/grow.ts)
+  // All take a {sec, minSec, reqHack, money, maxMoney} view so the Formulas fake
+  // can evaluate them on a mock server.
+  const difficulty = (s, sec) => 2.5 * (s.reqHack ?? 1) * sec + 500;
+  const timeMult = s => (s.speed ?? 1) * difficulty(s, s.sec) / difficulty(s, s.minSec);
   const hackTime = s => 10_000 * timeMult(s);
   const growTime = s => 32_000 * timeMult(s);
   const weakenTime = s => 40_000 * timeMult(s);
-  const hackPct = s => 0.002 * (s.hackMult ?? 1) * Math.max(0.2, 1 - 0.02 * (s.sec - s.minSec));
-  const growPerThread = s => 0.0045 * Math.max(0.2, 1 - 0.02 * (s.sec - s.minSec));
+  const hackPct = s => 0.002 * (s.hackMult ?? 1) * Math.max(0, 100 - s.sec) / (100 - s.minSec);
+  const growLog = sec => Math.min(Math.log1p(0.03 / sec), GROW_MAX_LOG);
+  // Log-growth per grow thread.
+  const growRate = s => 0.0045 * growLog(s.sec) / growLog(s.minSec);
   const growThreadsFor = (s, targetMoney) =>
-    Math.log(targetMoney / Math.max(s.money, 1)) / Math.log(1 + growPerThread(s));
+    Math.log(targetMoney / Math.max(s.money, 1)) / growRate(s);
 
   function durationFor(script, s) {
     if (script === "/hacking/hack.js") return hackTime(s);
@@ -105,19 +127,27 @@ export function makeWorld(opts = {}) {
     return weakenTime(s);
   }
 
+  let lastHackLeg = "";
   function land(job) {
     const s = target(job.target);
     if (job.script === "/hacking/hack.js") {
-      world.hackLandings.push({ t: world.clock, moneyFrac: s.money / s.maxMoney, secOver: s.sec - s.minSec, target: job.target });
+      // One record per hack LEG: a leg split across hosts lands as several
+      // processes in the same instant, and the later parts seeing the first
+      // part's bite is not a hack landing on an unprepped server.
+      const leg = `${job.target}|${job.tag}|${world.clock}`;
+      if (leg !== lastHackLeg) {
+        world.hackLandings.push({ t: world.clock, moneyFrac: s.money / s.maxMoney, secOver: s.sec - s.minSec, target: job.target });
+      }
+      lastHackLeg = leg;
       const stolen = Math.min(s.money, s.money * job.threads * hackPct(s));
       s.money -= stolen;
       world.stolen += stolen;
       s.sec += 0.002 * job.threads;
     } else if (job.script === "/hacking/grow.js") {
-      s.money = Math.min(s.maxMoney, Math.max(s.money, 1) * Math.pow(1 + growPerThread(s), job.threads));
+      s.money = Math.min(s.maxMoney, Math.max(s.money, 1) * Math.exp(growRate(s) * job.threads));
       s.sec += 0.004 * job.threads;
     } else {
-      s.sec = Math.max(s.minSec, s.sec - 0.05 * job.threads);
+      s.sec = Math.max(s.minSec, s.sec - weakenPerThread * job.threads);
     }
   }
 
@@ -158,6 +188,7 @@ export function makeWorld(opts = {}) {
   // The view lib/formulas.js's mock server presents, mapped onto the model.
   const view = fs => ({
     sec: fs.hackDifficulty, minSec: fs.minDifficulty, money: fs.moneyAvailable, maxMoney: fs.moneyMax,
+    reqHack: fs.requiredHackingSkill,
     // lib/formulas.js builds its mock off mockServer() and only copies the
     // fields the real formulas read, so the fake's extra knobs are looked up
     // from the host it names instead.
@@ -186,8 +217,11 @@ export function makeWorld(opts = {}) {
     nuke() {}, brutessh() {}, ftpcrack() {}, relaysmtp() {}, httpworm() {}, sqlinject() {},
     getScriptRam: script => RAM[script] ?? 0,
     scp: (files, h) => { srvOrThrow(h); return true; },
+    // Like the game's, every analysis call describes the server AS IT IS NOW -
+    // growthAnalyze included.
     hackAnalyze: h => hackPct(srvOrThrow(h)),
-    growthAnalyze: (h, mult) => Math.log(mult) / Math.log(1 + growPerThread(srvOrThrow(h))),
+    growthAnalyze: (h, mult) => Math.log(mult) / growRate(srvOrThrow(h)),
+    weakenAnalyze: threads => weakenPerThread * threads,
     getHackTime: h => hackTime(srvOrThrow(h)),
     getGrowTime: h => growTime(srvOrThrow(h)),
     getWeakenTime: h => weakenTime(srvOrThrow(h)),
@@ -195,19 +229,25 @@ export function makeWorld(opts = {}) {
     kill(pid) {
       const i = world.jobs.findIndex(j => j.pid === pid);
       if (i < 0) return false;
+      world.killed.push({ script: world.jobs[i].script, host: world.jobs[i].host, t: world.clock });
       world.servers[world.jobs[i].host].used -= world.jobs[i].ram;
       world.jobs.splice(i, 1);
       return true;
     },
-    exec(script, host, threads, tgt, delay) {
+    exec(script, host, threads, tgt, delay, tag) {
       const srv = srvOrThrow(host);
       const ram = (RAM[script] ?? 0) * threads;
       if (srv.used + ram > srv.maxRam + 1e-9) { world.execFailures++; return 0; }
       srv.used += ram;
+      if (script === SHARE) {
+        // share.js loops forever: it holds its RAM until something kills it.
+        world.jobs.push({ pid: world.pid, script, host, threads, ram, startAt: world.clock, landAt: Infinity });
+        return world.pid++;
+      }
       // The workers pass the delay to the game as additionalMsec, so the action
       // STARTS at exec and its duration locks at the security of this moment.
       const landAt = world.clock + delay + durationFor(script, target(tgt));
-      world.jobs.push({ pid: world.pid, script, host, threads, target: tgt, ram, startAt: world.clock, landAt });
+      world.jobs.push({ pid: world.pid, script, host, threads, target: tgt, tag, ram, startAt: world.clock, landAt });
       return world.pid++;
     },
     getPlayer: () => ({ money: 0, skills: { hacking: 100 } }),
@@ -309,20 +349,22 @@ export function defineScenarios(test, assert, base = {}) {
     }
     assert.ok(world.stolen > 0);
 
-    // The runner-up (t2: 4% money, +20 security) is being prepped from the RAM
-    // the primary's cycle doesn't need. Only ~150GB is spare here, so it won't
-    // FINISH in ten minutes - the primary keeps priority by design - but it must
-    // progress (the launch count above proves it never took the primary's RAM).
-    assert.ok(world.servers.t2.sec < 40, `runner-up security never moved (${world.servers.t2.sec})`);
+    // 440GB is far less than t1 can absorb, and the bite is sized to the hack
+    // thread, so the primary's cycle fills the botnet to within one thread per
+    // batch (a coarse step here, where a whole batch is only ~13GB: one more
+    // hack thread and the grow it needs is a fifth of that).
+    assert.ok(sim.state.claimedRam >= sim.state.capacityRam * 0.75,
+      `the primary's cycle should fill the botnet: claims ${sim.state.claimedRam.toFixed(0)} of ${sim.state.capacityRam.toFixed(0)}GB`);
+    assert.ok(usedRam(world) >= sim.state.capacityRam * 0.7, `only ${usedRam(world).toFixed(0)}GB in use`);
   });
 
-  // Formulas path only. The ns.* fallback sizes its threads from hackAnalyze /
-  // growthAnalyze at the target's CURRENT security, which with fat batches in
-  // flight is not the prepped state they land on - so its grows come up a few
-  // hundredths of a percent short per batch and the drift detector re-preps now
-  // and then. That approximation is the fallback's documented nature (README,
-  // "Formulas API"); the landing ORDER is right on both paths.
-  if (base.formulas) test("REGRESSION: a big botnet taking fat bites still lands every hack on a prepped server" + label, () => {
+  // Both paths. The ns.* fallback used to fail this one too, for its own reason:
+  // it sized threads from hackAnalyze / growthAnalyze at the target's CURRENT
+  // security, which with fat batches in flight is not the prepped state they
+  // land on, so its grows came up short and money sagged until the drift
+  // detector re-prepped. It now scales those readings to min security
+  // (batch-logic preppedScale).
+  test("REGRESSION: a big botnet taking fat bites still lands every hack on a prepped server" + label, () => {
     // 32TB against t1: the plan takes the largest money fraction, whose grow adds
     // enough security to stretch any leg STARTED during a hack->weaken or
     // grow->weaken window by far more than the 200ms landing spacing. With the
@@ -369,16 +411,16 @@ export function defineScenarios(test, assert, base = {}) {
     assert.equal(sim.modes.filter(m => m.startsWith("Draining")).length, 0);
   });
 
-  test("with ample RAM the joint prep settles a deeply unprepped target in one pass (two on the fallback path)" + label, () => {
+  test("with ample RAM the joint prep settles a deeply unprepped target in one pass" + label, () => {
     // 8TB of workers: the weaken covers both the existing excess and the
-    // security the grow adds, in one pass. With Formulas the grow is sized at
-    // the CURRENT security so it's exact; the ns.* fallback sizes it at min
-    // security, under-grows at high security, and needs one top-up pass.
+    // security the grow adds, in one pass. The grow is sized at the CURRENT
+    // security on both paths - that is where it lands, ahead of the weaken, and
+    // it is what Formulas is asked for and what ns.growthAnalyze reads anyway.
     const { world, ns, advance } = makeWorld({ ...base, t1Sec: 30, t1Money: 1e9 * 0.04, w1Ram: 4096, w2Ram: 4096 });
     const sim = run(world, ns, advance, 5 * 60_000);
 
     const passes = prepPasses(world, "t1");
-    const maxPasses = base.formulas ? 1 : 2;
+    const maxPasses = 1;
     assert.ok(passes.length >= 1 && passes.length <= maxPasses, `prep passes on t1: ${passes.length} ${JSON.stringify(passes)}`);
     const firstBatch = sim.modes.indexOf("Batching");
     assert.ok(firstBatch > 0, "batching never started");
@@ -394,8 +436,9 @@ export function defineScenarios(test, assert, base = {}) {
     // wrong answer: it can only ever pay 0.48 x $50m every ~1.2s, while t1 pays
     // 0.5 x $1b on the same cadence. Ranking by income has to prefer t1, and the
     // spill order below depends on it (a cheap target servicing FIRST would
-    // starve the rich one).
-    const { world, ns, advance } = makeWorld({ ...base, tinyCount: 1, w1Ram: 4096, w2Ram: 4096 });
+    // starve the rich one). 64TB is more than t1 can absorb even at the largest
+    // bite, so there is RAM left over for the cheap one.
+    const { world, ns, advance } = makeWorld({ ...base, tinyCount: 1, w1Ram: 32768, w2Ram: 32768 });
     const sim = run(world, ns, advance, 3 * 60_000);
 
     assert.equal(sim.state.target, "t1", `primary should be the richest target, got ${sim.state.target}`);
@@ -434,20 +477,12 @@ export function defineScenarios(test, assert, base = {}) {
       `income should climb with the extra targets: $${one.world.stolen.toFixed(0)} -> $${many.world.stolen.toFixed(0)}`);
 
     // Spilling must not cost correctness: every hack, on every target, still
-    // lands on a prepped server.
-    //
-    // The bar differs by math path, and only for targets this fast. Their whole
-    // cycle is ~2.6s, so the "current" state the ns.* fallback sizes against is
-    // never the prepped one - a previous batch's hack has always just landed, so
-    // hackAnalyze reads an elevated security, the hack it plans for is ~0.5%
-    // smaller than the one that lands, and the grow sized to match under-restores
-    // by that much every cycle. Money settles a few percent below max instead of
-    // at it. Nothing to do with the spill: the same target alone, with nothing to
-    // spill to, decays identically (verified), and the Formulas path - which is
-    // what runs in-game with SF-5 - sizes at the prepped state and holds 100.00%.
-    // Either way it stays inside the manager's own prepped threshold and nowhere
-    // near the drift detector, which is what this asserts.
-    const moneyBar = base.formulas ? 0.995 : H.prepMoneyThreshold;
+    // lands on a prepped server - on both math paths. (The ns.* fallback used to
+    // need a lower bar here: these targets' whole cycle is ~2.6s, so the
+    // "current" state it sized against was never the prepped one, and money
+    // settled a few percent under max. It now scales its readings to min
+    // security - batch-logic preppedScale - and holds 100% like the Formulas path.)
+    const moneyBar = 0.995;
     assert.ok(many.world.hackLandings.length > 50, "hacks actually landed");
     for (const h of many.world.hackLandings) {
       assert.ok(h.moneyFrac >= moneyBar && h.secOver <= 0.01,
@@ -498,6 +533,118 @@ export function defineScenarios(test, assert, base = {}) {
     for (const h of recent) {
       assert.ok(h.moneyFrac >= 0.995 && h.secOver <= 0.01,
         `post-wipe hack unprepped (${(h.moneyFrac * 100).toFixed(1)}%, +${h.secOver.toFixed(2)})`);
+    }
+  });
+
+  test("a drift LATCHES: nothing is launched until the target's batches have all landed" + label, () => {
+    // A nudge the target would shrug off on its own - +0.3 security, which the
+    // next few weakens' rounding surplus removes within seconds. Unlatched, the
+    // drift check was true for those few ticks only and launching resumed into
+    // the same window (in the field: Draining/Batching flapping every second,
+    // and never the re-prep). Latched, the target is left alone until every
+    // batch in flight has landed - a whole weaken-time - and only then re-read.
+    const { world, ns, advance } = makeWorld({ ...base });
+    const s = freshState();
+    const modes = [];
+    const launched = [];
+    const tick = () => { modes.push(step(ns, s, world.clock)); launched.push(s.batchId); advance(H.batchSpacingMs); };
+
+    for (let i = 0; i < 600; i++) tick();                       // 2 min: steady batching
+    assert.equal(modes.at(-1), "Batching");
+    world.servers.t1.sec += 0.3;
+    for (let i = 0; i < 600; i++) tick();                       // 2 min more
+
+    const first = modes.findIndex(m => m.startsWith("Draining"));
+    assert.ok(first >= 600, "drift not detected");
+    let last = first;
+    while (modes[last + 1]?.startsWith("Draining")) last++;
+    // In flight when it latched: batches launched up to a weaken-time (40s) ago.
+    assert.ok((last - first) * H.batchSpacingMs >= 30_000,
+      `drained for only ${((last - first) * H.batchSpacingMs / 1000).toFixed(1)}s - the latch let go early`);
+    assert.equal(launched[last], launched[first], "a batch was launched during the drain");
+    assert.equal(modes.at(-1), "Batching", `did not recover to batching (last mode: ${modes.at(-1)})`);
+    assert.ok(world.log.some(l => l.startsWith("[drift] t1")), "the drift was not logged");
+  });
+
+  test("a prep that runs for security also grows the money all the way to full" + label, () => {
+    // 96% money is inside the "prepped" money threshold, so on its own it would
+    // not trigger a prep - and a batch's grow only repairs its own hack, so a
+    // target that starts batching at 96% stays there. The +2 security does
+    // trigger one, and that pass must take the money to 100% while it's at it.
+    const { world, ns, advance } = makeWorld({ ...base, t1Sec: 12, t1Money: 1e9 * 0.96 });
+    const sim = run(world, ns, advance, 4 * 60_000);
+
+    assert.ok(world.log.some(l => /^\[prep\] t1: weaken x\d+, grow x[1-9]/.test(l)),
+      `the prep carried no grow: ${world.log.filter(l => l.startsWith("[prep] t1")).join(" | ")}`);
+    const t1 = world.hackLandings.filter(h => h.target === "t1");
+    assert.ok(t1.length > 20, "hacks actually landed");
+    for (const h of t1) {
+      assert.ok(h.moneyFrac >= 0.995 && h.secOver <= 0.01,
+        `hack at t=${h.t} landed at ${(h.moneyFrac * 100).toFixed(1)}% money, +${h.secOver.toFixed(2)} security`);
+    }
+    assert.equal(sim.modes.filter(m => m.startsWith("Draining")).length, 0);
+  });
+
+  test("where a weaken thread removes half as much (ServerWeakenRate), batches still land on min security" + label, () => {
+    // BN12 scales ServerWeakenRate down with every level (BN11 doubles it). The
+    // weaken legs used to be sized from a hardcoded 0.05 per thread, which here
+    // covers half of what each hack and grow adds: security climbs batch after
+    // batch. The manager now asks the game (ns.weakenAnalyze). Fat bites, so
+    // the rounding-up of small weaken legs can't hide a shortfall.
+    const { world, ns, advance } = makeWorld({ ...base, weakenRate: 0.5, w1Ram: 16384, w2Ram: 16384 });
+    const sim = run(world, ns, advance, 6 * 60_000);
+
+    const t1 = world.hackLandings.filter(h => h.target === "t1");
+    assert.ok(t1.length > 50, "hacks actually landed");
+    const bad = t1.filter(h => h.moneyFrac < 0.995 || h.secOver > 0.01);
+    assert.equal(bad.length, 0, `${bad.length} of ${t1.length} t1 hacks landed unprepped`);
+    assert.equal(sim.modes.filter(m => m.startsWith("Draining")).length, 0);
+  });
+
+  test("share takes only FREE RAM: no botnet leg is killed, and the host is topped up to the plan" + label, () => {
+    const { world, ns, advance } = makeWorld({ ...base });
+    const s = freshState();
+    const modes = [];
+    const tick = () => { modes.push(step(ns, s, world.clock)); advance(H.batchSpacingMs); };
+    const shareJobs = () => world.jobs.filter(j => j.script === SHARE);
+    const shareThreads = () => shareJobs().reduce((n, j) => n + j.threads, 0);
+
+    try {
+      for (let i = 0; i < 600; i++) tick();                     // 2 min: the botnet has filled the hosts
+      assert.equal(modes.at(-1), "Batching");
+      assert.ok(usedRam(world) > 0.7 * 440, "the botnet should be holding most of the RAM by now");
+      const w1FreeThreads = Math.floor((world.servers.w1.maxRam - world.servers.w1.used) / 4);
+      assert.ok(w1FreeThreads < 19, `w1 must be too busy to take the whole plan at once (room for ${w1FreeThreads})`);
+
+      // The daemon starts working for a faction. The plan is 20% of the 384GB
+      // off-home fleet = 76GB = 19 threads, all on the largest host (w1) - which
+      // is full of batch legs. The old code killed every one of them.
+      globalThis.gordState = { action: "Faction Work (test)" };
+      for (let i = 0; i < 600; i++) tick();                     // 2 min: > one weaken-time for the legs to land
+
+      assert.deepEqual(world.killed.filter(k => k.script !== SHARE), [], "share start-up killed botnet legs");
+      assert.equal(shareThreads(), 19, "the host was not topped up to the planned thread count");
+      assert.ok(shareJobs().every(j => j.host === "w1"));
+      assert.ok(shareJobs().length <= CONFIG.share.maxProcessesPerHost,
+        `share ended up as ${shareJobs().length} processes`);
+      assert.equal(globalThis.gordShareState.threads, 19);
+      assert.ok(Math.abs(globalThis.gordShareState.bonus - (1 + Math.log(20) / 25)) < 1e-9, "bonus is 1 + ln(1 + threads)/25");
+
+      // ...and the botnet worked around it: still batching, every hack prepped.
+      assert.equal(modes.at(-1), "Batching");
+      assert.equal(modes.filter(m => m.startsWith("Draining")).length, 0, "the share start-up caused a drift");
+      for (const h of world.hackLandings.filter(x => x.target === "t1")) {
+        assert.ok(h.moneyFrac >= 0.995 && h.secOver <= 0.01, `hack at t=${h.t} landed unprepped`);
+      }
+
+      // Faction work over: the share goes, and only the share.
+      globalThis.gordState = { action: "Crime" };
+      tick();
+      assert.equal(shareJobs().length, 0);
+      assert.deepEqual(world.killed.filter(k => k.script !== SHARE), []);
+    } finally {
+      delete globalThis.gordState;
+      delete globalThis.gordShareState;
     }
   });
 }

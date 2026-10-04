@@ -43,7 +43,14 @@ export async function main(ns) {
     } else if (ns.singularity.checkFactionInvitations().includes(faction)) {
       ns.singularity.joinFaction(faction);
     } else {
-      ns.singularity.commitCrime(/** @type {any} */ (G.bootCrime), true);
+      // A crime repeats by itself once started, and commitCrime RESTARTS the
+      // attempt in flight - re-issuing it every tick threw away most of a mug
+      // each time. Only (re)start it when something else has taken the slot.
+      // (getCurrentWork: 0.5GB on this one-shot.)
+      const work = ns.singularity.getCurrentWork();
+      if (!(work?.type === "CRIME" && work.crimeType === G.bootCrime)) {
+        ns.singularity.commitCrime(/** @type {any} */ (G.bootCrime), true);
+      }
     }
 
     await ns.sleep(G.bootTickMs);

@@ -129,6 +129,19 @@ export async function main(ns) {
       ns.tprint(`BANKING for ${label}: ${$(corp.funds)} / ${$(saving)}${eta} - every cheaper`);
       ns.tprint("         purchase (warehouse levels, office seats, advert, upgrades) waits for it.");
     }
+    // A ready round being held for its offer to settle stops every spender in
+    // the corp - the second thing to check when nothing is being bought.
+    const hold = globalThis.gordCorpHoldState;
+    if (globalThis.gordCorpOfferHold && hold) {
+      ns.tprint(`HOLDING round ${hold.round} for its offer to settle: ${$(hold.last)} after ${hold.passes} pass(es)` +
+        ` - all discretionary spending is paused until it is accepted.`);
+    }
+    // What the offices still need this round; in rounds 1-2 Agriculture's
+    // warehouse climb leaves this much alone (lib/corp-expand.js).
+    const need = globalThis.gordCorpOfficeNeed;
+    if (need && need.cost > 0) {
+      ns.tprint(`offices still need ${$(need.cost)} this round (seats + Advert, round ${need.round})`);
+    }
   }
 
   // ── Product pipeline (the round-3+ gate) ───────────────────────────────────

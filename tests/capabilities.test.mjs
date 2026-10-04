@@ -35,7 +35,9 @@ test("singularityRamMultiplier follows SF4 level", () => {
   assert.equal(singularityRamMultiplier({ currentNode: 1, ownedSF: new Map([[4, 3]]) }), 1);
   assert.equal(singularityRamMultiplier({ currentNode: 1, ownedSF: new Map([[4, 2]]) }), 4);
   assert.equal(singularityRamMultiplier({ currentNode: 1, ownedSF: new Map([[4, 1]]) }), 16);
-  assert.equal(singularityRamMultiplier({ currentNode: 4, ownedSF: new Map() }), 16); // in BN4, no SF yet
+  // Inside BN4 it is 1x whatever the SF level (RamCostGenerator.ts SF4Cost).
+  assert.equal(singularityRamMultiplier({ currentNode: 4, ownedSF: new Map() }), 1);
+  assert.equal(singularityRamMultiplier({ currentNode: 4, ownedSF: new Map([[4, 1]]) }), 1);
   assert.equal(singularityRamMultiplier({ currentNode: 1, ownedSF: new Map() }), Infinity); // unavailable
 });
 
