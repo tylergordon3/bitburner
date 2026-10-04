@@ -56,7 +56,7 @@
 // globalThis.gordHackState for the dashboard. Pass --reset to kill stale worker
 // scripts across the network before starting.
 
-import { allServers, root } from "../lib/net.js";
+import { allServers, root, sameScript } from "../lib/net.js";
 import { CONFIG } from "../lib/config.js";
 import { emitEvent } from "../lib/events.js";
 import { reservedHosts } from "../lib/ns-utils.js";
@@ -272,7 +272,7 @@ function planShare(hosts, budgetRam) {
 /** @param {NS} ns @param {string} host - threads of share.js currently on host. */
 function shareThreadsOn(ns, host) {
   let t = 0;
-  for (const p of ns.ps(host)) if (p.filename === SHARE) t += p.threads;
+  for (const p of ns.ps(host)) if (sameScript(p.filename, SHARE)) t += p.threads;
   return t;
 }
 
@@ -303,7 +303,7 @@ function manageShare(ns, snap) {
   for (const host of snap.rooted) {
     if (plan[host]) continue;
     for (const p of ns.ps(host)) {
-      if (p.filename === SHARE) { ns.kill(p.pid); touched.push(host); }
+      if (sameScript(p.filename, SHARE)) { ns.kill(p.pid); touched.push(host); }
     }
   }
 
@@ -705,7 +705,7 @@ function killOldHackScripts(ns) {
   for (const server of allServers(ns)) {
     if (!ns.hasRootAccess(server)) continue;
     for (const p of ns.ps(server)) {
-      if ([HACK, GROW, WEAKEN].includes(p.filename)) ns.kill(p.pid);
+      if ([HACK, GROW, WEAKEN].some(s => sameScript(p.filename, s))) ns.kill(p.pid);
     }
   }
 }

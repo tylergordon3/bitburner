@@ -220,3 +220,32 @@ test("a faction's last positive rate outlives the slot moving elsewhere", () => 
     assert.equal(by.Hackers.rankMs, 5_000);
   });
 });
+
+test("a faction that offers no work never takes the work slot from one that does", () => {
+  // The Church's aug scores far higher, but its reputation only comes from
+  // charging the gift - there is nothing for the slot to do about it.
+  const list = [
+    { ...cand("Church of the Machine God", "awakening", 5, 1000, 1000), passive: true },
+    cand("Workable", "plain", 0.1, 1000, 1000),
+  ];
+  assert.deepEqual(order(rankCandidates(list, RANK)), ["plain", "awakening"]);
+  // Once its reputation is there it is an ordinary purchase again.
+  const ready = [
+    { ...cand("Church of the Machine God", "awakening", 5, 1000, 0), passive: false },
+    cand("Workable", "plain", 0.1, 1000, 1000),
+  ];
+  assert.equal(rankCandidates(ready, RANK)[0].aug, "awakening");
+});
+
+test("getAllAugCandidates marks no-work factions' unearned reputation as passive", () => {
+  withGlobals(() => {
+    const ns = fakeNs(7);
+    const base = ns.singularity.getAugmentationsFromFaction;
+    ns.getPlayer = () => ({ factions: ["Hackers", "Bladeburners"], money: 1e9 });
+    ns.singularity.getAugmentationsFromFaction = f => (f === "Bladeburners" ? ["Iron Arm"] : base(f));
+    const list = getAllAugCandidates(ns);
+    assert.equal(list.find(c => c.faction === "Bladeburners").passive, true);
+    assert.equal(list.find(c => c.faction === "Hackers").passive, false);
+    assert.equal(list[0].faction, "Hackers");
+  });
+});

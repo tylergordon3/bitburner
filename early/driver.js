@@ -13,9 +13,10 @@
 // 4x/16x, which would make even this lean driver much heavier.) lib/config.js is
 // safe to import by contrast - it has no Netscript calls at all.
 
-import { allServers, root } from "../lib/net.js";
+import { allServers, root, sameScript } from "../lib/net.js";
 import { CONFIG, forNode } from "../lib/config.js";
 import { inGangSafe } from "../lib/ns-utils.js";
+import { giftStatus } from "../lib/stanek-logic.js";
 
 const P = CONFIG.paths;
 const D = CONFIG.driver;
@@ -123,6 +124,22 @@ function ensureBladeBoot(ns, node) {
 }
 
 /**
+ * Stanek's Gift (BN13 / SF13), where the node wants it: accept it before
+ * anything else can cost us the chance. The gift is refused once any
+ * augmentation but NeuroFlux is owned - and with Source-File 7.3, JOINING THE
+ * BLADEBURNER DIVISION grants one - so the Bladeburner boot below waits for
+ * this. early/stanek-boot.js is a 4.6GB one-shot that answers within a tick.
+ * @param {NS} ns @param {number} node
+ * @returns {boolean} true once the question is settled (or was never asked)
+ */
+function giftSettled(ns, node) {
+  const status = giftStatus(ns.getResetInfo(), forNode(node).stanek, globalThis.gordStanekState);
+  if (status !== "pending") return true;
+  launchOffHomeFirst(ns, P.stanekBoot, [node], "accepting Stanek's Gift");
+  return false;
+}
+
+/**
  * Launch a cold-boot engine unless it's already running anywhere: the roomiest
  * rooted off-home host first, so home stays the botnet's, home as the fallback.
  * Never on a hacknet server - a script there cuts its hash rate.
@@ -172,7 +189,9 @@ function stopMoneyEngine(ns) {
   for (const server of allServers(ns)) {
     if (!ns.hasRootAccess(server)) continue;
     for (const p of ns.ps(server)) {
-      if ([P.hack, P.grow, P.weaken, P.worker, P.bladeBoot].includes(p.filename)) ns.kill(p.pid);
+      // (stanekCharge: the Gift's charge workers hold whole hosts, home included,
+      // and the daemon about to start needs home. lib/stanek.js restarts them.)
+      if ([P.hack, P.grow, P.weaken, P.worker, P.bladeBoot, P.stanekCharge].some(s => sameScript(p.filename, s))) ns.kill(p.pid);
     }
   }
 }
@@ -232,7 +251,8 @@ export async function main(ns) {
   while (true) {
     ensureMoneyEngine(ns);
     ensureHacknetEngine(ns, node);
-    ensureBladeBoot(ns, node);
+    // The gift first: joining the division can forfeit it (see giftSettled).
+    if (giftSettled(ns, node)) ensureBladeBoot(ns, node);
 
     // Grow home RAM as aggressively as money allows. At SF4.3 Singularity is 1x
     // RAM; upgradeHomeRam and the daemon are the only Singularity the driver

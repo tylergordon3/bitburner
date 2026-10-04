@@ -13,7 +13,6 @@ import {
   chooseCity,
   restAction,
   planSleeveBladeWork,
-  plannedNodeAfterBlade,
   SLEEVE_TAKE_CONTRACTS,
   SLEEVE_INFILTRATE,
   SLEEVE_DIPLOMACY,
@@ -324,26 +323,12 @@ test("sleeve regen hysteresis: on below regenBelow, off above regenAbove", () =>
   assert.ok(CONFIG.sleeves.blade.regenBelow < CONFIG.sleeves.blade.regenAbove);
 });
 
-// ── Finishing ────────────────────────────────────────────────────────────────
-
-test("plannedNodeAfterBlade: an arg wins, else re-enter until the SF target, else halt", () => {
-  assert.equal(plannedNodeAfterBlade({ override: 8, currentNode: 7, sfLevel: 0, reenterUntilSF: 3 }), 8);
-  assert.equal(plannedNodeAfterBlade({ override: 0, currentNode: 7, sfLevel: 0, reenterUntilSF: 3 }), 0); // explicit halt
-  // BN7 with reenterUntilSF 3: 7.1 and 7.2 re-enter, the run that awards 7.3 halts.
-  assert.equal(plannedNodeAfterBlade({ override: null, currentNode: 7, sfLevel: 0, reenterUntilSF: 3 }), 7);
-  assert.equal(plannedNodeAfterBlade({ override: null, currentNode: 7, sfLevel: 1, reenterUntilSF: 3 }), 7);
-  assert.equal(plannedNodeAfterBlade({ override: null, currentNode: 7, sfLevel: 2, reenterUntilSF: 3 }), 0);
-  // BN6 keeps the halt sentinel.
-  assert.equal(plannedNodeAfterBlade({ override: null, currentNode: 6, sfLevel: 0, reenterUntilSF: 0 }), 0);
-  assert.equal(plannedNodeAfterBlade({ override: undefined, currentNode: 6, sfLevel: 0, reenterUntilSF: 0 }), 0);
-});
-
 test("BN7 config: the same engine with Bladeburner's penalties priced in", async () => {
   const { forNode, BITNODE } = await import("../lib/config.js");
   const c7 = forNode(7);
   assert.equal(c7.paths.daemon, "/bn7/daemon.js");
-  assert.equal(c7.bladeburner.reenterUntilSF, 3);
-  assert.equal(forNode(6).bladeburner.reenterUntilSF, 0);
+  // Three runs of BN7 (for SF7.3's free Simulacrum) are the campaign's doing now.
+  assert.ok(c7.campaign.order.some(([node, level]) => node === 7 && level === 3));
   // Skill points cost double: nothing goes to Datamancer, Tracer is capped.
   assert.equal(c7.bladeburner.skills["Datamancer"].weight, 0);
   assert.ok(c7.bladeburner.skills["Tracer"].cap <= 20);

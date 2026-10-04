@@ -22,7 +22,7 @@
 // Read-only: it launches nothing and kills nothing.
 
 import { CONFIG, forNode } from "../lib/config.js";
-import { allServers } from "../lib/net.js";
+import { allServers, sameScript } from "../lib/net.js";
 import { reservedHosts } from "../lib/ns-utils.js";
 import * as F from "../lib/formulas.js";
 import * as B from "../lib/batch-logic.js";
@@ -183,14 +183,14 @@ export async function main(ns) {
   const busy = new Set();
   for (const host of rooted) {
     for (const p of ns.ps(host)) {
-      if (!WORKERS.includes(p.filename)) continue;
+      if (!WORKERS.some(s => sameScript(p.filename, s))) continue;
       const target = String(p.args[0] ?? "?");
       const entry = byTarget.get(target) ?? { legs: 0, threads: 0 };
       entry.legs++;
       entry.threads += p.threads;
       byTarget.set(target, entry);
       legs++;
-      legRam += p.threads * workerRam[p.filename === P.hack ? "hack" : p.filename === P.grow ? "grow" : "weaken"];
+      legRam += p.threads * workerRam[sameScript(p.filename, P.hack) ? "hack" : sameScript(p.filename, P.grow) ? "grow" : "weaken"];
       busy.add(host);
     }
   }

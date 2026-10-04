@@ -16,8 +16,8 @@
 //   - BladeburnerRank 0.6, WorldDaemonDifficulty 2, GangSoftcap 0.7: same as BN6.
 //   - Source-File 7 buffs the four bladeburner_* multipliers (+8/12/14%), and
 //     SF7.3 hands out The Blade's Simulacrum the moment you join the division.
-//     So without a daemon arg this node re-enters itself until it holds SF7.3
-//     (bladeburner.reenterUntilSF); the HUD's FINISH toggle holds Operation
+//     So the campaign (`campaign.order` in lib/config.js) keeps this node on
+//     the plan until it holds SF7.3; the HUD's FINISH toggle holds Operation
 //     Daedalus regardless, and `run bn7/daemon.js <n>` overrides the plan.
 //
 // Sleeves (SF10) are the node's second engine: contract/operation ATTEMPTS are

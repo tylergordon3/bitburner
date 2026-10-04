@@ -225,7 +225,10 @@ export function makeWorld(opts = {}) {
     getHackTime: h => hackTime(srvOrThrow(h)),
     getGrowTime: h => growTime(srvOrThrow(h)),
     getWeakenTime: h => weakenTime(srvOrThrow(h)),
-    ps: host => { srvOrThrow(host); return world.jobs.filter(j => j.host === host).map(j => ({ filename: j.script, threads: j.threads, pid: j.pid })); },
+    // filename WITHOUT the leading slash, as the game reports it (script names are
+    // stored that way) - a fake that echoed "/hacking/share.js" back is what let
+    // `p.filename === SHARE` pass here and never match in the game.
+    ps: host => { srvOrThrow(host); return world.jobs.filter(j => j.host === host).map(j => ({ filename: String(j.script).replace(/^\/+/, ""), threads: j.threads, pid: j.pid })); },
     kill(pid) {
       const i = world.jobs.findIndex(j => j.pid === pid);
       if (i < 0) return false;

@@ -11,10 +11,11 @@
 // reputation and skill points, and the last black op - Operation Daedalus -
 // ends the BitNode without going near w0r1d_d43m0n.
 //
-// Finishing: without a daemon arg the plan is the halt sentinel
-// (bladeburner.reenterUntilSF is 0 here): every black op but Daedalus runs and
-// the loop announces it's ready. `run bn6/daemon.js 7` names the next node;
-// with the HUD's FINISH on, Daedalus then runs and lib/finish-bn.js enters it.
+// Finishing: the next node is the shared plan (a daemon arg such as
+// `run bn6/daemon.js 7`, else `campaign.order` in lib/config.js). When the plan
+// has nothing left it is the halt sentinel: every black op but Daedalus runs and
+// the loop announces it's ready. With a next node and the HUD's FINISH on,
+// Daedalus runs and lib/finish-bn.js enters it.
 
 import { forNode } from "../lib/config.js";
 import { runBladeDaemon } from "../lib/blade-daemon.js";

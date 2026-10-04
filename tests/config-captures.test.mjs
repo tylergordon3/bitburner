@@ -15,7 +15,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { BITNODE } from "../lib/config.js";
 
 const ROOT = new URL("../", import.meta.url);
-const DIRS = ["lib", "hacking", "early", "ui", "tools", "bn2", "bn3", "bn4", "bn5", "bn6", "bn7", "bn9", "bn10"];
+const DIRS = ["lib", "hacking", "early", "ui", "tools", ...readdirSync(ROOT).filter(d => /^bn\d+$/.test(d))];
 
 /** section -> the set of top-level keys overridden in it by any BITNODE entry. */
 const overridden = new Map();

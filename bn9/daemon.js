@@ -46,7 +46,7 @@ import {
 } from "../lib/player-actions.js";
 import { getNextAugTarget, getMoneyHoardGoal } from "../lib/aug-targets.js";
 import { forNode } from "../lib/config.js";
-import { playerMoney, hackingLevel, maybeBuyInfra, inGangSafe, nextBNOverride } from "../lib/daemon-lib.js";
+import { playerMoney, hackingLevel, maybeBuyInfra, inGangSafe } from "../lib/daemon-lib.js";
 import { runDaemon, decidePrelude, decideAugFlow, pursueNextFaction } from "../lib/daemon-core.js";
 // Megacorp faction grinding (factions.pursueCompanyFactions): the long no-reset
 // endgame makes their augs worth the grind, as in BN10.
@@ -71,23 +71,9 @@ const STUDY_CLASS = /** @type {any} */ (PL.studyClass);
 // [[bitburner-enum-string-casts]].
 const CRIMINAL_FACTIONS = /** @type {any[]} */ (GANG.criminalFactions);
 
-/**
- * The BitNode to enter when lib/finish-bn.js destroys w0r1d_d43m0n. Same shape
- * as BN5's plan: 9.1 re-enters BN9 for 9.2 (128GB home on every future node -
- * the single best quality-of-life Source-File level there is); from 9.2 on,
- * halt for manual selection. An explicit daemon arg ([0]) always overrides.
- * @param {NS} ns
- */
-function plannedNextBN(ns) {
-  const override = nextBNOverride(ns);
-  if (override != null) return override;
-
-  const info = ns.getResetInfo();
-  if (info.currentNode !== 9) return CFG.backdoor.defaultNextBN;
-
-  const sf9 = info.ownedSF.get(9) ?? 0;
-  return sf9 < 1 ? 9 : 0; // 9.1 -> re-enter BN9; 9.2+ -> halt for manual selection
-}
+// Next BitNode: the shared plan (runDaemon's default - a daemon arg, else
+// `campaign.order` in lib/config.js, which has BN9 on it up to SF9.3: 128GB of
+// home RAM at every node start from 9.2, a built hacknet server from 9.3).
 
 /**
  * Found a gang the moment we're eligible: karma past the gate AND already a
@@ -342,7 +328,6 @@ export async function main(ns) {
   await runDaemon(ns, {
     cfg: CFG,
     self: SELF,
-    plannedNextBN,
     setupGang: maybeSetupGang,
     decide: decideNextPriority,
     // The BN9 headline act - the hacknet manager - is launched by the core itself
