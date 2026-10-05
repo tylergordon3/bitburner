@@ -207,16 +207,17 @@ entry. BN12 holds the softcap at 0.8 at every level, and BN3's challenge forbids
 - the bot never finishes the node - you backdoor `w0r1d_d43m0n` yourself when the list is done;
 - installs wait for 40 queued augmentations and for nothing else;
 - hacknet servers are bought whether or not they pay back (10% of spare cash);
-- Tobacco's offices grow to 500 seats each (six offices of 500 is the 3,000);
+- the corporation's growth loop is on (it is by default after round 4 anyway);
 - Bladeburner banks 100,000 skill points once its black ops are done.
 
-It has not been through a live game, and what it cannot do is make the corporation rich:
-as reviewed, an ordinary run's Tobacco division stops at 160 seats and the hacknet fleet at
-about nine servers, because both only buy what pays back. The overlay removes those limits;
-whether the corporation then earns the $1e30 the last hacknet cores cost is the open
-question. Two purchases were also made reachable in ordinary runs by this pass: the corp now
-banks for the two dividend-tax unlocks (the second is "Lobbying is great!") instead of
-waiting to stumble over the money.
+The corporation side was rebuilt on 2026-10-04: after round 4 it now runs a growth loop
+(`corp.growth`) with no seat or level ceilings. In a model of the game's formulas it passes
+3,000 Tobacco employees about 150 cycles after round 4, reaches $1e30/s profit after about
+310, and puts $3e30 in your hand shortly after. That is a model, not a live run - watch
+the CORP card's Growth line and `run tools/corp-status.js` on the first one. The corp also
+banks for the two dividend-tax unlocks now (the second is "Lobbying is great!"). The
+hacknet half is unchanged: outside this overlay the fleet stops at about nine servers,
+because it only buys what pays back.
 
 ---
 
@@ -248,8 +249,8 @@ Things on this page the code does not do yet, in the order I would build them:
 1. **A dark net player** (`ns.dnet`). BN15 cannot be finished without one - The Red Pill is
    not sold by Daedalus there, it is found in the dark net - and two achievements live there.
    Until then the plan halts in BN15 for the player.
-2. **A corporation that scales.** The money run's overlay lifts the limits, but the corp
-   scripts were written to finish a node, not to reach $1e30. That is the real work behind
-   the ten money-run achievements.
+2. **Stronger investment rounds.** Rounds 3-4 still use fixed targets and fall well short of
+   the corporation manual's offer benchmarks in the model; `corp.growth.fromRound: 3` is the
+   untested opt-in.
 3. An **Illuminati streak** mode and a deliberate **cheat-until-ejected** tool for the two
    IPvGO achievements.

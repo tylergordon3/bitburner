@@ -328,6 +328,11 @@ export async function main(ns) {
 
     if (haveDaemon && ns.getServerMaxRam(HOME) >= needed) {
       stopMoneyEngine(ns);
+      // The boot holds end with the boot: whatever the daemon's helpers need
+      // kept free, the daemon asks for itself at the end of each of its ticks
+      // (lib/daemon-core.js is the map's only writer from here on). A failed
+      // launch below just rebuilds them on the next pass.
+      globalThis.gordReservedRam = {};
       const pid = ns.run(daemon, 1);
       if (pid !== 0) {
         ns.tprint(`Home RAM ${ns.format.ram(ns.getServerMaxRam(HOME))} >= ${ns.format.ram(needed)} needed. Started ${daemon} (pid ${pid}).`);

@@ -15,7 +15,7 @@
 // Read-only: it buys nothing and changes nothing.
 
 import { CONFIG } from "../lib/config.js";
-import { safe, designCity } from "../lib/corp-lib.js";
+import { safe, designCity, nodeCorp, growthActive, advertMaxed } from "../lib/corp-lib.js";
 
 const CO = CONFIG.corp;
 
@@ -212,6 +212,45 @@ export async function main(ns) {
       ns.tprint(`     WARNING: corp-steady has not published state ${
         Number.isFinite(age) ? `for ${age.toFixed(0)}s` : "at all"
       } - the product/Wilson/Advert loop is probably not running.`);
+    }
+  }
+
+  // ── The growth loop ────────────────────────────────────────────────────────
+  // Past the investment rounds the corp splits its surplus every cycle instead
+  // of building toward fixed targets (CONFIG.corp.growth). What to look at when
+  // it seems not to: is it on, are the build phases drawing what corp-steady
+  // sets aside for them, and is the product division still gaining staff.
+  const NC = nodeCorp();
+  ns.tprint("-".repeat(66));
+  if (!growthActive(round, NC.growth)) {
+    ns.tprint(`GROWTH: off (${NC.growth.enabled ? `starts at round ${NC.growth.fromRound}; this is ${round}` : "corp.growth.enabled is false"})` +
+      " - the per-round targets rule.");
+  } else {
+    const profit = (corp.revenue ?? 0) - (corp.expenses ?? 0);
+    ns.tprint(`GROWTH: on | dividends ${((corp.dividendRate ?? 0) * 100).toFixed(0)}% (${NC.dividends.mode})` +
+      ` | Advert ${profit >= CO.advertFocusProfit ? `focus: ${CO.advertFocusFraction * 100}% of funds` : "in the 23rds"}`);
+    const now = Date.now();
+    for (const [name, e] of Object.entries(globalThis.gordCorpEnvelopes ?? {})) {
+      const idle = (now - (e.tendedAt ?? 0)) / 1000;
+      ns.tprint(`     set aside for ${name.padEnd(17)} ${$(e.balance).padStart(10)}` +
+        ` | its phase last ran ${idle.toFixed(0)}s ago` +
+        (idle * 1000 > NC.growth.envelopeStaleMs ? "  <-- NOT RUNNING: handed back each cycle" : ""));
+    }
+    for (const name of corp.divisions) {
+      const d = safe(() => c.getDivision(name));
+      if (!d || !d.cities.length || d.industry === CO.dummy.industry) continue;
+      let employees = 0;
+      let seats = 0;
+      for (const city of d.cities) {
+        const off = safe(() => c.getOffice(name, /** @type {any} */ (city)));
+        employees += off?.numEmployees ?? 0;
+        seats += off?.size ?? 0;
+      }
+      if (!seats) continue;
+      const maxed = advertMaxed(d);
+      ns.tprint(`     ${name.padEnd(12)} ${employees}/${seats} employees` +
+        (employees >= 3000 ? "  (3,000: \"Small town\")" : "") +
+        (d.makesProducts ? ` | Advert ${d.numAdVerts ?? 0}${maxed ? " - awareness and popularity at the cap, no more is bought" : ""}` : ""));
     }
   }
 

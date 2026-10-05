@@ -847,7 +847,7 @@ that every hack lands on a prepped server.
 | `lib/achievements.js`, `lib/achievements-logic.js` | One-shot helper that reads the held achievements out of the save; the pure table of what is still worth planning |
 | `lib/backdoor.js` | Helper that installs backdoors on the faction servers |
 | `lib/finish-bn.js` | Helper that ends the BitNode |
-| `lib/econ.js` | Helper that buys home RAM and, early on, hacknet nodes |
+| `lib/econ.js`, `lib/hacknet-nodes.js` | Helpers that buy home RAM, and (early on, where the node allows) hacknet nodes |
 | **Mechanics helpers** | |
 | `lib/gang.js`, `lib/gang-logic.js` | Gang manager and its pure decisions |
 | `lib/corp-daemon.js` | Keeps the corporation scripts running, in rotation |

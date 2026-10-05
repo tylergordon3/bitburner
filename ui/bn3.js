@@ -72,7 +72,11 @@ function corpCard(ns, C) {
       stat(C, "Funds", `$${ns.format.number(s.funds ?? 0)}`),
       stat(C, "Profit/s", `$${ns.format.number(profit)}`, profitColor),
       stat(C, "Value", `$${ns.format.number(s.valuation ?? 0)}`),
-      stat(C, "Div", s.dividendRate ? `${(s.dividendRate * 100).toFixed(0)}%` : "off",
+      // The dividend rate; with a tax still on it (tributeModifier > 0) the
+      // player gets (their share)^(1 - tax), which the "^" figure spells out.
+      stat(C, "Div", s.dividendRate
+        ? `${(s.dividendRate * 100).toFixed(0)}%${s.tributeModifier > 0 ? ` ^${(1 - s.tributeModifier).toFixed(2)}` : ""}`
+        : "off",
         s.dividendRate ? C.green : C.dim),
     ),
     el("div", { style: { display: "flex", justifyContent: "space-between", marginTop: "4px" } },
@@ -84,8 +88,36 @@ function corpCard(ns, C) {
     el("div", { style: { color: C.dim, fontSize: "11px", marginTop: "6px", wordBreak: "break-word" } },
       divisions || "no divisions yet"
     ),
+    growthLine(ns, C, s),
     upkeepLine(ns, C),
   ]);
+}
+
+/**
+ * One line on the growth loop (CONFIG.corp.growth): whether it is running, the
+ * product division's headcount against the 3,000 of "Small town", where Advert
+ * stands, what is set aside for the build phases, and what the dividend is
+ * doing. Null until the investment rounds are banked - before that the fixed
+ * targets rule and there is nothing to say.
+ * @param {NS} ns @param {any} s - globalThis.gordCorpState
+ */
+function growthLine(ns, C, s) {
+  if (!s.growing) return null;
+  const parts = [];
+
+  // Published by lib/corp-office.js once a rotation.
+  const staff = globalThis.gordCorpStaff;
+  if (staff && Date.now() - (staff.at ?? 0) < 600_000) {
+    parts.push(`${staff.division} staff ${staff.employees}/${staff.seats}` +
+      (staff.employees >= 3000 ? " (3,000 reached)" : " (3,000 = Small town)"));
+  }
+  const product = (s.divisions ?? []).find(d => d.maxProducts);
+  if (product) parts.push(product.advertMaxed ? "Advert maxed" : `Advert ${product.adverts}`);
+  if (s.envelopes > 0) parts.push(`$${ns.format.number(s.envelopes)} set aside for offices/warehouses`);
+  if (s.dividendWhy) parts.push(`dividend: ${s.dividendWhy}`);
+
+  return el("div", { style: { color: C.dim, fontSize: "11px", marginTop: "4px", wordBreak: "break-word" } },
+    `Growth: ${parts.join("  |  ") || "on"}`);
 }
 
 /**

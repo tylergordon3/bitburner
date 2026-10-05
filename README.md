@@ -34,8 +34,7 @@ batch actually farms — exact steal-%, exact grow threads, and min-security bat
 timings. Without Formulas.exe the same prepped-state figures are derived from the
 `ns.*` analysis calls by scaling them from the current security to the minimum with
 the game's own formulas (`preppedScale`), so both paths plan for the state a batch
-lands on. `lib/gang.js`'s replicas
-and `lib/econ.js`'s hacknet buys remain candidates for the same treatment.
+lands on. `lib/gang-logic.js`'s replicas remain a candidate for the same treatment.
 
 ## HGW batcher
 
@@ -216,6 +215,18 @@ while no augmentation but NeuroFlux is owned or queued, and with SF7.3 joining t
 Bladeburner division hands one out - so until [`early/stanek-boot.js`](early/stanek-boot.js)
 has asked (`giftStatus`: off / pending / accepted / refused), nothing buys an aug, starts a
 graft or joins the division.
+
+### Helper placement
+
+The daemon's helpers run wherever there is room, and the batcher fills every free GB, so
+a required helper that finds none has its size **held** free of new batcher legs on one
+host until it is placed (`helpers.holds`: at most `maxFraction` of drainable RAM in total,
+moving to the next host after `moveOnMs`). Launch order in `runDaemon` is the priority;
+optional helpers never take held room. The holds are rebuilt every daemon tick and
+published once, at its end, as `globalThis.gordReservedRam` (merged with Stanek's charge
+holds); `gordReservedHosts` still names whole hosts kept for the gang and corp managers.
+The tick walks the network once and shares the result (about 230 `ns` calls on a 95-host
+network instead of about 3,200).
 
 ### The daemons
 
@@ -413,9 +424,11 @@ pure, unit-tested [`lib/hacknet-logic.js`](lib/hacknet-logic.js):
 - The HUD gets a **HACKNET** tab ([`ui/bn9.js`](ui/bn9.js)): cache fill, rate as
   cash, what the hashes are becoming, the multiplier levels, and the fleet.
 
-`lib/econ.js`'s cheap hacknet-*node* buyer is switched off there (`econ.hacknetNodes`)
-so the two never compete for the same money; it now takes the node number as exec
-arg [1] to resolve that.
+The cheap hacknet-*node* buyer ([`lib/hacknet-nodes.js`](lib/hacknet-nodes.js), 6.65GB,
+split out of `lib/econ.js` so the long-running home-RAM buyer is 6.6GB instead of 11.15GB)
+is switched off there (`econ.hacknetNodes`), so the two never compete for the same money.
+Elsewhere the daemon launches it only while hacking is at or below
+`econ.hacknetMaxHackingLevel`, and it exits by itself.
 
 ## Coding contracts
 
@@ -597,9 +610,24 @@ Storage/Factories until round 3; research starts **round 4**, capped per purchas
 to a fraction of the RP pool (½ lab/TA, ⅕ stat, ⅒ production); **dummy Restaurant
 divisions** (6 cities, 6 warehouses, nothing else) multiply the offer ~1.1× each
 via the valuation exponent; product design invest is 1% of funds (it scales as
-x^0.1), the lowest-rated product is recycled once slots are full, and Advert's
-funds share steps up from 20% to 50% past ~1e18/s profit (the manual's
-"threshold of focusing on Advert").
+x^0.1; capped at $1t only through round 4), the lowest-rated product is recycled once
+slots are full, and in rounds 3-4 Advert takes 20% of funds a cycle.
+
+**The growth loop (after round 4, `corp.growth`).** The per-round targets become floors
+and nothing has a ceiling any more. Each cycle `corp-steady` buys Wilson first, then splits
+a share of the surplus in the manual's 23rds (Advert 4, offices 8, employee-stat upgrades
+8, Smart Factories/Storage 1, SalesBots 1, Project Insight 1); past about 1e18/s profit
+Advert takes 50% of funds until awareness and popularity hit the game's cap. The office
+and warehouse parts are set aside as envelopes (`gordCorpEnvelopes`) for `corp-office` and
+`corp-expand`, which own those API calls: each office grows by its part in one purchase
+(main office 50%, the other five 10% each). Dividends follow `corp.dividends` (adaptive:
+10% while profit is multiplying, 50% once it is not). In a model of the game's formulas
+the old ceilings (160 Tobacco seats, $1t products) plateau near $6e13/s a thousand cycles
+after round 4; the loop reaches $1e20/s after about 240 cycles and $1e30/s after about
+310. That is a model - none of it has run in a live game. `growth.fromRound: 3` opts
+rounds 3-4 in (untested). Only `corp.growth` and `corp.dividends` resolve per node; the
+other `corp` keys still read the defaults. The HUD's CORP card has a Growth line (Tobacco
+staff, Advert level, money set aside, dividend state).
 
 Money discipline, because the offer is a share of a valuation that prices
 `Funds/3 + max(AssetDelta, 0) × 315000` averaged over 10 cycles:

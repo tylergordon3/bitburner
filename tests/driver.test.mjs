@@ -172,6 +172,21 @@ test("BN9's hacknet manager is held for the same way, and a node with no boot sc
   assert.deepEqual(await runDriver(bn4.ns), {});
 });
 
+test("the boot holds end at the handoff: the daemon is the reservation map's only writer from then on", async () => {
+  // BN9 with a home already big enough for the daemon, and the hacknet manager
+  // still without a host (the botnet has the rest of home): the driver was
+  // holding RAM for it on this very pass.
+  const full = { max: 16, used: 16 };
+  const game = fakeGame({
+    node: 9, ownedSF: [[9, 1]], ram: { ...RAM, [bare(P.manager)]: 105 }, home: 128,
+    hosts: { joesguns: { ...full }, foodnstuff: { ...full } },
+  });
+  const holds = await runDriver(game.ns);
+  assert.ok(game.g.procs.some(p => p.script === "bn9/daemon.js"), "handed off");
+  assert.ok(!game.g.started.includes(bare(P.hacknet)), "the hacknet manager never found room");
+  assert.deepEqual(holds, {}, "and nothing is left held for it - the daemon asks again in its own name");
+});
+
 test("a challenge run is booted with the challenge's config: its daemon, and no boot script for what the run forbids", async () => {
   // How a run says it is one: the node's challenge options plus the entry marker
   // (a Source-File override that overrides nothing) - see CHALLENGE in lib/config.js.
