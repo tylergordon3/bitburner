@@ -126,8 +126,15 @@ const _copied = new Set();
  * @typedef {{host: string, max: number, free: number}} Worker
  * @typedef {{now: number, servers: string[], rooted: string[], reserved: Set<string>,
  *            workers: Worker[], totalUsable: number, capacity: number,
- *            hacking: number}} Snapshot
+ *            hosts: {rooms: number[], key: number}, hacking: number}} Snapshot
  */
+
+/** Free RAM across the workers. @param {Worker[]} workers */
+function usableRam(workers) {
+  let sum = 0;
+  for (const w of workers) sum += w.free;
+  return sum;
+}
 
 /**
  * One consistent view of the botnet for this tick. The network walk and the
@@ -162,8 +169,10 @@ function buildSnapshot(ns, now) {
   const reserved = reservedHosts();
   const rooted = _netServers.filter(s => ns.hasRootAccess(s));
   const workers = [];
-  let totalUsable = 0;
   let capacity = 0;
+  // What each host could hold, and a fingerprint of the list (the plan cache's key).
+  const rooms = [];
+  let roomsKey = 0;
   for (const host of rooted) {
     if (reserved.has(host)) continue;
     const max = ns.getServerMaxRam(host);
@@ -177,15 +186,23 @@ function buildSnapshot(ns, now) {
     if (host === HOME) reserve += H.reserveHomeRam;
     const free = Math.max(0, max - ns.getServerUsedRam(host) - reserve);
     workers.push({ host, max, free });
-    totalUsable += free;
     // What this host could give the botnet if nothing else were on it. Free RAM
     // swings wildly within a launch cycle (and collapses to nearly nothing
     // during a big prep), so TARGET RANKING is done against this stable number -
     // otherwise a prep in flight makes every target look unaffordable and the
     // ranking empties out. Per-target RAM BUDGETS still come from free RAM.
-    capacity += Math.max(0, max - reserve);
+    const room = Math.max(0, max - reserve);
+    capacity += room;
+    rooms.push(room);
+    roomsKey = (roomsKey * 31 + Math.round(room * 4)) % 2147483647;
   }
-  return { now, servers: _netServers, rooted, reserved, workers, totalUsable, capacity, hacking: ns.getHackingLevel() };
+  return {
+    now, servers: _netServers, rooted, reserved, workers, totalUsable: usableRam(workers), capacity,
+    // Batches are planned for these hosts, not for a pool of gigabytes
+    // (batch-logic planBatch's `hosts`, costAt).
+    hosts: { rooms, key: roomsKey },
+    hacking: ns.getHackingLevel(),
+  };
 }
 
 /** Re-read free RAM for a few hosts after something outside our plan ran there. */
@@ -197,7 +214,7 @@ function refreshWorkers(ns, snap, hosts) {
     if (host === HOME) reserve += H.reserveHomeRam;
     w.free = Math.max(0, w.max - ns.getServerUsedRam(host) - reserve);
   }
-  snap.totalUsable = snap.workers.reduce((s, w) => s + w.free, 0);
+  snap.totalUsable = usableRam(snap.workers);
 }
 
 /** Apply an allocation's post-launch free RAM to the snapshot. */
@@ -206,7 +223,7 @@ function applyAllocation(snap, alloc) {
     const free = alloc.freeAfter.get(w.host);
     if (free !== undefined) w.free = free;
   }
-  snap.totalUsable = snap.workers.reduce((s, w) => s + w.free, 0);
+  snap.totalUsable = usableRam(snap.workers);
 }
 
 // ── Faction-rep sharing (ns.share) ────────────────────────────────────────────
@@ -394,7 +411,7 @@ function applyShareHolds(snap, holds) {
     const hold = holds.get(w.host);
     if (hold > 0) w.free = Math.max(0, w.free - hold);
   }
-  snap.totalUsable = snap.workers.reduce((s, w) => s + w.free, 0);
+  snap.totalUsable = usableRam(snap.workers);
 }
 
 // ── Per-target math (Formulas when present, ns.* approximations otherwise) ───
@@ -402,7 +419,7 @@ function applyShareHolds(snap, holds) {
 /**
  * @typedef {{hackTime: number, growTime: number, weakenTime: number}} Times
  * @typedef {{times: Times, hackPct: number, hackChance: number, useFormulas: boolean,
- *            maxThreads: number, plan: (hackThreads: number) => any,
+ *            maxThreads: number, plan: (hackThreads: number) => any, cache: PlanCache,
  *            growNeeded: (money: number, maxMoney: number, security: number) => number}} TargetMath
  */
 
@@ -452,10 +469,11 @@ function targetMath(ns, target) {
   // (On the ns.* path each security reading gets its own entry: the target swings
   // between the same few values as batches land, and they should not evict each
   // other.)
-  const plans = planCacheFor(useFormulas ? target : `${target}@${security}`, [
+  const cache = planCacheFor(useFormulas ? target : `${target}@${security}`, [
     hackPct, ns.getServerMaxMoney(target), minSecurity,
-    _growMult, weakenAmount(ns), RAM.hack, RAM.grow, RAM.weaken,
+    _growMult, weakenAmount(ns), RAM.hack, RAM.grow, RAM.weaken, _hosts.key,
   ].join("|"));
+  const plans = cache.plans;
   const plan = (hackThreads) => {
     let batch = plans.get(hackThreads);
     if (batch === undefined) {
@@ -469,6 +487,8 @@ function targetMath(ns, target) {
         weakenAmount: weakenAmount(ns),
         maxHackFraction: H.maxHackFraction,
         growPadding: H.growPadding,
+        hosts: _hosts.rooms,
+        minSecurity,
       });
       plans.set(hackThreads, batch);
     }
@@ -489,7 +509,7 @@ function targetMath(ns, target) {
   // rather than on every tick of every target.
   let chance;
   return {
-    times, hackPct, useFormulas, maxThreads, plan, growNeeded,
+    times, hackPct, useFormulas, maxThreads, plan, growNeeded, cache,
     get hackChance() { return chance ??= useFormulas ? F.hackChance(ns, target) : 1; },
   };
 }
@@ -509,19 +529,25 @@ function targetMath(ns, target) {
 // A changed key drops that target's plans, and every re-rank drops them all
 // (rankTargets), so nothing is trusted for longer than targetRescoreMs and the
 // maps cannot grow without bound.
-/** @type {Map<string, {key: string, plans: Map<number, any>}>} */
+/** @typedef {{key: string, plans: Map<number, any>, cycle: any}} PlanCache */
+/** @type {Map<string, PlanCache>} */
 const _planCache = new Map();
 // The player's grow multiplier, read once per tick in step().
 let _growMult = 1;
+// The room on each host (the snapshot's `hosts`), likewise.
+let _hosts = { rooms: /** @type {number[]} */ ([]), key: 0 };
 
-/** @param {string} id target (and security, on the ns.* path) @param {string} key @returns {Map<number, any>} */
+/**
+ * @param {string} id target (and security, on the ns.* path) @param {string} key
+ * @returns {PlanCache} `cycle` is cycleFor's: the last cycle planned from these plans
+ */
 function planCacheFor(id, key) {
   let entry = _planCache.get(id);
   if (!entry || entry.key !== key) {
-    entry = { key, plans: new Map() };
+    entry = { key, plans: new Map(), cycle: null };
     _planCache.set(id, entry);
   }
-  return entry.plans;
+  return entry;
 }
 
 /** @param {NS} ns @param {string} target */
@@ -563,7 +589,12 @@ function prepEstimateMs(ns, target, math, capacity) {
   return passes * ns.getWeakenTime(target);
 }
 
-let _rank = { at: 0, ram: 0, list: /** @type {{target: string, score: number, ram: number}[]} */ ([]) };
+/**
+ * @typedef {{target: string, score: number, ram: number, depth?: number, objective?: string}} Ranked
+ *   depth: how deep this target's window may be (set only by the late-game plan,
+ *   see deepen); objective: "stock" / "exp" when the ranking was not for income.
+ */
+let _rank = { at: 0, ram: 0, list: /** @type {Ranked[]} */ ([]), pushing: false, deep: false };
 
 /**
  * The batch plan for one target given `ramBudget`: the leg schedule (fixed by
@@ -571,17 +602,36 @@ let _rank = { at: 0, ram: 0, list: /** @type {{target: string, score: number, ra
  * timing, hack threads from RAM). cycle is null when not even a one-thread
  * batch fits.
  * @param {TargetMath} math @param {number} ramBudget
+ * @param {number} [keepDepth] the depth of the window this target has in flight
+ *        (0 = none): the cycle stays that deep while that costs little
+ *        (batch-logic planCycle)
+ * @param {number} [maxDepth] how deep its window may be (the late-game plan's,
+ *        see deepen; hacking.maxDepth otherwise)
  */
-function cycleFor(math, ramBudget) {
+function cycleFor(math, ramBudget, keepDepth = 0, maxDepth = H.maxDepth) {
   const schedule = B.legSchedule({ ...math.times, spacing: H.batchSpacingMs, margin: H.launchMarginMs });
+  // A target's budget is the same from one tick to the next once its window is
+  // full, and the cycle is a pure function of it, the schedule and the plans this
+  // cache entry holds - so the last one is kept (a thin window's search walks
+  // every depth below the full one).
+  const memo = math.cache.cycle;
+  if (memo && memo.ram === ramBudget && memo.lastLanding === schedule.lastLanding
+    && memo.launchInterval === schedule.launchInterval && memo.maxDepth === maxDepth && memo.keepDepth === keepDepth) {
+    return { schedule, cycle: memo.cycle };
+  }
   const cycle = B.planCycle({
     totalRam: ramBudget,
     lastLanding: schedule.lastLanding,
     launchInterval: schedule.launchInterval,
-    maxDepth: H.maxDepth,
+    maxDepth,
     maxThreads: math.maxThreads,
     planFor: math.plan,
+    keepDepth,
   });
+  math.cache.cycle = {
+    ram: ramBudget, lastLanding: schedule.lastLanding, launchInterval: schedule.launchInterval,
+    maxDepth, keepDepth, cycle,
+  };
   return { schedule, cycle };
 }
 
@@ -613,15 +663,18 @@ function cycleFor(math, ramBudget) {
  * @param {NS} ns @param {Snapshot} snap @param {number} capacity @param {number} now
  * @param {Set<string>} incumbents targets with batches in flight or a prep under way
  */
-function rankTargets(ns, snap, capacity, now, incumbents) {
+function rankTargets(ns, snap, capacity, now, incumbents, flying, wishes = null) {
   const stale = now - _rank.at >= H.targetRescoreMs
-    || Math.abs(capacity - _rank.ram) > _rank.ram * 0.5;
+    || Math.abs(capacity - _rank.ram) > _rank.ram * 0.5
+    || !!wishes !== _rank.pushing;
   if (_rank.list.length && !stale) return _rank.list;
 
   _planCache.clear();
   const curves = [];
   /** @type {Map<string, number>} what each target's income per GB is multiplied by */
   const weight = new Map();
+  /** @type {Map<string, {maxMoney: number, m: TargetMath, schedule: any}>} */
+  const cands = new Map();
   for (const server of snap.rooted) {
     if (server.startsWith(H.excludeTargetPrefix)) continue;
     const maxMoney = ns.getServerMaxMoney(server);
@@ -641,21 +694,212 @@ function rankTargets(ns, snap, capacity, now, incumbents) {
     });
     if (!points.length) continue;
     // The smallest thing this target can run at all: a single one-thread batch.
-    curves.push({ key: server, points, minRam: m.plan(1)?.ram ?? Infinity });
+    curves.push({ key: server, points, minRam: m.plan(1)?.nominalRam ?? Infinity });
     weight.set(server, incumbents.has(server)
       ? 1 + H.targetStickiness
       : B.prepDiscount(prepEstimateMs(ns, server, m, capacity), H.prepHorizonMs));
+    cands.set(server, { maxMoney, m, schedule });
+  }
+  const bonus = key => weight.get(key) ?? 1;
+
+  let list;
+  let deep = false;
+  if (wishes) {
+    list = rankForStocks(ns, capacity, cands, weight, wishes);
+  } else {
+    list = B.allocateRam({
+      totalRam: capacity,
+      curves,
+      maxTargets: H.maxTargets,
+      minTargetRam: H.minTargetRam,
+      bonus,
+    }).map(a => ({ target: a.key, score: a.income, ram: a.ram }));
+    // Ready to batch: batches of ours already landing on it, or prepped and
+    // untouched (a mark-down of exactly 1 - see prepDiscount).
+    const chosen = deepen(list, capacity, cands, bonus, target => flying.has(target) || weight.get(target) === 1);
+    list = chosen.list;
+    deep = chosen.deep;
+  }
+  _rank = { at: now, ram: capacity, list, pushing: !!wishes, deep };
+  return list;
+}
+
+// ── BitNode 8: the trader's stocks first, then hacking exp ───────────────────
+//
+// A script hack pays nothing there (ScriptHackMoneyGain 0), and the manager
+// cannot see that: nothing it reads carries the multiplier, so it would go on
+// ranking by an income that is not being paid - batching, and earning hacking
+// exp, on whichever servers would have been rich elsewhere. What it CAN see is
+// the trader (lib/stocks.js), which in that node publishes its wish list with
+// `prefer` set. While that list is fresh the ranking has two other objectives
+// (lib/batch-logic.js, "When money is not the point"):
+//
+//   1. The wished servers that are in reach, each valued by the share of its
+//      max money a window cycles per millisecond - which is what moves its
+//      stock's forecast, the workers flagging the leg that pushes the wished
+//      way - weighted by its place in the list. They are allocated FIRST, as
+//      much RAM as their windows hold.
+//   2. Everything else (and the wished servers that got nothing), valued by
+//      hacking exp per millisecond, with the RAM that is left. One target slot
+//      is kept for this (hacking.stockPush.expSlots), so a fleet the wished
+//      servers cannot fill is not left idle.
+//
+// The moment the list goes stale, or `prefer` is off (every other BitNode), the
+// income ranking above is the only one that runs.
+
+/**
+ * @param {NS} ns @param {number} capacity
+ * @param {Map<string, {maxMoney: number, m: TargetMath, schedule: any}>} cands
+ * @param {Map<string, number>} weight the incumbents' edge / prep mark-down, per target
+ * @param {Map<string, number>} wishes batch-logic preferredWishes
+ */
+function rankForStocks(ns, capacity, cands, weight, wishes) {
+  const pushCurves = [];
+  const expCurves = new Map();
+  for (const [server, c] of cands) {
+    // (Not called `window`: the game bills that identifier 25GB.)
+    const shape = {
+      hackChance: c.m.hackChance,
+      lastLanding: c.schedule.lastLanding,
+      launchInterval: c.schedule.launchInterval,
+      maxDepth: H.maxDepth,
+      maxThreads: c.m.maxThreads,
+      planFor: c.m.plan,
+    };
+    const minRam = c.m.plan(1)?.nominalRam ?? Infinity;
+    if (wishes.has(server)) {
+      const points = B.incomeCurve({ ...shape, maxMoney: 1 });
+      if (points.length) pushCurves.push({ key: server, points, minRam });
+    }
+    const points = B.expCurve({ ...shape, minSecurity: ns.getServerMinSecurityLevel(server) });
+    if (points.length) expCurves.set(server, { key: server, points, minRam });
   }
 
-  const list = B.allocateRam({
+  const pushSlots = Math.max(1, H.maxTargets - H.stockPush.expSlots);
+  const pushed = B.allocateRam({
     totalRam: capacity,
-    curves,
-    maxTargets: H.maxTargets,
+    curves: pushCurves,
+    maxTargets: pushSlots,
+    minTargetRam: H.minTargetRam,
+    bonus: key => (weight.get(key) ?? 1) * (wishes.get(key) ?? 0),
+  }).sort((a, b) => (wishes.get(b.key) ?? 0) - (wishes.get(a.key) ?? 0));
+  for (const a of pushed) expCurves.delete(a.key);
+
+  const trained = B.allocateRam({
+    totalRam: capacity - pushed.reduce((sum, a) => sum + a.ram, 0),
+    curves: [...expCurves.values()],
+    maxTargets: H.maxTargets - pushed.length,
     minTargetRam: H.minTargetRam,
     bonus: key => weight.get(key) ?? 1,
+  });
+  // score: forecast cycled / exp landed per ms, NOT dollars - `objective` says which.
+  return [
+    ...pushed.map(a => ({ target: a.key, score: a.income, ram: a.ram, objective: "stock" })),
+    ...trained.map(a => ({ target: a.key, score: a.income, ram: a.ram, objective: "exp" })),
+  ];
+}
+
+// ── Late game: deeper windows, within a budget of processes ──────────────────
+//
+// maxDepth 60 x maxTargets 6 is 1,440 worker processes and, on a fleet that has
+// outgrown its targets, most of the botnet idle: 26 x 1PB used 5% of its RAM,
+// and a 26 x 16TB fleet that used all of it still spread it over five targets
+// at 60 deep where two of them at 240 pay nearly twice as much. Depth is what a
+// big fleet is short of - a slot in the best target's window is worth more than
+// one in the sixth-best's - and what depth costs is processes, not RAM. So when
+// the plan with deeper windows (hacking.adaptive.maxDepth / maxTargets) is
+// predicted to out-earn the default one by enough to be worth the churn, it is
+// used instead, trimmed best earner first to hacking.adaptive.maxProcesses
+// (batch-logic capProcesses). On a fleet whose windows are thin anyway the two
+// plans are the same plan, and nothing changes.
+
+/**
+ * What a ranked list would really run: each target's cycle on its share, with
+ * its window `depthCap` deep at most, held to the process budget.
+ * @param {{target: string, score: number, ram: number}[]} list
+ * @param {Map<string, {maxMoney: number, m: TargetMath, schedule: any}>} cands
+ */
+function windowsFor(list, cands, depthCap) {
+  const windows = [];
+  for (const entry of list) {
+    const c = cands.get(entry.target);
+    if (!c) continue;
+    const cycle = B.planCycle({
+      totalRam: entry.ram,
+      lastLanding: c.schedule.lastLanding,
+      launchInterval: c.schedule.launchInterval,
+      maxDepth: depthCap,
+      maxThreads: c.m.maxThreads,
+      planFor: c.m.plan,
+    });
+    if (!cycle) continue;
+    // A thin window launches `depth` batches per weaken-time, not one an interval.
+    const interval = Math.max(cycle.launchInterval, c.schedule.lastLanding / cycle.depth);
+    windows.push({
+      ...entry,
+      depth: cycle.depth,
+      planned: cycle.depth,
+      income: (B.stolenAt(cycle.plan, cycle.depth) * c.maxMoney * c.m.hackChance) / interval,
+    });
+  }
+  const capped = B.capProcesses(windows, H.adaptive.maxProcesses);
+  return {
+    income: capped.income,
+    trimmed: capped.trimmed,
+    // A window the budget cut may be no deeper than what it was left; the others
+    // keep the plan's ceiling (their depth is the scheduler's to choose, tick by
+    // tick, as the budget moves).
+    list: capped.kept.map(w => ({
+      target: w.target, score: w.score, ram: w.ram, depth: w.depth < w.planned ? w.depth : depthCap,
+    })),
+  };
+}
+
+/**
+ * The ranked list to use: `list` (the default caps) or, when it is predicted to
+ * earn hacking.adaptive.minGain more, the one planned with deeper windows on
+ * up to hacking.adaptive.maxTargets targets - each entry then carries the depth
+ * its window may have.
+ *
+ * The deep plan is only ADOPTED on targets that are ready to batch (`ready`):
+ * it puts the fleet on fewer servers, and from a cold start that meant waiting
+ * on two long preps where the default plan had four going and the quick ones
+ * already paying (-55% over the first hour on 26 x 16TB, for +30% afterwards).
+ * Once in force it is kept until the default one would do as well, so the two
+ * do not trade places on a rounding error or on one target's re-prep.
+ * @param {(target: string) => boolean} ready
+ */
+function deepen(list, capacity, cands, bonus, ready) {
+  const A = H.adaptive;
+  if (!A?.enabled || !list.length) return { deep: false, list };
+  const depthCap = Math.max(H.maxDepth, A.maxDepth);
+  const targetCap = Math.max(H.maxTargets, A.maxTargets);
+  const plain = windowsFor(list, cands, H.maxDepth);
+
+  const curves = [];
+  for (const [server, c] of cands) {
+    const points = B.incomeCurve({
+      maxMoney: c.maxMoney,
+      hackChance: c.m.hackChance,
+      lastLanding: c.schedule.lastLanding,
+      launchInterval: c.schedule.launchInterval,
+      maxDepth: depthCap,
+      maxThreads: c.m.maxThreads,
+      planFor: c.m.plan,
+    });
+    if (points.length) curves.push({ key: server, points, minRam: c.m.plan(1)?.nominalRam ?? Infinity });
+  }
+  const deepList = B.allocateRam({
+    totalRam: capacity, curves, maxTargets: targetCap, minTargetRam: H.minTargetRam, bonus,
   }).map(a => ({ target: a.key, score: a.income, ram: a.ram }));
-  _rank = { at: now, ram: capacity, list };
-  return list;
+  const deep = windowsFor(deepList, cands, depthCap);
+
+  const better = _rank.deep
+    ? deep.income >= plain.income
+    : deep.income > plain.income * (1 + A.minGain) && deep.list.every(e => ready(e.target));
+  // (The default plan too is held to the process budget, should that be set
+  // below what six windows of sixty take; untrimmed it is returned as it came.)
+  return { deep: better, list: better ? deep.list : plain.trimmed ? plain.list : list };
 }
 
 // ── Launching ────────────────────────────────────────────────────────────────
@@ -728,52 +972,107 @@ function launchPrep(ns, snap, target, state, math, ramCap, now) {
 }
 
 /**
- * Launch one batch of `cycle.plan` against `target`, entirely or not at all.
- * Returns the in-flight record, or null if it didn't fit / launch.
- * @param {NS} ns @param {Snapshot} snap @param {string} target
- * @param {any} cycle @param {ReturnType<typeof B.landingDelays>} timing
- * @param {number} minSecurity the target's @param {number} id @param {number} now
+ * Where the four legs of `plan` would go on the hosts as they are right now.
+ * @param {NS} ns @param {Snapshot} snap @param {any} plan
+ * @param {{hack: number, weaken1: number, grow: number, weaken2: number}} d leg delays
+ * @param {number} minSecurity the target's
  */
-function launchBatch(ns, snap, target, cycle, timing, minSecurity, id, now) {
-  const plan = cycle.plan;
-  // Delays from the CURRENT leg times (lib/batch-logic.js landingDelays), so each
-  // leg lands on its slot whatever the target's security is right now.
-  const d = timing.delays;
-
+function placeBatch(ns, snap, plan, d, minSecurity) {
   // The grow should go whole onto one host (batch-logic allocate does that when
   // it can). When no host has the room it gets split, and a split grow lands
   // weaker than planned - so that batch carries extra grow threads, and the
-  // weaken to cover them (splitGrowPadding).
+  // weaken to cover them (splitGrowPadding). A plan that already knew no host
+  // could ever hold its grow (plan.split) was sized with them.
   let growThreads = plan.growThreads;
   let weaken2Threads = plan.weaken2Threads;
-  if (!snap.workers.some(w => Math.floor(w.free / RAM.grow) >= growThreads)) {
+  if (!plan.split && !snap.workers.some(w => Math.floor(w.free / RAM.grow) >= growThreads)) {
     const padded = B.splitGrowPadding({
       growThreads, minSecurity, securityPerGrow: H.securityPerGrow, weakenAmount: weakenAmount(ns),
     });
     growThreads = padded.growThreads;
     weaken2Threads = Math.max(weaken2Threads, padded.weaken2Threads);
   }
-  const extraGrow = growThreads - plan.growThreads;
-  const extraRam = extraGrow * RAM.grow + (weaken2Threads - plan.weaken2Threads) * RAM.weaken;
-
   // PLACEMENT order, not landing order (the delays decide that): the grow first,
   // while the hosts are at their roomiest; the weakens, which split harmlessly,
-  // take what is left.
+  // take what is left. A grow no host could ever hold gives the hack first pick
+  // instead: a split hack takes less than it was sized for (each part takes its
+  // share of what the parts before it left - batch-logic stolenAt), and that
+  // grow was planned split, padding and all. (Not a grow that merely finds no
+  // room this tick: placed first it usually fails the batch, the launch waits
+  // a tick or two for a host to clear, and the grow goes out whole after all.)
+  const growLeg = { script: GROW, threads: growThreads, ram: RAM.grow, delay: d.grow };
+  const hackLeg = { script: HACK, threads: plan.hackThreads, ram: RAM.hack, delay: d.hack };
   const legs = [
-    { script: GROW, threads: growThreads, ram: RAM.grow, delay: d.grow },
-    { script: HACK, threads: plan.hackThreads, ram: RAM.hack, delay: d.hack },
+    ...(plan.split ? [hackLeg, growLeg] : [growLeg, hackLeg]),
     { script: WEAKEN, threads: plan.weaken1Threads, ram: RAM.weaken, delay: d.weaken1 },
     { script: WEAKEN, threads: weaken2Threads, ram: RAM.weaken, delay: d.weaken2 },
   ];
-  const alloc = B.allocate(snap.workers, legs);
+  return { plan, growThreads, weaken2Threads, alloc: B.allocate(snap.workers, legs) };
+}
+
+/**
+ * Launch one batch of `cycle.plan` against `target`, entirely or not at all.
+ * Returns the in-flight record, or null if it didn't fit / launch.
+ * @param {NS} ns @param {Snapshot} snap @param {string} target
+ * @param {any} cycle @param {ReturnType<typeof B.landingDelays>} timing
+ * @param {number} minSecurity the target's @param {number} id @param {number} now
+ * @param {TargetMath | null} math the target's, when a batch smaller than the
+ *        plan may be launched if the plan does not fit; null to wait instead
+ */
+function launchBatch(ns, snap, target, cycle, timing, minSecurity, id, now, math) {
+  // Delays from the CURRENT leg times (lib/batch-logic.js landingDelays), so each
+  // leg lands on its slot whatever the target's security is right now.
+  const d = timing.delays;
+
+  let placed = placeBatch(ns, snap, cycle.plan, d, minSecurity);
+  const least = Math.ceil(cycle.plan.hackThreads * H.fitShrinkFloor);
+  if (!placed.alloc.ok && math && least < cycle.plan.hackThreads
+    && snap.totalUsable >= cycle.plan.ram * H.fitShrinkFloor) {
+    // Most of the room is there and the batch still does not go, because a host
+    // holds WHOLE threads and the plan was sized against a pool of gigabytes:
+    // three 16GB servers are 27 threads, not 48GB (0.25GB is stranded on each),
+    // a leg split across hosts strands a sliver on every one of them, and a
+    // grow that finds no host to take it whole needs padding nobody budgeted.
+    // Waiting changes none of that - every batch that lands is replaced by one
+    // the same size - so the slot stayed empty for good: a 56GB fleet of
+    // 24 + 16 + 16 planned one 55.1GB batch (32 threads, room for 31) and sat on
+    // "Waiting for RAM (fragmented)" with a prepped target and an idle fleet;
+    // one planned for three batches flew two. This window takes the fattest
+    // batch the hosts can place as they are instead, down to fitShrinkFloor of
+    // the plan; below that the RAM is simply busy (a prep, a share ramp) and the
+    // launch waits for it as before. (The caller withholds `math` from a full,
+    // rolling window - one of its batches lands within a launch interval or two
+    // and the next launch gets that room - where squeezing a part-batch into
+    // the slivers just meant a third more processes for the same income.)
+    let lo = least - 1;
+    let hi = cycle.plan.hackThreads - 1;
+    let found = null;
+    while (lo < hi) {
+      const mid = Math.ceil((lo + hi) / 2);
+      const plan = math.plan(mid);
+      const smaller = plan ? placeBatch(ns, snap, plan, d, minSecurity) : null;
+      if (smaller?.alloc.ok) {
+        lo = mid;
+        found = smaller;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    if (found) placed = found;
+  }
+  const { plan, alloc } = placed;
   if (!alloc.ok) return null;
   if (!execAll(ns, alloc.assignments, target, `batch-${id}`)) return null;
   applyAllocation(snap, alloc);
 
+  const extraGrow = placed.growThreads - plan.growThreads;
+  const extraRam = extraGrow * RAM.grow + (placed.weaken2Threads - plan.weaken2Threads) * RAM.weaken;
   return {
     target,
     id,
     ram: plan.ram + extraRam,
+    processes: alloc.assignments.length,
+    depth: cycle.depth,
     moneyFraction: plan.hackedFraction,
     securityAdded: plan.securityAdded + extraGrow * H.securityPerGrow,
     launchedAt: now,
@@ -797,6 +1096,7 @@ function killOldHackScripts(ns) {
 export function newSchedulerState() {
   return {
     inFlight: /** @type {any[]} */ ([]),  // batches whose legs haven't all landed (any target)
+    processes: 0,                          // worker processes those batches were launched as
     prepUntil: new Map(),                  // target -> time its prep legs will have landed
     nextWindowAt: new Map(),               // target -> when its next batch's first leg is due to LAND
     draining: new Set(),                   // targets latched in a drift drain (no launches until empty)
@@ -818,9 +1118,10 @@ export function resetCaches() {
   _netServers = [];
   _rootAt = 0;
   _copied.clear();
-  _rank = { at: 0, ram: 0, list: [] };
+  _rank = { at: 0, ram: 0, list: [], pushing: false, deep: false };
   _planCache.clear();
   _growMult = 1;
+  _hosts = { rooms: [], key: 0 };
   _lastShareHosts = "";
   _shareHosts.clear();
   _shareSweepAt = -Infinity;
@@ -857,12 +1158,14 @@ function readWorkerRam(ns) {
  * @param {Snapshot} snap @param {string} target
  * @param {number} budgetRam the RAM its batches may hold @param {number} now
  * @param {number} [prepRam] the RAM a prep pass may use (defaults to the budget)
+ * @param {number} [maxDepth] how deep its window may be (see cycleFor)
  */
-function serviceTarget(ns, s, snap, target, budgetRam, now, prepRam = budgetRam) {
+function serviceTarget(ns, s, snap, target, budgetRam, now, prepRam = budgetRam, maxDepth = H.maxDepth) {
   const math = targetMath(ns, target);
   const state = readTarget(ns, target);
   const open = s.inFlight.filter(b => b.target === target);
-  const { schedule, cycle } = cycleFor(math, budgetRam);
+  // (The depth of the window in flight is what the last batch was launched into.)
+  const { schedule, cycle } = cycleFor(math, budgetRam, open.length ? open[open.length - 1].depth : 0, maxDepth);
 
   // Drift: is the target worse off than its own open batches can explain? Once
   // it is, it stays "draining" until nothing of ours is in flight (stillDraining).
@@ -900,7 +1203,8 @@ function serviceTarget(ns, s, snap, target, budgetRam, now, prepRam = budgetRam)
     mode = "Draining (drift)";
   } else if (!cycle) {
     mode = "Waiting for RAM";
-  } else if (open.length < cycle.depth && now >= (s.nextWindowAt.get(target) ?? 0) - schedule.firstLanding - H.launchLeadMs) {
+  } else if (open.length < cycle.depth && s.processes + 4 <= H.adaptive.maxProcesses
+    && now >= (s.nextWindowAt.get(target) ?? 0) - schedule.firstLanding - H.launchLeadMs) {
     // Each batch owns a LANDING window; windows are launchInterval apart, which
     // is what keeps one batch's legs from interleaving with the next's. The
     // launch itself can happen any time early enough to reach the window, so it
@@ -914,12 +1218,17 @@ function serviceTarget(ns, s, snap, target, budgetRam, now, prepRam = budgetRam)
     // for that while the lead lasts; after it, take the slip.
     const raised = cur.weakenTime - math.times.weakenTime > H.batchSpacingMs / 4;
     const waitForCalm = timing.slip > 1 && raised && now < windowAt - schedule.firstLanding + H.launchLeadMs;
-    const batch = waitForCalm ? null : launchBatch(ns, snap, target, cycle, timing, state.minSecurity, s.batchId, now);
+    // (See launchBatch: only a window that is not about to free a batch's worth
+    // of RAM by itself takes a smaller batch than planned.)
+    let rolling = false;
+    for (const b of open) if (b.doneAt - now <= cycle.launchInterval * 2) rolling = true;
+    const batch = waitForCalm ? null : launchBatch(ns, snap, target, cycle, timing, state.minSecurity, s.batchId, now, rolling ? null : math);
     if (waitForCalm) {
       mode = "Batching";
     } else if (batch) {
       s.batchId++;
       s.inFlight.push(batch);
+      s.processes += batch.processes;
       s.nextWindowAt.set(target, timing.base + cycle.launchInterval);
       mode = "Batching";
     } else {
@@ -933,7 +1242,8 @@ function serviceTarget(ns, s, snap, target, budgetRam, now, prepRam = budgetRam)
 
   return {
     target, mode, cycle, math, state, open,
-    claim: cycle ? cycle.depth * cycle.plan.ram : 0,
+    claim: cycle ? cycle.depth * B.costAt(cycle.plan, cycle.depth) : 0,
+    objective: /** @type {string | undefined} */ (undefined),
   };
 }
 
@@ -947,6 +1257,7 @@ function serviceTarget(ns, s, snap, target, budgetRam, now, prepRam = budgetRam)
 export function step(ns, s, now) {
   const snap = buildSnapshot(ns, now);
   _growMult = ns.getPlayer().mults?.hacking_grow ?? 1;
+  _hosts = snap.hosts;
 
   // Share is an optional side mode and must NEVER be able to stop the core
   // hacking loop (e.g. a stale config on a runner). On error, log and keep going.
@@ -959,6 +1270,10 @@ export function step(ns, s, now) {
   }
 
   s.inFlight = B.pruneInFlight(s.inFlight, now);
+  // The hard cap on worker processes (hacking.adaptive.maxProcesses) counts the
+  // batches in flight; a prep's handful of legs are not batches and not counted.
+  s.processes = 0;
+  for (const b of s.inFlight) s.processes += b.processes;
 
   // What the botnet can plan with right now: RAM free this tick plus what our own
   // in-flight batches are holding (they release it as they land). Ranking uses
@@ -969,9 +1284,14 @@ export function step(ns, s, now) {
   const budgetRam = Math.min(snap.capacity, snap.totalUsable + s.inFlight.reduce((sum, b) => sum + b.ram, 0));
 
   // Targets we are committed to: batches in flight, or a prep whose legs are out.
-  const incumbents = new Set(s.inFlight.map(b => b.target));
+  const flying = new Set(s.inFlight.map(b => b.target));
+  const incumbents = new Set(flying);
   for (const [target, until] of s.prepUntil) if (until > now) incumbents.add(target);
-  const ranked = rankTargets(ns, snap, snap.capacity, now, incumbents);
+  // The trader's wish list, when it asks to be worked ahead of income (BN8).
+  const wishes = H.stockPush.enabled
+    ? B.preferredWishes(globalThis.gordStockWishes, now, H.stockPush.maxAgeMs, H.stockPush.rankDecay)
+    : null;
+  const ranked = rankTargets(ns, snap, snap.capacity, now, incumbents, flying, wishes);
   if (!ranked.length) {
     // No rooted server scored anything: nothing can carry even the smallest
     // batch (a fresh node, or the fleet just vanished with an aug install), or
@@ -1018,14 +1338,17 @@ export function step(ns, s, now) {
   const coldStart = s.inFlight.length === 0;
   const serviced = [];
   let claimed = 0;
-  for (const { target, ram } of ranked) {
-    if (serviced.length >= H.maxTargets) break;
+  // (The late-game plan may list more targets than maxTargets - see deepen.)
+  const maxServiced = Math.max(H.maxTargets, ranked.length);
+  for (const { target, ram, depth, objective } of ranked) {
+    if (serviced.length >= maxServiced) break;
     const left = budgetRam - claimed;
     // The primary always gets serviced, however little RAM there is; opening a
     // further target is only worth it above minTargetRam.
     if (serviced.length > 0 && left < H.minTargetRam) break;
     const budget = Math.min(ram * scale, left);
-    const res = serviceTarget(ns, s, snap, target, budget, now, coldStart ? left : budget);
+    const res = serviceTarget(ns, s, snap, target, budget, now, coldStart ? left : budget, depth);
+    res.objective = objective;
     serviced.push(res);
     if (res.cycle) {
       claimed += res.claim;
@@ -1086,7 +1409,13 @@ export function step(ns, s, now) {
       depth: r.cycle?.depth ?? 0,
       fraction: r.cycle?.plan.hackedFraction ?? 0,
       ram: r.claim,
+      // "stock" / "exp" while the trader's wish list is being worked (BN8).
+      ...(r.objective ? { objective: r.objective } : null),
     })),
+    // True while the ranking is for the trader's stocks and hacking exp rather
+    // than income: `score` is then not dollars (see rankForStocks).
+    stockPush: _rank.pushing,
+    processes: s.processes,
     claimedRam: claimed,
     capacityRam: snap.capacity,
     freeRam: snap.totalUsable,

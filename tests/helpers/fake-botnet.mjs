@@ -59,12 +59,12 @@ export function makeWorld(opts = {}) {
     pid: 1,
     jobs: /** @type {any[]} */ ([]),
     servers: {
-      home: { maxRam: 64, used: 0 },
+      home: { maxRam: opts.homeRam ?? 64, used: 0 },
       w1: { maxRam: opts.w1Ram ?? 256, used: 0 },
       w2: { maxRam: opts.w2Ram ?? 128, used: 0 },
       // reqHack 20 makes a leg 5% longer per point of security at t1's minimum
       // (2.5*20 / (2.5*20*10 + 500)) - a mid-game server's sensitivity.
-      t1: { maxRam: 0, maxMoney: 1e9, minSec: 10, sec: opts.t1Sec ?? 10, money: opts.t1Money ?? 1e9, reqHack: 20, growth: 50 },
+      t1: { maxRam: 0, maxMoney: 1e9, minSec: 10, sec: opts.t1Sec ?? 10, money: opts.t1Money ?? 1e9, reqHack: 20, growth: 50, speed: opts.t1Speed },
       t2: { maxRam: 0, maxMoney: 4e8, minSec: 20, sec: 40, money: 4e8 * 0.04, reqHack: 20, growth: 30 },
       // opts.tinyCount adds N n00dles-alikes: little money, but legs land in a
       // twentieth of the time and one hack thread takes 20x the bite - the
@@ -79,6 +79,10 @@ export function makeWorld(opts = {}) {
     // a Stanek charge or an IPvGO bonus moves it under a running manager.
     growMult: 1,
     stolen: 0,
+    // Hacking exp landed, and the expected move of each server's stock forecast
+    // (second-order, in the game's points) from legs flagged { stock: true }.
+    exp: 0,
+    pushes: /** @type {Record<string, number>} */ ({}),
     execFailures: 0,
     // Every process ns.kill() took down, so a scenario can assert that nothing
     // killed the botnet's own legs.
@@ -146,13 +150,33 @@ export function makeWorld(opts = {}) {
       s.money -= stolen;
       world.stolen += stolen;
       s.sec += 0.002 * job.threads;
+      // { stock: true }: the game lowers the stock's second-order forecast by 0.1
+      // with probability (money taken) / (max money) - the expectation here.
+      if (job.stock) push(job.target, -0.1 * stolen / s.maxMoney);
     } else if (job.script === "/hacking/grow.js") {
+      const before = s.money;
       s.money = Math.min(s.maxMoney, Math.max(s.money, 1) * Math.exp(growRate(s) * job.threads));
       s.sec += 0.004 * job.threads;
+      // ...and raises it by the money a flagged grow actually ADDED (nothing, on
+      // a full server).
+      if (job.stock) push(job.target, 0.1 * (s.money - before) / s.maxMoney);
     } else {
       s.sec = Math.max(s.minSec, s.sec - weakenPerThread * job.threads);
     }
+    // Hacking exp: every landed thread, 3 + 0.3 x base security (base = 3 x min).
+    world.exp += job.threads * (3 + 0.9 * s.minSec);
   }
+  const push = (name, by) => { world.pushes[name] = (world.pushes[name] ?? 0) + by; };
+  // What the real workers decide when they start (hacking/hack.js, grow.js): a
+  // hack carries { stock: true } for a server in `down`, a grow for one in `up`,
+  // while the wish list is under two minutes old.
+  const stockFlag = (script, tgt) => {
+    const wishes = globalThis.gordStockWishes;
+    if (!wishes || !(world.clock - wishes.updatedAt < 120_000)) return false;
+    if (script === "/hacking/hack.js") return (wishes.down ?? []).includes(tgt);
+    if (script === "/hacking/grow.js") return (wishes.up ?? []).includes(tgt);
+    return false;
+  };
 
   /** Advance the fake clock, starting and landing jobs in time order. */
   function advance(ms) {
@@ -253,7 +277,7 @@ export function makeWorld(opts = {}) {
       // The workers pass the delay to the game as additionalMsec, so the action
       // STARTS at exec and its duration locks at the security of this moment.
       const landAt = world.clock + delay + durationFor(script, target(tgt));
-      world.jobs.push({ pid: world.pid, script, host, threads, target: tgt, tag, ram, startAt: world.clock, landAt });
+      world.jobs.push({ pid: world.pid, script, host, threads, target: tgt, tag, ram, startAt: world.clock, landAt, stock: stockFlag(script, tgt) });
       return world.pid++;
     },
     getPlayer: () => ({ money: 0, skills: { hacking: 100 }, mults: { hacking_grow: world.growMult } }),
@@ -297,7 +321,17 @@ function freshState() {
   delete globalThis.gordReservedHosts;
   delete globalThis.gordReservedRam;
   delete globalThis.gordState;
+  delete globalThis.gordStockWishes;
   return newSchedulerState();
+}
+
+/**
+ * Publish a stock wish list the way lib/stocks.js does, stamped with the fake
+ * clock (the manager is handed that clock as `now`).
+ * @param {any} world @param {{up?: string[], down?: string[], prefer?: boolean}} wishes
+ */
+function publishWishes(world, wishes) {
+  globalThis.gordStockWishes = { up: [], down: [], prefer: false, ...wishes, updatedAt: world.clock };
 }
 
 /** Drive step() for `ms` of fake time. Returns the scheduler state and per-tick modes. */
@@ -305,13 +339,15 @@ export function run(world, ns, advance, ms) {
   const s = freshState();
   const modes = [];
   let inFlightMax = 0;
+  let processMax = 0;
   const ticks = Math.floor(ms / H.batchSpacingMs);
   for (let i = 0; i < ticks; i++) {
     modes.push(step(ns, s, world.clock));
     inFlightMax = Math.max(inFlightMax, globalThis.gordHackState.inFlight);
+    processMax = Math.max(processMax, world.jobs.length);
     advance(H.batchSpacingMs);
   }
-  return { s, modes, inFlightMax, state: globalThis.gordHackState };
+  return { s, modes, inFlightMax, processMax, state: globalThis.gordHackState };
 }
 
 /** The "[prep] target: ... sec S/min money M%" log lines, parsed, in order. */
@@ -469,19 +505,25 @@ export function defineScenarios(test, assert, base = {}) {
     // and the old single-target scheduler therefore left most of a 16TB fleet
     // idle. Same world, same RAM, maxTargets 1 vs the configured value.
     const worldOpts = { ...base, tinyCount: 5, onlyTiny: true, w1Ram: 8192, w2Ram: 8192 };
-    const measure = (maxTargets) => {
+    // (The late-game plan is switched off for the single-target run: it exists
+    // to open more windows than maxTargets when that pays, which is this very
+    // spill - see the "late game" scenario for it.)
+    const measure = (maxTargets, adaptive = true) => {
       const saved = H.maxTargets;
+      const savedAdaptive = H.adaptive.enabled;
       H.maxTargets = maxTargets;
+      H.adaptive.enabled = adaptive;
       try {
         const { world, ns, advance } = makeWorld(worldOpts);
         const sim = run(world, ns, advance, 4 * 60_000);
         return { world, sim, hosts: busyHosts(world), used: usedRam(world) };
       } finally {
         H.maxTargets = saved;
+        H.adaptive.enabled = savedAdaptive;
       }
     };
 
-    const one = measure(1);
+    const one = measure(1, false);
     const many = measure(H.maxTargets);
 
     assert.ok(many.sim.state.targets.length >= 3,
@@ -595,7 +637,9 @@ export function defineScenarios(test, assert, base = {}) {
     assert.ok(world.log.some(l => /^\[prep\] t1: weaken x\d+, grow x[1-9]/.test(l)),
       `the prep carried no grow: ${world.log.filter(l => l.startsWith("[prep] t1")).join(" | ")}`);
     const t1 = world.hackLandings.filter(h => h.target === "t1");
-    assert.ok(t1.length > 20, "hacks actually landed");
+    // (A thin window of a few fat batches: a dozen landings in the three minutes
+    // after the prep, not the two dozen the efficient-size batches made.)
+    assert.ok(t1.length >= 8, `hacks actually landed (${t1.length})`);
     for (const h of t1) {
       assert.ok(h.moneyFrac >= 0.995 && h.secOver <= 0.01,
         `hack at t=${h.t} landed at ${(h.moneyFrac * 100).toFixed(1)}% money, +${h.secOver.toFixed(2)} security`);
@@ -702,6 +746,204 @@ export function defineScenarios(test, assert, base = {}) {
     assert.ok(s.batchId > launched, "no batch was launched after the change");
     const after = lastBatchGrow();
     assert.ok(after >= before * 1.8, `grow per hack thread ${before.toFixed(2)} -> ${after.toFixed(2)}: the plan was not re-made`);
+  });
+
+  test("REGRESSION: a fleet of small hosts launches the batch that fits them, not none at all" + label, () => {
+    // 20 + 16 + 16GB of room is 52GB and 29 worker threads (a host holds whole
+    // threads: 11 + 9 + 9, with a sliver stranded on each). The plan is sized
+    // against the gigabytes, comes to a batch a thread too big for the hosts,
+    // and used to be retried unchanged every tick for good: "Waiting for RAM
+    // (fragmented)" on a prepped target with the whole fleet idle - zero hacks
+    // in this very scenario. The launch now takes the fattest batch the hosts
+    // can actually place.
+    const { world, ns, advance } = makeWorld({ ...base, homeRam: 28, w1Ram: 16, w2Ram: 16 });
+    const sim = run(world, ns, advance, 6 * 60_000);
+
+    assert.ok(world.hackLandings.length >= 5, `only ${world.hackLandings.length} hacks landed in six minutes`);
+    assert.ok(world.stolen > 0);
+    const stuck = sim.modes.filter(m => m.startsWith("Waiting for RAM")).length;
+    assert.ok(stuck < sim.modes.length * 0.05, `${stuck} of ${sim.modes.length} ticks waiting for RAM`);
+    assert.equal(world.execFailures, 0, "exec was asked for more RAM than a host had");
+    for (const h of world.hackLandings) {
+      assert.ok(h.moneyFrac >= 0.995 && h.secOver <= 0.01, `hack at t=${h.t} landed unprepped`);
+    }
+    assert.equal(sim.modes.filter(m => m.startsWith("Draining")).length, 0);
+  });
+
+  test("a thin window fills a small fleet: depth and bite are chosen together" + label, () => {
+    // 88GB (56 on home + 16 + 16) cannot carry a full window on t1. The window
+    // used to be a whole number of "efficient" batches and whatever RAM that
+    // left over stayed idle - ONE batch of 56GB here, 64% of the fleet; it is
+    // now the depth x bite that steals most, sized to the hack thread.
+    const { world, ns, advance } = makeWorld({ ...base, w1Ram: 16, w2Ram: 16 });
+    const s = freshState();
+    let used = 0;
+    let samples = 0;
+    for (let i = 0; i < 6 * 300; i++) {
+      step(ns, s, world.clock);
+      if (i >= 300) { used += usedRam(world); samples++; }
+      advance(H.batchSpacingMs);
+    }
+    const capacity = globalThis.gordHackState.capacityRam;
+    assert.ok(used / samples >= capacity * 0.85,
+      `${(used / samples).toFixed(0)}GB of ${capacity.toFixed(0)}GB in use on average`);
+    assert.equal(world.execFailures, 0);
+    for (const h of world.hackLandings) {
+      assert.ok(h.moneyFrac >= 0.995 && h.secOver <= 0.01, `hack at t=${h.t} landed unprepped`);
+    }
+  });
+
+  test("a stock wish list that does not ask to be preferred (or is stale) changes nothing" + label, () => {
+    // Outside BitNode 8 the trader lists the servers of the positions it holds
+    // with prefer: false - the workers flag their legs, and that is ALL: the
+    // manager must rank, size and launch exactly as it does without the list.
+    const opts = { ...base, tinyCount: 2, w1Ram: 4096, w2Ram: 2048 };
+    const outcome = (publish) => {
+      const { world, ns, advance } = makeWorld(opts);
+      const s = freshState();
+      if (publish) publish(world);
+      for (let i = 0; i < 4 * 300; i++) { step(ns, s, world.clock); advance(H.batchSpacingMs); }
+      const state = globalThis.gordHackState;
+      return {
+        batches: s.batchId, stolen: world.stolen, exp: world.exp,
+        targets: state.targets.map(t => `${t.target}:${t.depth}:${t.fraction}:${t.objective ?? "-"}`).join(","),
+        pushing: state.stockPush,
+      };
+    };
+    const reference = outcome(null);
+    assert.equal(reference.pushing, false);
+
+    assert.deepEqual(outcome(w => publishWishes(w, { up: ["tiny2"], down: ["t2"], prefer: false })), reference);
+    // prefer, but older than two minutes and never refreshed: nobody's wish.
+    assert.deepEqual(outcome(w => { globalThis.gordStockWishes = { up: ["tiny2"], down: [], prefer: true, updatedAt: w.clock - 121_000 }; }), reference);
+    // prefer, with the feature switched off in the config.
+    const saved = H.stockPush.enabled;
+    H.stockPush.enabled = false;
+    try {
+      assert.deepEqual(outcome(w => { globalThis.gordStockWishes = { up: ["tiny2"], down: [], prefer: true, updatedAt: w.clock + 1e9 }; }), reference);
+    } finally {
+      H.stockPush.enabled = saved;
+      delete globalThis.gordStockWishes;
+    }
+  });
+
+  test("BN8: a preferred wish list is worked ahead of income, the rest of the fleet trains hacking exp" + label, () => {
+    // tiny2 is the poorest server on the network. The income ranking serves the
+    // richest first (t1) and tiny2 somewhere behind it; preferred, tiny2 is
+    // worked FIRST, as hard as the caps allow - and what it cannot absorb goes
+    // to the best exp per GB, not to "income".
+    const drive = (opts, wish, minutes, after) => {
+      const { world, ns, advance } = makeWorld(opts);
+      const s = freshState();
+      const modes = [];
+      for (let i = 0; i < minutes * 300; i++) {
+        // The trader republishes every stock tick (6s).
+        if (i % 30 === 0) publishWishes(world, wish);
+        modes.push(step(ns, s, world.clock));
+        advance(H.batchSpacingMs);
+      }
+      const during = { state: globalThis.gordHackState, pushes: { ...world.pushes }, exp: world.exp, landings: world.hackLandings.length };
+      if (after) after({ world, ns, advance, s });
+      return { world, modes, ...during };
+    };
+
+    try {
+      const big = { ...base, tinyCount: 2, w1Ram: 4096, w2Ram: 2048 };
+      const flagged = drive(big, { up: ["tiny2"], prefer: false }, 4);
+      assert.equal(flagged.state.target, "t1", "the income ranking's primary is the richest server");
+      assert.equal(flagged.state.stockPush, false);
+
+      let reverted = null;
+      const pushed = drive(big, { up: ["tiny2"], prefer: true }, 4, ({ world, ns, advance, s }) => {
+        // The trader dies: after two minutes the list is stale, and the next
+        // re-rank is the income ranking again.
+        for (let i = 0; i < 3 * 300; i++) { step(ns, s, world.clock); advance(H.batchSpacingMs); }
+        reverted = globalThis.gordHackState;
+      });
+      const st = pushed.state;
+      assert.equal(st.stockPush, true);
+      assert.equal(st.target, "tiny2", `the wished server should be the primary, got ${st.target}`);
+      assert.equal(st.targets[0].objective, "stock");
+      assert.ok(st.targets[0].depth >= 1 && st.targets[0].fraction >= H.maxHackFraction * 0.9,
+        `the wished server should be cycled as hard as the caps allow, got ${JSON.stringify(st.targets[0])}`);
+      const exp = st.targets.filter(t => t.objective === "exp");
+      assert.ok(exp.length >= 1, "no target was given the exp objective");
+      assert.ok(st.targets.every(t => t.objective === "stock" || t.objective === "exp"));
+      // tiny1 - the shortest legs on the network, so the most exp per GB - is one
+      // of them, though the income ranking's order would be t1 first.
+      assert.ok(exp.some(t => t.target === "tiny1"), `exp targets: ${exp.map(t => t.target).join(", ")}`);
+
+      // The stock moves: every batch's flagged grow restores its bite (0.1 point
+      // per whole max-money cycled) - and no less than when it was only flagged.
+      assert.ok(pushed.pushes.tiny2 > 1, `forecast pushed ${pushed.pushes.tiny2} points in four minutes`);
+      assert.ok(pushed.pushes.tiny2 >= (flagged.pushes.tiny2 ?? 0) * 0.99,
+        `pushed ${flagged.pushes.tiny2} points merely flagged, ${pushed.pushes.tiny2} preferred`);
+      // Hacking exp is not given up for it.
+      assert.ok(pushed.exp >= flagged.exp * 0.9, `exp ${flagged.exp.toFixed(0)} -> ${pushed.exp.toFixed(0)}`);
+      // Correctness is the same scheduler's: every hack on a prepped server.
+      for (const h of pushed.world.hackLandings.filter(x => x.target === "tiny2" || x.target === "tiny1")) {
+        assert.ok(h.moneyFrac >= 0.995 && h.secOver <= 0.01, `hack on ${h.target} at t=${h.t} landed unprepped`);
+      }
+      assert.equal(pushed.modes.filter(m => m.startsWith("Draining")).length, 0);
+
+      assert.equal(reverted.stockPush, false, "a stale list must hand the ranking back to income");
+      assert.equal(reverted.target, flagged.state.target);
+      assert.ok(reverted.targets.every(t => t.objective === undefined));
+
+      // A server the income ranking would not touch at all: t2 starts at twice
+      // its minimum security and 4% money, and a 440GB fleet has better things
+      // to do than prep it. Wished DOWN and merely flagged, its stock never
+      // moves; preferred, the fleet preps it and its hacks push.
+      const small = { ...base };
+      const ignored = drive(small, { down: ["t2"], prefer: false }, 12);
+      assert.ok(!ignored.state.targets.some(t => t.target === "t2"), "the income ranking should have no use for t2 here");
+      assert.equal(ignored.pushes.t2 ?? 0, 0);
+      const worked = drive(small, { down: ["t2"], prefer: true }, 12);
+      assert.equal(worked.state.target, "t2");
+      assert.ok((worked.pushes.t2 ?? 0) < -0.02, `t2's forecast moved ${worked.pushes.t2} points in twelve minutes`);
+    } finally {
+      delete globalThis.gordStockWishes;
+    }
+  });
+
+  test("late game: a fleet too big for the default windows deepens them, inside the process budget" + label, () => {
+    // t1 with legs eight times as long: its window could hold ~270 batches, the
+    // default cap is 60, and a 4PB fleet has RAM for all of them. The deep plan
+    // takes over once its targets are batching; the process cap is hard.
+    const opts = { ...base, t1Speed: 8, w1Ram: 2 ** 21, w2Ram: 2 ** 21 };
+    const measure = (patch) => {
+      const saved = { ...H.adaptive };
+      Object.assign(H.adaptive, patch);
+      try {
+        const { world, ns, advance } = makeWorld(opts);
+        const sim = run(world, ns, advance, 20 * 60_000);
+        return { world, sim };
+      } finally {
+        Object.assign(H.adaptive, saved);
+      }
+    };
+    const plain = measure({ enabled: false });
+    const deep = measure({});
+    const capped = measure({ maxProcesses: 400 });
+
+    const depthOf = r => r.sim.state.targets.find(t => t.target === "t1")?.depth ?? 0;
+    assert.equal(depthOf(plain), H.maxDepth);
+    assert.ok(depthOf(deep) > H.maxDepth, `t1's window should be deeper than ${H.maxDepth}, got ${depthOf(deep)}`);
+    assert.ok(deep.sim.processMax <= H.adaptive.maxProcesses,
+      `${deep.sim.processMax} worker processes at once, over the cap of ${H.adaptive.maxProcesses}`);
+    assert.ok(deep.sim.processMax > plain.sim.processMax, "the deeper window should be in use");
+    assert.ok(deep.world.stolen > plain.world.stolen * 1.5,
+      `income should climb with depth: $${plain.world.stolen.toExponential(2)} -> $${deep.world.stolen.toExponential(2)}`);
+    assert.ok(capped.sim.processMax <= 400, `${capped.sim.processMax} processes with the cap at 400`);
+    assert.ok(capped.world.stolen > 0);
+
+    for (const r of [deep, capped]) {
+      const t1 = r.world.hackLandings.filter(h => h.target === "t1");
+      assert.ok(t1.length > 50, "hacks actually landed");
+      const bad = t1.filter(h => h.moneyFrac < 0.995 || h.secOver > 0.01);
+      assert.equal(bad.length, 0, `${bad.length} of ${t1.length} t1 hacks landed unprepped`);
+      assert.equal(r.world.execFailures, 0);
+    }
   });
 
   test("share.js left by an earlier manager is found and stopped, without a process listing of every host every tick" + label, () => {

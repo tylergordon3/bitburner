@@ -214,8 +214,31 @@ export async function main(ns) {
       `${state.mode} on ${state.target} | ${state.inFlight}/${state.depth} in flight | ` +
       `bite ${((state.fraction ?? 0) * 100).toFixed(2)}% | using ${ram(state.claimedRam ?? 0)} of ${ram(state.capacityRam ?? 0)}`);
     for (const t of (state.targets ?? []).slice(1)) {
-      ns.tprint(`  also ${t.target.padEnd(20)} ${t.mode.padEnd(24)} ${t.inFlight}/${t.depth} @ ${((t.fraction ?? 0) * 100).toFixed(2)}%`);
+      ns.tprint(`  also ${t.target.padEnd(20)} ${t.mode.padEnd(24)} ${t.inFlight}/${t.depth} @ ${((t.fraction ?? 0) * 100).toFixed(2)}%` +
+        (t.objective ? `  [${t.objective}]` : ""));
     }
+    // A window deeper than maxDepth is the late-game plan (hacking.adaptive),
+    // which is held to a budget of worker processes.
+    const deepest = Math.max(0, ...(state.targets ?? []).map(t => t.depth ?? 0));
+    if (deepest > H.maxDepth || (state.processes ?? 0) > H.adaptive.maxProcesses * 0.9) {
+      ns.tprint(`  Late-game plan: windows up to ${deepest} deep, ${state.processes ?? 0} of ` +
+        `${H.adaptive.maxProcesses} worker processes in flight (hacking.adaptive).`);
+    }
+    if (state.stockPush) {
+      ns.tprint("  BN8 ranking: the trader's wished servers first ([stock]), then hacking exp ([exp]) - " +
+        "the first target's objective is " + `${state.targets?.[0]?.objective ?? "?"}; $/sec below is what the ` +
+        "income ranking WOULD pay, which here is nothing.");
+    }
+  }
+  // The trader's wish list, as the manager and the workers will read it.
+  const wishes = globalThis.gordStockWishes;
+  if (wishes) {
+    const age = Date.now() - (wishes.updatedAt ?? 0);
+    const fresh = age < H.stockPush.maxAgeMs;
+    ns.tprint(`Stock wishes (${(age / 1000).toFixed(0)}s old${fresh ? "" : " - STALE, ignored"}): ` +
+      `up [${(wishes.up ?? []).slice(0, 6).join(", ")}${(wishes.up ?? []).length > 6 ? ", ..." : ""}] ` +
+      `down [${(wishes.down ?? []).slice(0, 6).join(", ")}${(wishes.down ?? []).length > 6 ? ", ..." : ""}] | ` +
+      (wishes.prefer === true ? "PREFERRED: worked ahead of income" : "flag only: grows / hacks on these carry { stock: true }"));
   }
 
   // ── What it would target, ranked ───────────────────────────────────────────
