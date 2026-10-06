@@ -99,6 +99,25 @@ a "launch the largest batch that fits, every tick" loop:
   its own launch clock, prep and drift state. When there are more candidates than
   slots and RAM to spare, the slots go to the targets that can earn the most
   rather than the most RAM-efficient ones.
+- **Batches are planned for the hosts there are, not for a pool of RAM.** A budget
+  that cannot carry a full window buys the depth × bite that steals most on those
+  hosts (a split grow's padding is budgeted, a split hack is marked down, share.js's
+  hosts are left out), and a batch that does not fit at launch goes out smaller
+  (`hacking.fitShrinkFloor`) instead of being retried forever. The search never
+  pushes a bite past the drift tolerance. Simulated against `main` at fourteen fleet
+  shapes, cold and warm: +37% on average at 128GB, +8% at 512GB, level from 8TB to
+  26×1TB, never more than 1% worse.
+- **Late game, the caps lift themselves** (`hacking.adaptive`): when deeper windows
+  on more targets would earn at least 5% more, they are used - up to 240 deep, 12
+  targets and a hard 3,000 worker processes - and adopted only once the current
+  windows are full. Simulated: +43% at 26×16TB, +107% at 26×64TB, +157% at 26×1PB.
+  `maxHackFraction` is unchanged.
+- **BN8: the stock trader's wishes come first.** When `lib/stocks.js` publishes its
+  wish list with `prefer` set (`gordStockWishes`), the wished servers are worked
+  ahead of the income ranking and the rest of the fleet trains hacking exp
+  (`hacking.stockPush`). A hack or grow moves a stock's forecast in proportion to
+  the money it moves over the server's maximum - a hack that pays $0 there still
+  counts in full.
 - A target already being worked gets an edge when the split is re-cut
   (`hacking.targetStickiness`), and one that would first have to be prepped is
   marked down by how long that takes (`hacking.prepHorizonMs`) — so a small fleet

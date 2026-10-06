@@ -307,6 +307,7 @@ export async function main(ns) {
     // The gift first: joining the division can forfeit it (see giftSettled).
     if (giftSettled(ns, node, holds)) ensureBladeBoot(ns, node, holds);
     globalThis.gordReservedRam = holds;
+    globalThis.gordReservedRamAt = Date.now();   // see hacking.reservedRamMaxAgeMs
 
     // Grow home RAM as aggressively as money allows (or, with homeRamOnlyToFit,
     // only until the daemon fits). At SF4.3 Singularity is 1x RAM; upgradeHomeRam
@@ -333,6 +334,7 @@ export async function main(ns) {
       // (lib/daemon-core.js is the map's only writer from here on). A failed
       // launch below just rebuilds them on the next pass.
       globalThis.gordReservedRam = {};
+      globalThis.gordReservedRamAt = Date.now();
       const pid = ns.run(daemon, 1);
       if (pid !== 0) {
         ns.tprint(`Home RAM ${ns.format.ram(ns.getServerMaxRam(HOME))} >= ${ns.format.ram(needed)} needed. Started ${daemon} (pid ${pid}).`);

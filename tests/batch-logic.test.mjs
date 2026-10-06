@@ -7,6 +7,7 @@ import {
   prepPlan, allocate, splitGrowPadding, isPrepped, driftDetected, stillDraining, preppedScale,
   shareBonus, shareThreadsFor, shareTopUp, pruneInFlight,
   efficientThreads, threadLadder, concaveHull, incomeCurve, allocateRam, prepDiscount,
+  costAt, stolenAt, preferredWishes, expPerThread, expCurve, capProcesses,
 } from "../lib/batch-logic.js";
 
 // Game constants and a plausible grow model: threads to restore from `remaining`
@@ -150,8 +151,7 @@ test("REGRESSION: a small budget buys fewer efficient batches, not a full window
   const eff = efficientThreads(sched);
   const totalRam = planThreads(eff).ram * 6.5;
   const c = planCycle({ totalRam, ...sched });
-  assert.equal(c.plan.hackThreads, eff);
-  assert.equal(c.depth, 6);
+  assert.ok(c.depth < 34 && c.plan.hackThreads >= eff, `depth ${c.depth} x ${c.plan.hackThreads} threads`);
   assert.ok(c.depth * c.plan.ram <= totalRam);
   // More stolen per window than the full-depth alternative on the same RAM.
   const tiny = largestBatch({ ramBudget: totalRam / 34, maxThreads: 250, planFor: planThreads });
@@ -160,6 +160,179 @@ test("REGRESSION: a small budget buys fewer efficient batches, not a full window
   const one = planCycle({ totalRam: planThreads(3).ram + 0.1, ...sched });
   assert.equal(one.depth, 1);
   assert.equal(one.plan.hackThreads, 3);
+});
+
+test("REGRESSION: a thin window is the depth x bite that steals most, not a whole number of efficient batches", () => {
+  // The thin window used to be floor(RAM / efficient batch) batches of exactly
+  // the efficient size, which strands whatever is left over: six and a half
+  // batches' worth of RAM ran six (92% of it), two and a half ran two (80%), one
+  // and nine tenths ran ONE (53%). Every depth is now tried with the fattest
+  // batch that lets that many share the RAM.
+  const sched = { lastLanding: 40_600, launchInterval: 1200, maxThreads: 250, planFor: planThreads };
+  const eff = efficientThreads(sched);
+  for (const batches of [1.9, 2.5, 3.4, 6.5]) {
+    const totalRam = planThreads(eff).ram * batches;
+    const c = planCycle({ totalRam, ...sched });
+    const old = Math.floor(batches) * planThreads(eff).hackedFraction;
+    assert.ok(c.depth * c.plan.ram <= totalRam + 1e-9, "the window must fit its RAM");
+    assert.ok(c.depth * c.plan.hackedFraction >= old, `${batches} batches' worth: steals less than the old plan`);
+    assert.ok(c.depth * c.plan.ram >= totalRam * 0.9,
+      `${batches} batches' worth: only ${((c.depth * c.plan.ram / totalRam) * 100).toFixed(0)}% of the RAM in use`);
+    // ...and no other depth does better with its own fattest batch - beyond the
+    // margin the efficient-size window is given the benefit of (3%).
+    for (let depth = 1; depth <= 34; depth++) {
+      const plan = largestBatch({ ramBudget: totalRam / depth, maxThreads: 250, planFor: planThreads });
+      if (plan) assert.ok(depth * plan.hackedFraction <= c.depth * c.plan.hackedFraction * 1.03 + 1e-12, `depth ${depth} steals more`);
+    }
+  }
+  // A window the search cannot clearly improve on stays as it was: two
+  // efficient batches' worth of RAM is two efficient batches (one batch of
+  // twice the size steals exactly as much)...
+  const exact = planCycle({ totalRam: planThreads(eff).ram * 2 + 0.01, ...sched });
+  assert.equal(exact.depth, 2);
+  assert.equal(exact.plan.hackThreads, eff);
+  assert.equal(exact.cost, exact.plan.ram);
+  // ...and when the search does win, it is by more than its margin. (In this
+  // grow model a batch goes on getting cheaper per hack thread up to ~100 of
+  // them, so six batches' worth is better spent on two fat ones.)
+  const six = planCycle({ totalRam: planThreads(eff).ram * 6 + 0.01, ...sched });
+  assert.ok(six.depth < 6 && six.plan.hackThreads > eff, `depth ${six.depth} x ${six.plan.hackThreads} threads`);
+  assert.ok(six.depth * six.plan.hackedFraction > 6 * planThreads(eff).hackedFraction * 1.03);
+});
+
+test("planCycle: the search does not trade a window that shrugs off a lost grow for one that does not", () => {
+  // Six efficient batches' worth of RAM: 6 x 21 threads (4.2% bites), which the
+  // search would spend on 2 x 65 (13%). One hack landing unrepaired on a 4.2%
+  // bite stays inside the 5% drift tolerance and the padded grows close the
+  // gap; on 13% the window drains and the target is re-prepped. `safeThreads`
+  // is the thread count at that tolerance (25 here).
+  const sched = { lastLanding: 40_600, launchInterval: 1200, maxThreads: 250, planFor: planThreads };
+  const eff = efficientThreads(sched);
+  const totalRam = planThreads(eff).ram * 6 + 0.01;
+  const free = planCycle({ totalRam, ...sched });
+  assert.ok(free.plan.hackedFraction > 0.05, `bite ${free.plan.hackedFraction}`);
+
+  const safe = planCycle({ totalRam, safeThreads: 25, ...sched });
+  assert.ok(safe.plan.hackThreads <= 25, `${safe.depth} x ${safe.plan.hackThreads} threads`);
+  assert.ok(safe.depth * safe.plan.hackedFraction >= 6 * planThreads(eff).hackedFraction, "never less than the plain window");
+  // ...and it is still searched inside the limit: 2.5 batches' worth is not two
+  // efficient batches and half a batch of idle RAM.
+  const filled = planCycle({ totalRam: planThreads(eff).ram * 2.5, safeThreads: 25, ...sched });
+  assert.ok(filled.plan.hackThreads <= 25 && filled.depth * filled.plan.ram >= planThreads(eff).ram * 2.5 * 0.9,
+    `${filled.depth} x ${filled.plan.hackThreads} threads`);
+
+  // A plain window whose bite is past the tolerance already has nothing to
+  // protect: the search is not held back.
+  const fat = planCycle({ totalRam, safeThreads: 10, ...sched });
+  assert.deepEqual([fat.depth, fat.plan.hackThreads], [free.depth, free.plan.hackThreads]);
+});
+
+test("planCycle: a thin window is sized on thinRam, a full window is fitted as it always was", () => {
+  // totalRam is the manager's old count of the RAM in hand, which runs over
+  // while a batch is landing; thinRam is the same counted leg by leg. A thin
+  // window's bite is the budget over a handful of batches, so it must not see
+  // the overrun - that is how a window got stuck one batch short of its depth.
+  const sched = { lastLanding: 40_600, launchInterval: 1200, maxThreads: 250, planFor: planThreads };
+  const eff = efficientThreads(sched);
+  const real = planThreads(eff).ram * 4.4;
+  const over = real * 1.25;                               // one landing batch counted twice
+  const thin = planCycle({ totalRam: over, thinRam: real, ...sched });
+  assert.deepEqual([thin.depth, thin.plan.hackThreads], (c => [c.depth, c.plan.hackThreads])(planCycle({ totalRam: real, ...sched })));
+  assert.ok(thin.depth * thin.cost <= real + 1e-9, `${thin.depth} x ${thin.cost}GB planned into ${real}GB`);
+  const blind = planCycle({ totalRam: over, ...sched });
+  assert.ok(blind.depth * blind.plan.ram > real, "sized on the overrun, the window does not fit the RAM there is");
+
+  // Full depth (the budget carries efficient batches): thinRam changes nothing,
+  // and the batch is the fattest that lets `depth` share totalRam as a pool.
+  const rich = planThreads(eff + 10).ram * 34 + 1;
+  const full = planCycle({ totalRam: rich, thinRam: rich * 0.9, ...sched });
+  assert.equal(full.depth, 34);
+  assert.equal(full.plan.hackThreads, eff + 10);
+  assert.equal(full.cost, full.plan.ram);
+});
+
+test("largestBatch: a starting point (`from`) changes the search, never the answer", () => {
+  for (const budget of [10, 37.5, 120, 333, 2000]) {
+    const plain = largestBatch({ ramBudget: budget, maxThreads: 250, planFor: planThreads });
+    for (const from of [1, 2, 7, 60, 249, 250, 400]) {
+      const seeded = largestBatch({ ramBudget: budget, maxThreads: 250, planFor: planThreads, from });
+      assert.equal(seeded?.hackThreads, plain?.hackThreads, `budget ${budget}, from ${from}`);
+    }
+  }
+});
+
+test("planBatch with the fleet's hosts: a grow no host can hold is planned as the split grow it will be", () => {
+  // A 40% bite: 21 grow threads (36.75GB) - more than a 16GB host holds.
+  const base = { hackThreads: 200, hackPct: 0.002, growThreadsFor, ramPerThread: RAM, minSecurity: 20, ...GAME };
+  const pool = planBatch(base);
+  assert.equal(pool.split, false);
+  assert.equal(pool.growSeats, undefined, "no hosts described: nothing about packing");
+  assert.equal(costAt(pool, 9), pool.ram);
+  assert.equal(stolenAt(pool, 9), pool.hackedFraction);
+
+  // Roomy hosts: every grow sits whole, the plan is the pool's plan.
+  const roomy = planBatch({ ...base, hosts: [1024, 1024] });
+  assert.equal(roomy.split, false);
+  assert.equal(roomy.ram, pool.ram);
+  assert.equal(roomy.growThreads, pool.growThreads);
+  // A host seats as many grows as it holds; its hacks are counted with their
+  // batch (one per whole batch, one more if a grow and a hack fit the remainder).
+  const growRam = pool.growThreads * RAM.grow;
+  const perHost = Math.floor(1024 / pool.ram);
+  assert.equal(roomy.growSeats, 2 * Math.floor(1024 / growRam));
+  assert.equal(roomy.wholeHacks, 2 * (perHost + (1024 - perHost * pool.ram >= growRam + 200 * RAM.hack ? 1 : 0)));
+  assert.equal(costAt(roomy, 4), pool.ram);
+
+  // Eight 16GB hosts (9 threads each): the grow cannot sit whole anywhere.
+  const cramped = planBatch({ ...base, hosts: Array(8).fill(16) });
+  const padded = splitGrowPadding({ growThreads: pool.growThreads, minSecurity: 20, ...GAME });
+  assert.equal(cramped.split, true);
+  assert.equal(cramped.growThreads, padded.growThreads);
+  assert.ok(cramped.growThreads > pool.growThreads, "a split grow at security 20 needs padding");
+  assert.equal(cramped.weaken2Threads, padded.weaken2Threads);
+  assert.ok(cramped.ram > pool.ram);
+  assert.equal(cramped.nominalRam, pool.ram, "the ranking still sees the batch a pool of RAM would run");
+  assert.equal(cramped.splitExtra, 0, "the padding is in the plan already");
+  assert.equal(cramped.growSeats, 0);
+
+  // One big host and small ones: ONE grow at a time can be whole; the batches
+  // past that are billed their padding.
+  const mixed = planBatch({ ...base, hosts: [pool.growThreads * RAM.grow + 1, 16, 16, 16] });
+  assert.equal(mixed.split, false);
+  assert.equal(mixed.growSeats, 1);
+  assert.ok(mixed.splitExtra > 0);
+  assert.equal(costAt(mixed, 1), mixed.ram);
+  assert.ok(Math.abs(costAt(mixed, 3) - (mixed.ram + mixed.splitExtra * 2 / 3)) < 1e-9);
+});
+
+test("REGRESSION: grows are seated on their own, not one per whole batch a host holds", () => {
+  // A 57GB batch with a 26GB grow, on ten hosts of 131GB: each holds 2.3
+  // batches but FOUR of the grows - the other legs go wherever they fit. Counted
+  // one per whole batch (plus one if the remainder took a grow) that fleet
+  // seated 20, a 30-batch window was billed for ten split grows that never
+  // happened, and every bite shrank for it: on 26 hosts of 1TB a 60-batch window
+  // of 290GB grows was told 52 fit, and earned 1.3% less than before.
+  const plan = planBatch({ hackThreads: 15, hackPct: 0.02, growThreadsFor, ramPerThread: RAM, minSecurity: 20,
+    hosts: Array(10).fill(131), ...GAME });
+  const growRam = plan.growThreads * RAM.grow;
+  assert.ok(Math.floor(131 / plan.ram) === 2 && Math.floor(131 / growRam) === 4, `batch ${plan.ram}GB, grow ${growRam}GB`);
+  assert.equal(plan.growSeats, 40);
+  assert.ok(plan.splitExtra > 0, "a split grow at security 20 would need padding");
+  assert.equal(costAt(plan, 30), plan.ram, "thirty grows sit whole: nothing to bill");
+  assert.equal(costAt(plan, 40), plan.ram);
+  assert.ok(costAt(plan, 50) > plan.ram, "past the seats there are, the padding is billed");
+});
+
+test("stolenAt: a hack leg that has to be split takes less than its bite", () => {
+  // 100 hack threads of 0.5% each = a 50% bite; in many pieces it takes 1 - e^-0.5.
+  const plan = planBatch({ hackThreads: 100, hackPct: 0.005, maxHackFraction: 0.9, growThreadsFor, ramPerThread: RAM,
+    minSecurity: 5, hosts: [400, 16, 16, 16], ...GAME });
+  assert.equal(plan.hackedFraction, 0.5);
+  assert.equal(plan.wholeHacks, 1, "one host can seat the grow and the hack side by side");
+  assert.equal(stolenAt(plan, 1), 0.5);
+  const pieces = 1 - Math.exp(-0.5);
+  assert.ok(Math.abs(stolenAt(plan, 2) - (0.5 + pieces) / 2) < 1e-12);
+  assert.ok(stolenAt(plan, 5) < stolenAt(plan, 2));
 });
 
 // ── Sharing RAM between targets ──────────────────────────────────────────────
@@ -258,6 +431,77 @@ test("prepDiscount: a target that must be prepped first is worth less, never not
   assert.equal(prepDiscount(3_600_000, 3_600_000), 0.5);
   assert.ok(prepDiscount(60_000, 3_600_000) > 0.98);
   assert.ok(prepDiscount(1e9, 3_600_000) > 0);
+});
+
+// ── When money is not the point (BN8) ────────────────────────────────────────
+
+test("preferredWishes: only a fresh list that asks to be preferred changes anything", () => {
+  const list = { up: ["a", "b", "c"], down: ["d"], prefer: true, updatedAt: 1_000_000 };
+  const at = age => preferredWishes(list, 1_000_000 + age, 120_000, 0.5);
+
+  // Every other BitNode publishes prefer: false - the ranking must not move.
+  assert.equal(preferredWishes({ ...list, prefer: false }, 1_000_000, 120_000, 0.5), null);
+  assert.equal(preferredWishes(undefined, 1_000_000, 120_000, 0.5), null);
+  assert.equal(preferredWishes(null, 1_000_000, 120_000, 0.5), null);
+  // Truthy is not `true`: a list somebody half-wrote is nobody's wish.
+  assert.equal(preferredWishes({ ...list, prefer: 1 }, 1_000_000, 120_000, 0.5), null);
+  // Stale after two minutes (the workers' own rule), and with no timestamp at all.
+  assert.ok(at(119_999) instanceof Map);
+  assert.equal(at(120_000), null);
+  assert.equal(at(-200_000), null, "a timestamp from the future is not fresh");
+  assert.equal(preferredWishes({ up: ["a"], prefer: true }, 1_000_000, 120_000, 0.5), null);
+
+  // Weight falls by `decay` per place, within each list.
+  assert.deepEqual([...at(0)], [["a", 1], ["b", 0.5], ["c", 0.25], ["d", 1]]);
+  // An empty list is still the BN8 signal (nothing to push, exp for everything).
+  assert.equal(preferredWishes({ up: [], down: [], prefer: true, updatedAt: 5 }, 5, 120_000, 0.5).size, 0);
+  // Junk in a list is skipped; a host in both keeps its better place.
+  assert.deepEqual([...preferredWishes({ up: ["a", 7, "b"], down: ["b"], prefer: true, updatedAt: 5 }, 5, 120_000, 0.5)],
+    [["a", 1], ["b", 1]]);
+});
+
+test("expCurve: exp is threads landed per interval - the bite hardly matters, the server does", () => {
+  const sched = { lastLanding: 40_600, launchInterval: 1200, maxThreads: 250, planFor: planThreads, hackChance: 1 };
+  const pts = expCurve({ ...sched, minSecurity: 5 });
+  assert.equal(pts.length, threadLadder(250).length);
+  const perGb = pts.map(p => p.income / p.ram);
+  // Every thread is worth the same and costs about the same: flat to within the
+  // hack thread's 3% discount.
+  assert.ok(Math.max(...perGb) / Math.min(...perGb) < 1.04, `exp per GB varies ${Math.min(...perGb)}..${Math.max(...perGb)}`);
+  const plan = planThreads(250);
+  const threads = plan.hackThreads + plan.growThreads + plan.weaken1Threads + plan.weaken2Threads;
+  assert.ok(Math.abs(pts.at(-1).income - threads * expPerThread(5) / 1200) < 1e-9);
+  assert.equal(pts.at(-1).ram, 34 * plan.ram);
+  // A failed hack is worth a quarter: half the hacks failing costs 3/8 of the hack threads' exp.
+  const half = expCurve({ ...sched, hackChance: 0.5, minSecurity: 5 }).at(-1).income;
+  assert.ok(Math.abs(half - (threads - 250 * 0.375) * expPerThread(5) / 1200) < 1e-9);
+  // Harder servers pay more per thread (3 + 0.3 x base security, base ~ 3 x min).
+  assert.equal(expPerThread(5), 7.5);
+  assert.ok(expCurve({ ...sched, minSecurity: 20 }).at(-1).income > pts.at(-1).income * 2);
+});
+
+test("capProcesses: windows are kept best first until the process budget is spent", () => {
+  const windows = [
+    { target: "a", depth: 240, income: 2400 },
+    { target: "b", depth: 240, income: 1200 },
+    { target: "c", depth: 60, income: 60 },
+  ];
+  // Room for everything: nothing is touched.
+  const all = capProcesses(windows, 4 * 540);
+  assert.equal(all.trimmed, false);
+  assert.deepEqual(all.kept.map(w => [w.target, w.depth]), [["a", 240], ["b", 240], ["c", 60]]);
+  assert.equal(all.processes, 2160);
+  assert.equal(all.income, 3660);
+  // 3,000 processes = 750 batches: a and b whole, c never opened.
+  const some = capProcesses(windows, 4 * 480);
+  assert.equal(some.trimmed, true);
+  assert.deepEqual(some.kept.map(w => [w.target, w.depth]), [["a", 240], ["b", 240]]);
+  // The window that crosses the budget is cut to what is left, its income with it.
+  const cut = capProcesses(windows, 4 * 300);
+  assert.deepEqual(cut.kept.map(w => [w.target, w.depth, w.income]), [["a", 240, 2400], ["b", 60, 300]]);
+  assert.equal(cut.processes, 1200);
+  assert.equal(cut.income, 2700);
+  assert.deepEqual(capProcesses(windows, 3).kept, [], "less than one batch's worth of processes");
 });
 
 test("planCycle stretches the launch interval to honour maxDepth", () => {
