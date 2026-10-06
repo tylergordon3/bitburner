@@ -282,13 +282,9 @@ That one line is both the first start and the restart. `killall` stops every scr
 
 **Scripts do not hot-reload.** A running script keeps the code it started with, so syncing a
 change does nothing to processes that are already running. After a sync, run the line above
-again. If the change was to a helper (anything the daemon places on another server, which is
-most of `lib/`), stop the helpers first, because `killall` only reaches `home`:
-
-```text
-run /tools/kill-helpers.js all
-killall; run /early/driver.js
-```
+again. That one line restarts everything: `killall` only reaches `home`, but the driver stops
+every helper the daemon had placed on other servers when it starts (it prints how many), and
+the daemon starts them again from the files now on `home`.
 
 ### The tools
 
@@ -934,7 +930,8 @@ in depth.
 5. **No income?** `run tools/hack-status.js`. It distinguishes "the manager is not running"
    from "the manager is running but idle". Right after the manager dies its own workers still
    occupy the network, so for a short while there is nowhere to restart it; the tool says so.
-6. **Old code still running?** `run /tools/kill-helpers.js all`, then restart.
+6. **Old code still running?** Restart with `killall; run /early/driver.js` - the driver stops
+   the off-home helpers too. `run /tools/kill-helpers.js all` stops them without a restart.
 7. **Corporation stuck?** `run tools/corp-status.js`.
 
 ### The three switches

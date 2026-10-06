@@ -3,8 +3,10 @@
 // Kill the daemon's OFF-HOME helpers network-wide. `killall` in the Bitburner
 // terminal only kills the CURRENT server, and the daemon deliberately runs its
 // helpers wherever there's spare RAM (ensureHelper in lib/daemon-lib.js) - so the
-// usual `killall; run /early/driver.js` restart leaves the old copies running, with
-// the old code, on whatever purchased server they landed on.
+// `killall` alone leaves the old copies running, with the old code, on whatever
+// server they landed on. early/driver.js now stops them all when it starts, so
+// the usual `killall; run /early/driver.js` IS a full restart; this tool is for
+// stopping helpers WITHOUT restarting (and for the BitNode-ending ones below).
 //
 // That's mostly harmless, but not for the helpers that can END A BITNODE:
 // lib/backdoor.js (a backdoor on w0r1d_d43m0n IS the finish), lib/finish-bn.js, and
@@ -27,21 +29,13 @@
 // from the freshly-synced files.
 
 import { allServers } from "../lib/net.js";
-import { CONFIG } from "../lib/config.js";
+import { CONFIG, helperScripts } from "../lib/config.js";
 
 const P = CONFIG.paths;
 
-// CONFIG.paths entries that are NOT daemon-placed helpers: the daemons and
-// cold-boot scripts (home only, restarted by hand) and the batcher's worker
-// legs (the manager's; they land by themselves within a weaken-time).
-const NOT_HELPERS = new Set(["daemon", "driver", "worker", "gangBoot", "bladeBoot", "hack", "grow", "weaken", "share", "legacyStartup"]);
-
-/** Every script path in CONFIG.paths that ensureHelper may have placed off-home. */
-export function helperScripts() {
-  return Object.entries(P)
-    .filter(([key, path]) => typeof path === "string" && path.endsWith(".js") && !NOT_HELPERS.has(key))
-    .map(([, path]) => /** @type {string} */ (path));
-}
+// The list itself lives in lib/config.js (helperScripts), shared with
+// early/driver.js, which stops the same scripts whenever it starts.
+export { helperScripts };
 
 /** @param {NS} ns */
 export async function main(ns) {

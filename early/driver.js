@@ -14,7 +14,7 @@
 // safe to import by contrast - it has no Netscript calls at all.
 
 import { allServers, root, sameScript } from "../lib/net.js";
-import { CONFIG, forReset } from "../lib/config.js";
+import { CONFIG, forReset, helperScripts } from "../lib/config.js";
 import { inGangSafe } from "../lib/ns-utils.js";
 import { giftStatus } from "../lib/stanek-logic.js";
 
@@ -202,6 +202,31 @@ export function holdHost(hosts, ram, holds) {
 }
 
 /**
+ * A start of this script is a RESTART of the bot, and has to be one for every
+ * script, not only the ones on home. The terminal's `killall` stops home alone;
+ * the daemon's helpers run wherever there was room (the batcher's manager, the
+ * backdoor loop, the HUD, ...), so they used to survive `killall; run
+ * /early/driver.js` - still on the code they were started with, however much had
+ * been synced since, and in the manager's case with books full of batches whose
+ * legs the handoff below had just killed (it then sat out a "drift drain" for
+ * batches that no longer existed). So: stop every daemon-placed helper, on every
+ * host. After an aug install or a BitNode change nothing is running and this
+ * finds nothing; whatever the node needs is started again from home's files.
+ * @param {NS} ns @returns {number} how many processes were stopped
+ */
+export function stopStaleHelpers(ns) {
+  const helpers = helperScripts();
+  let stopped = 0;
+  for (const server of allServers(ns)) {
+    if (!ns.hasRootAccess(server)) continue;
+    for (const p of ns.ps(server)) {
+      if (helpers.some(s => sameScript(p.filename, s)) && ns.kill(p.pid)) stopped++;
+    }
+  }
+  return stopped;
+}
+
+/**
  * Tear down the money engine so the daemon boots into a clean home. The daemon
  * restarts the botnet itself once it's up (and the hacknet manager, off-home).
  * @param {NS} ns
@@ -288,6 +313,9 @@ export async function main(ns) {
   }
 
   ns.tprint(`Bootstrap started (BitNode ${node}) -> target daemon ${daemon}`);
+
+  const stopped = stopStaleHelpers(ns);
+  if (stopped > 0) ns.tprint(`Stopped ${stopped} helper(s) left running off-home - they restart on the code that is on home now.`);
 
   // BITNODE[n].driver, resolved for this node (D above is the shared default).
   // homeRamOnlyToFit: stop buying home RAM at the size the daemon needs - BN8,

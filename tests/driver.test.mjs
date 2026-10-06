@@ -222,3 +222,33 @@ test("a challenge run is booted with the challenge's config: its daemon, and no 
     if (saved === undefined) delete globalThis.gordStanekState; else globalThis.gordStanekState = saved;
   }
 });
+
+test("starting the driver is a restart of the off-home helpers too, not only of home", async () => {
+  // `killall` on home, then the driver: the manager, the backdoor loop and the
+  // HUD are still running on other hosts, on whatever code they were started with.
+  const game = fakeGame({
+    node: 4, ownedSF: [[4, 3]], ram: RAM, home: 2048, ticks: 1,
+    hosts: { "neo-net": { max: 64, used: 0 }, zer0: { max: 32, used: 0 } },
+  });
+  const old = [
+    { pid: 901, host: "neo-net", script: bare(P.manager), ram: 9.95 },
+    { pid: 902, host: "zer0", script: bare(P.backdoor), ram: 8.1 },
+    { pid: 903, host: "zer0", script: bare(P.dashboard), ram: 5.65 },
+    // Not the bot's: a script of the player's own is left alone.
+    { pid: 904, host: "zer0", script: "my/own-script.js", ram: 2 },
+  ];
+  game.g.procs.push(...old);
+  await runDriver(game.ns);
+  const pids = new Set(game.g.procs.map(p => p.pid));
+  assert.deepEqual([901, 902, 903].filter(pid => pids.has(pid)), [], "the old helpers are stopped");
+  assert.ok(pids.has(904), "a script that is not a helper is not touched");
+});
+
+test("stopStaleHelpers counts what it stopped, and finds nothing after a reset", async () => {
+  const { stopStaleHelpers } = await import("../early/driver.js");
+  const game = fakeGame({ node: 4, ownedSF: [[4, 3]], ram: RAM, hosts: { zer0: { max: 32, used: 0 } } });
+  assert.equal(stopStaleHelpers(game.ns), 0);
+  game.g.procs.push({ pid: 7, host: "zer0", script: bare(P.contracts), ram: 17 }, { pid: 8, host: "zer0", script: bare(P.hack), ram: 1.7 });
+  assert.equal(stopStaleHelpers(game.ns), 1, "worker legs are the manager's business, not counted here");
+  assert.ok(game.g.procs.some(p => p.pid === 8));
+});

@@ -162,11 +162,13 @@ a "launch the largest batch that fits, every tick" loop:
   world limited to one target. The fake's dependence on security is the game's own
   formulas, and every scenario runs on both the Formulas and the `ns.*` path.
 
-After syncing a change to **any** helper, run `run /tools/kill-helpers.js all` before
-restarting: helpers run off-home, so `killall` on home leaves the old copies running
-and the daemon — seeing them "already running" — never launches the new code. `all`
-is derived from `CONFIG.paths`, so it covers every helper the daemon can place (the
-HUD, stocks, contracts, econ, hacknet and the corp phases included).
+**A restart is `killall; run /early/driver.js`, and it restarts everything.** Helpers run
+off-home, where `killall` does not reach, so the driver stops every daemon-placed helper
+on every host when it starts (`stopStaleHelpers`; the list is `helperScripts()` in
+`lib/config.js`, derived from `CONFIG.paths`). Before that, a synced change never reached
+the off-home copies - the daemon saw them "already running" - and the batcher's manager
+was left with books full of batches whose legs the handoff had just killed.
+`run /tools/kill-helpers.js all` stops the same helpers without a restart.
 
 The purchased-server buyer ([`lib/pserv.js`](lib/pserv.js)) spends its budget one
 purchase at a time on the best **RAM per dollar** on offer. Where cloud RAM is priced
