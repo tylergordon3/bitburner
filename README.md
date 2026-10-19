@@ -445,11 +445,13 @@ pure, unit-tested [`lib/hacknet-logic.js`](lib/hacknet-logic.js):
 - The HUD gets a **HACKNET** tab ([`ui/bn9.js`](ui/bn9.js)): cache fill, rate as
   cash, what the hashes are becoming, the multiplier levels, and the fleet.
 
-The cheap hacknet-*node* buyer ([`lib/hacknet-nodes.js`](lib/hacknet-nodes.js), 6.65GB,
+The cheap hacknet-*node* buyer ([`lib/hacknet-nodes.js`](lib/hacknet-nodes.js), 7.15GB,
 split out of `lib/econ.js` so the long-running home-RAM buyer is 6.6GB instead of 11.15GB)
 is switched off there (`econ.hacknetNodes`), so the two never compete for the same money.
 Elsewhere the daemon launches it only while hacking is at or below
-`econ.hacknetMaxHackingLevel`, and it exits by itself.
+`econ.hacknetMaxHackingLevel`, and it exits by itself. It buys nothing that would not pay
+for itself within `econ.hacknetPaybackMs` (1h) out of what it adds, from the game's
+production formula - in a node whose hacking stays low (BN13) the level cap never ends it.
 
 ## Coding contracts
 

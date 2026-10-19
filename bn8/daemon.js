@@ -67,7 +67,7 @@ import {
   maybeCreatePrograms,
   maybeAutoTravelForReadyFaction,
   clearFactionWork,
-  focusFlag,
+  studyHacking,
 } from "../lib/player-actions.js";
 import { getNextAugTarget, getMoneyHoardGoal, factionRepStillUseful } from "../lib/aug-targets.js";
 import { forNode } from "../lib/config.js";
@@ -83,8 +83,6 @@ const TR = ST.treasury;
 const PL = CFG.player;
 const SELF = CFG.paths.daemon;                // this daemon's path (post-reset callback)
 const FINAL_HOST = CFG.backdoor.finalHost;
-const STUDY_LOCATION = /** @type {any} */ (PL.studyLocation);
-const STUDY_CLASS = /** @type {any} */ (PL.studyClass);
 
 // ── Treasury ─────────────────────────────────────────────────────────────────
 
@@ -249,10 +247,10 @@ function bankReputation(ns) {
 /** Study: hacking exp towards the world daemon's gate. @param {NS} ns */
 function study(ns) {
   const need = worldDaemonLevel(ns);
-  ns.singularity.universityCourse(STUDY_LOCATION, STUDY_CLASS, focusFlag(ns));
+  const note = studyHacking(ns);
   return {
     action: "Studying (idle)",
-    detail: `Hacking ${hackingLevel(ns)}${need ? `/${need} for ${FINAL_HOST}` : ""}`,
+    detail: `Hacking ${hackingLevel(ns)}${need ? `/${need} for ${FINAL_HOST}` : ""}${note}`,
   };
 }
 

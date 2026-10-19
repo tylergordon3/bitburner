@@ -5,6 +5,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  equipBudget,
   ascendThreshold,
   chooseAscension,
   nextTerritoryClock,
@@ -204,4 +205,26 @@ test("the configured gang knobs are coherent", () => {
   assert.ok(G.maxTrainFraction > 0 && G.maxTrainFraction < 1);
   assert.ok(G.trainUntilAscMult > 1);
   assert.ok(G.warfareMinDef >= G.warfareMinStat);
+});
+
+test("equipBudget: the tick's share, and no more than the window's share over a minute", () => {
+  const o = { tickFraction: 0.1, windowFraction: 0.2, windowMs: 60_000 };
+  const now = 1_000_000;
+  // Nothing bought lately: the tick cap.
+  assert.equal(equipBudget([], now, 1e9, o), 1e8);
+  // $150m spent this minute out of a window that started at $1.15b: $230m is
+  // the window's share, $80m of it left - under the tick's $100m.
+  assert.equal(equipBudget([{ at: now - 10_000, cost: 150e6 }], now, 1e9, o), 80e6);
+  // The window is spent: nothing until it rolls over.
+  assert.equal(equipBudget([{ at: now - 1_000, cost: 250e6 }], now, 1e9, o), 0);
+  assert.equal(equipBudget([{ at: now - 60_000, cost: 250e6 }], now, 1e9, o), 1e8, "older than the window");
+  assert.equal(equipBudget([], now, -5, o), 0);
+  // Without it, 10% every 2s update would compound to ~95% of the cash in a minute.
+  let cash = 1e9, spent = [];
+  for (let t = 0; t < 30; t++) {
+    const b = equipBudget(spent, now + t * 2_000, cash, o);
+    cash -= b;
+    spent.push({ at: now + t * 2_000, cost: b });
+  }
+  assert.ok(1e9 - cash <= 0.2 * 1e9 + 1, `spent ${1e9 - cash} in a minute`);
 });

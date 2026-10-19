@@ -5,7 +5,7 @@
 // Run: npm test  (needs Node >=20).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { installReason, nextBNOverride } from "../lib/daemon-lib.js";
+import { installReason, nextBNOverride, rehostable, infraReserve } from "../lib/daemon-lib.js";
 import { CONFIG, forNode } from "../lib/config.js";
 
 const DEFAULT = CONFIG.augs.install;
@@ -44,7 +44,7 @@ test("REGRESSION: BN7 and BN9 really batch their installs", () => {
 test("REGRESSION: the daemon passes its node's install policy to maybeInstall", async () => {
   const { readFileSync } = await import("node:fs");
   const core = readFileSync(new URL("../lib/daemon-core.js", import.meta.url), "utf8");
-  assert.match(core, /maybeInstall\(ns, self, hooks\.beforeInstall \?\? null, cfg\.augs\.install\)/);
+  assert.match(core, /maybeInstall\(ns, self, hooks\.beforeInstall \?\? null, cfg\.augs\.install[,)]/);
 });
 
 // ── nextBNOverride ───────────────────────────────────────────────────────────
@@ -133,9 +133,39 @@ test("installReason: a short queue is installed eventually, even where minQueued
   const dear = { ...DEFAULT, minQueued: 4, timeTriggerMs: 1_000 };
   // Three bought, minQueued four: the ordinary time trigger does not fire...
   assert.equal(installReason(st({ queued: 3, elapsedMs: 1_000 }), dear), null);
-  // ...but twice the time does, so they do not sit uninstalled for the whole node.
+  // ...but twice the time does, so they do not sit uninstalled for the whole node -
+  // with at least half the batch: one aug never pays for a reset that big (BN13).
   assert.equal(installReason(st({ queued: 3, elapsedMs: 2_000 }), dear), "time");
-  assert.equal(installReason(st({ queued: 1, elapsedMs: 2_000 }), dear), "time");
+  assert.equal(installReason(st({ queued: 2, elapsedMs: 2_000 }), dear), "time");
+  assert.equal(installReason(st({ queued: 1, elapsedMs: 2_000 }), dear), null);
+  // On the defaults (minQueued 1) one aug still installs at twice the time.
+  assert.equal(installReason(st({ queued: 1, elapsedMs: 2_000 }), { ...dear, minQueued: 1 }), "time");
   // Nothing queued is still never a reason.
   assert.equal(installReason(st({ queued: 0, elapsedMs: 1e12 }), dear), null);
+});
+
+test("rehostable: no install that leaves the node's engine with nowhere to run", () => {
+  const hour = 3_600_000;
+  // BN13 after its first install: a 67GB loop, 128GB home with a ~100GB daemon,
+  // a 128GB host at ~$7m, and ~$25/s - not rehostable, so no install.
+  const bn13 = { helperRam: 67, homeFree: 128 - 100 - 8, hostCost: 7e6, incomePerMs: 25 / 1_000 };
+  assert.equal(rehostable(bn13, hour), false);
+  // Income that rebuys the host (twice its price, at cloudHost.spendFraction 0.5) within the hour.
+  assert.equal(rehostable({ ...bn13, incomePerMs: (2 * 7e6 / CONFIG.cloudHost.spendFraction) / hour }, hour), true);
+  // Fits on home beside the daemon: nothing to rebuy.
+  assert.equal(rehostable({ ...bn13, homeFree: 900 }, hour), true);
+  // No engine, or the gate off.
+  assert.equal(rehostable({ ...bn13, helperRam: 0 }, hour), true);
+  assert.equal(rehostable(bn13, null), true);
+  // No host size can hold it.
+  assert.equal(rehostable({ ...bn13, hostCost: Infinity, incomePerMs: 1e9 }, hour), false);
+});
+
+test("infraReserve: the configured reserve, or 30 minutes of income when that is less, never under the floor", () => {
+  const I = CONFIG.infra;
+  assert.equal(infraReserve(100e6, 1e9), 100e6, "rich: the configured reserve");
+  assert.equal(infraReserve(100e6, 25 / 1_000), I.minReserveMoney, "BN13's $25/s: the floor");
+  const mid = 20e6 / I.reserveIncomeMs;
+  assert.ok(Math.abs(infraReserve(100e6, mid) - 20e6) < 1e-6);
+  assert.equal(infraReserve(100e6, 0), I.minReserveMoney, "no measured income yet");
 });

@@ -42,7 +42,7 @@ import {
   maybeAutoTravelForReadyFaction,
   doIdleWork,
   clearFactionWork,
-  focusFlag,
+  studyHacking,
 } from "../lib/player-actions.js";
 import { getNextAugTarget, getMoneyHoardGoal } from "../lib/aug-targets.js";
 import { forNode } from "../lib/config.js";
@@ -64,8 +64,6 @@ const FINAL_HOST = CFG.backdoor.finalHost;
 // Hacknet servers hang off home and are named by this prefix (the batcher
 // already refuses to TARGET them; reserveHacknetHosts keeps it from HOSTING on them).
 const HACKNET_PREFIX = CFG.hacking.excludeTargetPrefix;
-const STUDY_LOCATION = /** @type {any} */ (PL.studyLocation);
-const STUDY_CLASS = /** @type {any} */ (PL.studyClass);
 // Criminal factions that can found a gang; whichever we're already in gets used.
 // Cast to any[] so its elements don't trip checkJs against FactionName - see
 // [[bitburner-enum-string-casts]].
@@ -195,11 +193,11 @@ function hashesDumped(ns) {
  */
 function studyForEndgame(ns, need, why = "") {
   const hacking = hackingLevel(ns);
-  ns.singularity.universityCourse(STUDY_LOCATION, STUDY_CLASS, focusFlag(ns));
+  const note = studyHacking(ns);
   const bonus = globalThis.gordHacknetState?.levels?.study ?? 0;
   return {
     action: "Studying (endgame)",
-    detail: `Hacking ${hacking}/${need} for ${FINAL_HOST}${bonus ? ` | hash study bonus +${bonus * 20}%` : ""}${why ? ` | ${why}` : ""}`,
+    detail: `Hacking ${hacking}/${need} for ${FINAL_HOST}${bonus ? ` | hash study bonus +${bonus * 20}%` : ""}${why ? ` | ${why}` : ""}${note}`,
   };
 }
 

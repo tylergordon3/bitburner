@@ -40,8 +40,10 @@ import {
   tendHost,
   holdThreads,
   giftGate,
+  addHolds,
   chargeHolds,
   mergeHolds,
+  foreignHold,
 } from "../lib/stanek-logic.js";
 import { CONFIG, forNode } from "../lib/config.js";
 import { COLORS } from "../ui/dashboard-lib.js";
@@ -1295,4 +1297,21 @@ test("the gift is wanted in BN13 with the Bladeburner profile and half the botne
   // The engine that goes with it, and the order: BN13 is a Bladeburner node.
   assert.equal(forNode(13).bladeburner.enabled, true);
   assert.equal(forNode(13).paths.daemon, "/bn13/daemon.js");
+});
+
+test("addHolds: the daemon's map is a helper's hold PLUS a worker's on the same host", () => {
+  const helpers = { home: 75, c: 20 };
+  assert.deepEqual(addHolds(helpers, { home: 300, "cloud-0": 64, bad: 0 }), { home: 375, c: 20, "cloud-0": 64 });
+  assert.deepEqual(helpers, { home: 75, c: 20 }, "a new map");
+  assert.deepEqual(addHolds(undefined, { a: 1 }), { a: 1 });
+  assert.deepEqual(addHolds({ a: 1 }, undefined), { a: 1 });
+});
+
+test("foreignHold: what a helper is held for on a host, while the daemon's stamp is fresh", () => {
+  const now = 1_000_000;
+  const holds = { "cloud-blade": 67, home: 75 };
+  assert.equal(foreignHold(holds, now - 1_000, "cloud-blade", now, 120_000), 67);
+  assert.equal(foreignHold(holds, now - 1_000, "n00dles", now, 120_000), 0);
+  assert.equal(foreignHold(holds, now - 121_000, "home", now, 120_000), 0, "a dead daemon's holds bind nobody");
+  assert.equal(foreignHold(undefined, now, "home", now, 120_000), 0);
 });

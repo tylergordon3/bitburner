@@ -42,6 +42,12 @@ function scriptRamSafe(ns, file) {
  * of slack (the gang, when applicable, is also placed off-home or in reserved
  * space). Handing off at daemon+slack instead of daemon+all-helpers means we
  * hand off a full RAM tier sooner.
+ *
+ * Deliberately NOT the node's required helpers too (BN13/14's 67GB Bladeburner
+ * loop, the 72GB sleeve manager): home RAM is the dearest RAM there is, and the
+ * daemon buys those their own cloud host (bladeburner.host via placeManager) or
+ * stands in for them (lib/sleeves-lite.js). Waiting for home to fit them would
+ * keep the daemon - and everything that buys that host - out for a tier longer.
  * @param {NS} ns @param {string} daemon
  */
 function requiredHomeRam(ns, daemon) {

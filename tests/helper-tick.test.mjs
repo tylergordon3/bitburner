@@ -285,7 +285,7 @@ test("no hold on a host that cannot free the room: the daemon and the helpers al
   clean();
 });
 
-test("no hold on a reserved host, nor on RAM the charge workers have taken", () => {
+test("no hold on a reserved host; charge workers' RAM only when nothing else can make the room", () => {
   const net = fullNet();
   globalThis.gordReservedHosts = new Set(["b"]);
   net.drain();
@@ -293,15 +293,16 @@ test("no hold on a reserved host, nor on RAM the charge workers have taken", () 
   assert.deepEqual(tick(net, ns => ensureHelper(ns, REQ), { own: DAEMON }), { c: 20 });
   clean();
 
-  // The charge manager takes whatever comes free on a host in its plan until
-  // the plan is full, and its workers never land: a hold there would only feed
-  // it. What it leaves of a host can be held - c's last 24GB, home's margin.
+  // The charge manager's workers never land, so its RAM is the last resort:
+  // what it leaves of a host is held first - c's last 24GB, home's margin...
   const stanek = fullNet();
   assert.deepEqual(tick(stanek, ns => ensureHelper(ns, REQ), { own: DAEMON, taken: { b: 32, c: 40 } }), { c: 20 });
   const onHome = fullNet();
   assert.deepEqual(tick(onHome, ns => ensureHelper(ns, REQ), { own: DAEMON, taken: { b: 32, c: 64, home: 8 } }), { home: 20 });
+  // ...and only when nothing else can, a host in its plan: the workers yield to
+  // a helper hold (lib/stanek.js plans around gordHelperHolds). Smallest first.
   const nowhere = fullNet();
-  assert.deepEqual(tick(nowhere, ns => ensureHelper(ns, REQ), { own: DAEMON, taken: { b: 32, c: 64, home: 12 } }), {});
+  assert.deepEqual(tick(nowhere, ns => ensureHelper(ns, REQ), { own: DAEMON, taken: { b: 32, c: 64, home: 12 } }), { b: 20 });
   clean();
 });
 
@@ -401,6 +402,28 @@ test("placeManager: a manager already on its dedicated host keeps it reserved; o
   const none = new Set();
   tick(net, ns => placeManager(ns, "/lib/boss.js", "cloud-corp", none), { own: DAEMON });
   assert.equal(none.size, 0);
+  clean();
+});
+
+test("placeManager: a node's engine gets its args, and reserveWhileWaiting keeps its host from the botnet until it lands", () => {
+  // BN13: a 67GB action loop on a network of small hosts and its own cloud-blade.
+  const LOOP = "/lib/loop.js";
+  const net = fullNet({ ...SMALL, "cloud-blade": { max: 128 } }, 128, { ...SIZES, [bare(LOOP)]: 67 });
+  const waiting = new Set();
+  tick(net, ns => placeManager(ns, LOOP, "cloud-blade", waiting, { args: [13], reserveWhileWaiting: true }), { own: DAEMON });
+  assert.equal(net.hostOf(LOOP), null, "every host is full of legs");
+  assert.ok(waiting.has("cloud-blade"), "kept from the botnet (and the charge workers) while it waits");
+  // Without the option the host stays the botnet's, as cloud-gang does.
+  const plain = new Set();
+  tick(net, ns => placeManager(ns, LOOP, "cloud-blade", plain, { args: [13] }), { own: DAEMON });
+  assert.equal(plain.size, 0);
+
+  net.drain();
+  const landed = new Set();
+  tick(net, ns => placeManager(ns, LOOP, "cloud-blade", landed, { args: [13], reserveWhileWaiting: true }), { own: DAEMON });
+  assert.equal(net.hostOf(LOOP), "cloud-blade");
+  assert.deepEqual(net.g.procs.find(p => p.script === bare(LOOP))?.args, [13]);
+  assert.ok(landed.has("cloud-blade"));
   clean();
 });
 

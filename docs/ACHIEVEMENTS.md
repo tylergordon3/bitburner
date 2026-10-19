@@ -68,12 +68,20 @@ F12), then `run tools/exploits.js --reality`. Ten seconds later the script calls
 Call Stack pane choose the frame *below* the top one (the game's `alterReality`), find the
 single `false` boolean under Scope, double-click it, type `true`, and resume.
 
-**TrueRecursion.** The honest way is to finish BN1 in the inner game. The short way, which I
-have not been able to test: the Arcade listens for a `postMessage(true)` from the frame's
-origin, and a script running *inside* the inner game is at that origin. With the Arcade page
-open, in the inner game's terminal: `nano x.js`, a one-line script whose `main` runs
-`eval("window").parent.postMessage(true, "*")`, then `run x.js`. (`eval` because naming
-`window` costs 25GB of the inner game's 8GB.)
+**TrueRecursion** (done this way 2026-10-18). The Arcade (`src/Arcade/ui/BBCabinet.tsx`)
+grants it for a `message` event whose data is `true` and whose origin is
+`https://bitburner-official.github.io` - the inner game's page. The inner game is Bitburner
+v0.30.0: only `.script` files, in a sandboxed interpreter that cannot reach the page, so a
+script in there cannot send it. The DevTools console can:
+
+1. New Tokyo > Arcade, inner game showing (the tutorial does not matter).
+2. DevTools (Steam: *Debug* > *Activate*) > Console. In the context dropdown at its top
+   left, switch `top` to the inner game's frame (`bitburner-legacy` /
+   `bitburner-official.github.io`). From `top` the origin is the main game's and nothing
+   happens.
+3. `parent.postMessage(true, "*")`, Enter. (If pasting is blocked, type `allow pasting` first.)
+
+The honest way still works too: finish BN1 in the inner game.
 
 **EditSaveFile.** The source says it in so many words: *"Yes, you're supposed to gain the
 EditSaveFile exploit by editing your real save file."* Save in the game, then outside it:
@@ -86,10 +94,19 @@ It adds the one entry to a **copy** of the newest save (`bitburnerSave_edited_..
 copy back to check it, and prints the path. Import it with Options > Import game. The
 original file is never written to.
 
-**The dev menu** (which you have already found) has an Achievements panel that grants any
-achievement by ID. That is the only way to `UNACHIEVABLE` - its condition is the literal
-`false`, with a comment telling players to modify the game - and it is there for anything
-else on this page you would rather not grind. Your call; nothing here uses it.
+**UNACHIEVABLE.** Its condition is the literal `false`, under the comment *"Hey Players! Yes,
+you're supposed to modify this to get the achievement!"* (`src/Achievements/Achievements.ts`).
+The game's dev menu has an Achievements panel that grants it, but the sidebar only offers
+that menu in development builds (`NODE_ENV === "development"`), never the Steam release -
+`ns.openDevMenu()` there is the ASCII-art joke that pays out YoureNotMeantToAccessThis, not
+the menu. So edit the save, the same way as EditSaveFile: export, then
+
+```bash
+node offline/edit-save.mjs <the exported file> --achievement UNACHIEVABLE
+```
+
+and import the copy it writes. The game never re-checks an achievement it finds in the
+save, and syncs the list to Steam when Options has Steam achievement sync on.
 
 ---
 
@@ -238,7 +255,7 @@ because it only buys what pays back.
 | Massive debt ($1b in debt) | Classes charge without checking your balance. `run tools/debt.js` (dry run) explains; `--go` puts you and every sleeve in Powerhouse Gym, about 13 hours with eight sleeves and no income. End of a node, FINISH off. |
 | IPvGO anticheat | Get ejected for cheating: a failed cheat, after any earlier cheat attempt in the same game, has a 10% chance. Needs the cheat API (BN14, or SF14.2). |
 | The Void | Secret. Its trigger is not in the achievements file and I did not find it. |
-| UNACHIEVABLE | See the dev menu note in section 1. |
+| UNACHIEVABLE | Edit the save - see the note in section 1. |
 
 ---
 

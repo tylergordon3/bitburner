@@ -2,13 +2,13 @@
 // The two spending helpers: lib/econ.js (home RAM, the whole run) and
 // lib/hacknet-nodes.js (the early hacknet NODE buyer, only while it is wanted).
 // They were one script; they are two so that the long-running one does not
-// carry 4.5GB of ns.hacknet.* - and so that "no hacknet spending" is a script
+// carry 5GB of ns.hacknet.* - and so that "no hacknet spending" is a script
 // that is never started rather than a branch inside one that always runs.
 // Run: npm test  (needs Node >=20).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { main as hacknetNodesMain, hacknetNodesWanted } from "../lib/hacknet-nodes.js";
+import { main as hacknetNodesMain, hacknetNodesWanted, nodeUpgradeGains, newNodeGain, pickNodeBuy } from "../lib/hacknet-nodes.js";
 import { main as econMain } from "../lib/econ.js";
 import { BITNODE, CHALLENGE, CONFIG, forNode, forReset } from "../lib/config.js";
 
@@ -16,11 +16,13 @@ const STOP = new Error("stop the fake script");
 const E = CONFIG.econ;
 
 /** A fake `ns` for the two scripts: money, a hacking level, a hacknet shop that records what it sold. */
-function fakeNs({ args = [], money = 1e6, hacking = 1, ticks = 1, levelUpTo = null } = {}) {
+function fakeNs({ args = [], money = 1e6, hacking = 1, ticks = 1, levelUpTo = null, rate = 1 } = {}) {
   const g = { bought: /** @type {string[]} */ ([]), nodes: 0, calls: /** @type {string[]} */ ([]), money, hacking, printed: /** @type {string[]} */ ([]) };
   const sell = (what, cost) => { g.bought.push(what); g.money -= cost; };
   const hn = {
     numNodes: () => g.nodes,
+    // A level-1, 1GB, 1-core node earning 1.5/s x `rate` (the node and player multipliers).
+    getNodeStats: () => ({ level: 1, ram: 1, cores: 1, production: 1.5 * rate }),
     getPurchaseNodeCost: () => 1_000,
     purchaseNode: () => { sell("node", 1_000); return g.nodes++; },
     getLevelUpgradeCost: () => 5_000,
@@ -102,6 +104,33 @@ test("hacknet-nodes.js buys nodes and their cheapest upgrades out of a slice of 
   assert.equal(g.nodes, E.hacknetMaxNodes);
   assert.deepEqual(g.bought, [...Array(E.hacknetMaxNodes).fill("node"), "level", "level"]);
   assert.ok(100_000 - g.money <= 100_000 * E.hacknetBudgetFraction);
+});
+
+test("hacknet-nodes.js buys nothing that will not pay for itself within hacknetPaybackMs", async () => {
+  // A node paying a tenth of normal: the first node is bought on the player's
+  // own multiplier (nothing to measure yet), and its measured rate then says
+  // neither a second node nor a level pays back inside the hour.
+  const { ns, g } = fakeNs({ args: [4], money: 1e9, hacking: 10, rate: 0.1 });
+  await run(hacknetNodesMain, ns);
+  assert.deepEqual(g.bought, ["node"]);
+});
+
+test("hacknet payback model: gains follow the game's production formula", () => {
+  const n = { level: 10, ram: 4, cores: 2, production: 10 * 1.5 * 1.035 ** 3 * 7 / 6 };
+  const g = nodeUpgradeGains(n);
+  const prod = (/** @type {number} */ l, /** @type {number} */ r, /** @type {number} */ c) => l * 1.5 * 1.035 ** (r - 1) * (c + 5) / 6;
+  assert.ok(Math.abs(g.level - (prod(11, 4, 2) - prod(10, 4, 2))) < 1e-9);
+  assert.ok(Math.abs(g.ram - (prod(10, 8, 2) - prod(10, 4, 2))) < 1e-9);
+  assert.ok(Math.abs(g.core - (prod(10, 4, 3) - prod(10, 4, 2))) < 1e-9);
+  // A new node at the fleet's measured multiplier (here 0.4), else the fallback.
+  assert.ok(Math.abs(newNodeGain([{ ...n, production: n.production * 0.4 }], 9) - 1.5 * 0.4) < 1e-9);
+  assert.equal(newNodeGain([], 2), 3);
+  // Soonest payback wins; over the horizon or over budget is never picked.
+  const opts = [{ cost: 100, gain: 1 }, { cost: 50, gain: 0.25 }, { cost: 10_000, gain: 1_000 }];
+  assert.equal(pickNodeBuy(opts, 1_000, 3_600), opts[0]);
+  assert.equal(pickNodeBuy(opts, 1e6, 3_600), opts[2]);
+  assert.equal(pickNodeBuy(opts, 1_000, 60), null);
+  assert.equal(pickNodeBuy([{ cost: 10, gain: 0 }], 1e6, 1e9), null);
 });
 
 test("hacknet-nodes.js exits by itself past the level cap - before the first purchase, or between two", async () => {
