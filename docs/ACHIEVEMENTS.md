@@ -17,8 +17,10 @@ As of the save of 2026-10-23, in **BN14.1** (about 60 hours in):
 - Source-Files: 1.3, 2.1, 3.3, 4.3, 5.3, 6.1, 7.3, 9.3, 10.3, 13.1. Never finished: BN8,
   11, 12, 14 (in progress), 15.
 
-Cheapest still open, in this order: **The Void** (`run tools/void.js`, a second),
-**Ten Steps Ahead** (the Go helper's streak focus, on in BN14 - hours), **Massive debt**
+The game here is **v3.0.1**; this plan was checked against the newer `dev` source,
+which adds **The Void** - not earnable until the game updates.
+
+Cheapest still open, in this order: **Ten Steps Ahead** (the Go helper's streak focus, on in BN14 - hours), **Massive debt**
 (`tools/debt.js`, 13 idle hours at a node's end).
 
 To see the current list at any time:
@@ -222,7 +224,7 @@ same thing: a corporation left to grow for days.
 | Small town | One division with 3,000 employees (six offices of 500). |
 | Full network | All 20 hacknet servers (SF9). |
 | That's the new limit | One hacknet server fully upgraded: level 300, 8,192GB, 128 cores, cache 15. The last cores cost about $1e30. |
-| It's time to install | 40 augmentations queued at once. Every NeuroFlux level bought is its own queue entry, so NeuroFlux can fill it. Each queued aug multiplies the next one's price by 1.9 (1.767 with SF11.3) - except Shadows of Anarchy and dark net lab augs, which neither pay nor raise it. |
+| It's time to install | 40 augmentations queued at once. Every NeuroFlux level bought is its own queue entry, so NeuroFlux can fill it. Each queued aug multiplies the next one's price by 1.9 (1.767 with SF11.3) - except Shadows of Anarchy augs, which neither pay nor raise it (in game v3.0.1; the next release exempts the dark net lab augs too). |
 | I asked for this | 100 different augmentations installed in one node. |
 | Neuroflux is love... | NeuroFlux Governor level 255 installed. Cost and reputation both grow 14% a level and the level resets every node. |
 | Download more ram | Home RAM at 2^30 GB. The last doubling is about $1e19. |
@@ -272,7 +274,7 @@ because it only buys what pays back.
 | --- | --- |
 | Massive debt ($1b in debt) | Classes charge without checking your balance. `run tools/debt.js` (dry run) explains; `--go` unassigns the gang, sets corporation dividends to 0 (income `killall` does not stop), and puts you and every sleeve in Powerhouse Gym - about 13 hours with eight sleeves. It gives up if the balance keeps rising. End of a node, FINISH off - the BN10 challenge's manual finish is the natural slot. |
 | IPvGO anticheat | Get ejected for cheating: a failed cheat, after any earlier cheat attempt in the same game, has a 10% chance. The cheat API needs SF14.2, or BN14 with SF14.1 already held (`checkCheatApiAccess`) - so not in a first BN14 run, and never in the BN14 challenge run (a cheat voids it). The `[14, 3]` run, or any node after it. Not automated. |
-| The Void | `run tools/void.js`. The Void is a location with no city that grants it when its page opens; `singularity.goToLocation("The Void")` opens it from anywhere. By hand: Ishima > "0x6C1" (the glitch), wait about 25 seconds. |
+| The Void | Not in v3.0.1 (added after it). Then `run tools/void.js`. The Void is a location with no city that grants it when its page opens; `singularity.goToLocation("The Void")` opens it from anywhere. By hand: Ishima > "0x6C1" (the glitch), wait about 25 seconds. |
 | UNACHIEVABLE | Edit the save - see the note in section 1. |
 
 ---

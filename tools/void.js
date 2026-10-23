@@ -9,6 +9,10 @@
 // only checks the city when the location HAS one (NetscriptFunctions/Singularity.ts
 // goToLocation), so "The Void" opens from anywhere.
 //
+// NOT IN v3.0.1: the achievement, The Void's page and the glitch's warp to it were
+// added after that release (bitburner-src dev, 2026-10). On v3.0.1 the call is
+// refused and the glitch is a dead end; run this again once the game updates.
+//
 // A user-run one-shot, not part of the daemon: it moves the game's page (not your
 // work - goToLocation only routes the UI), and that is your screen, not the bot's.
 // Click back to wherever you were afterwards.
@@ -26,5 +30,6 @@ export async function main(ns) {
   const ok = ns.singularity.goToLocation(/** @type {any} */ ("The Void"));
   ns.tprint(ok
     ? "void: opened The Void - the achievement pops within a second. Click back to where you were."
-    : "void: the game refused goToLocation(\"The Void\") - go to Ishima, open \"0x6C1\" and wait ~25s.");
+    : "void: the game refused goToLocation(\"The Void\"). This game version has no Void (it, and the " +
+      "achievement, arrive after v3.0.1) - run this again once the game updates.");
 }
