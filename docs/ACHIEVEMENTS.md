@@ -158,9 +158,9 @@ wait the natural place for the 13 hours of `tools/debt.js`.)
 **BN15 and BN12-to-50 last.** The bot has no hacking finish in BN15 (The Red Pill comes
 only from the dark net's labs there). The Bladeburner black ops end it without one -
 `destroyW0r1dD43m0n` accepts them in place of the hacking requirement - and
-`bn15/daemon.js` runs the Bladeburner engine once `BITNODE[15].bladeburner.enabled` is
-on. Slow (rank x0.2, skills x3), but it earns SF15 and the BN15 challenge with no dark
-net code. Until that switch is on, the plan halts in BN15 for the player.
+`bn15/daemon.js` runs the Bladeburner engine (`BITNODE[15].bladeburner.enabled`, on
+since 2026-10-23). Slow (rank x0.2, skills x3), but it earns SF15 and the BN15 challenge
+with no dark net code. Switched off, the plan halts in BN15 for the player.
 
 Three things the order cannot do for you:
 

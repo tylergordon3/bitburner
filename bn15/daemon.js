@@ -1,7 +1,8 @@
 // bn15/daemon.js
 //
 // BN15 ("The Secrets of the Dark Net") orchestrator. The strategy is the shared
-// lib/gang-daemon.js; what the node owns is BITNODE[15] in lib/config.js.
+// lib/blade-daemon.js (or lib/gang-daemon.js with Bladeburner switched off);
+// what the node owns is BITNODE[15] in lib/config.js.
 // Verified against bitburner-src (dev) BitNode.tsx on 2026-10-03:
 //
 //   HackingLevelMultiplier 0.6, HackingSpeedMultiplier 0.6
@@ -10,7 +11,7 @@
 //   AugmentationMoneyCost 3, DaedalusAugsRequirement 20
 //   GangUniqueAugs 0.3                            the gang sells far fewer augs
 //   CorporationValuation 0.2
-//   BladeburnerRank 0.2, BladeburnerSkillCost 3   Bladeburner is NOT the way here
+//   BladeburnerRank 0.2, BladeburnerSkillCost 3   slow, but the only finish (below)
 //   WorldDaemonDifficulty 2                       hacking 6000 to finish
 //
 // WHAT THIS DAEMON DOES NOT DO: the node's own mechanic - and so it cannot
