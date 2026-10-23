@@ -1,0 +1,6 @@
+# Everything is LF in the repo and in the WSL working tree; the game and the
+# filesync tool both read LF. Windows git (core.autocrlf=true) would otherwise
+# commit CRLF from files edited on the Windows side.
+* text=auto eol=lf
+*.exe binary
+*.gz binary
