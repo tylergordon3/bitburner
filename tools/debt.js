@@ -20,11 +20,20 @@
 //                                         given away is gone - this is the point.
 // Afterwards: killall; run /early/driver.js
 //
-// RAM: Singularity (travel, gym, donate) + sleeve calls - ~25GB at SF4.3.
+// `killall` stops the scripts, not the game's own income: gang members keep the
+// task they were given and a public corporation keeps paying its dividend. So
+// --go also unassigns every gang member and sets the dividend to 0, then watches
+// the balance - if it keeps RISING (some income this cannot see), it stops and
+// says so rather than sit in the gym for ever.
+//
+// RAM: Singularity (travel, gym, donate) + sleeve calls - ~25GB at SF4.3 - plus
+// gang (2.5GB) and corporation.issueDividends (20GB).
 
 const TARGET = -1e9;
 const GYM_COST_PER_SEC = 120 * 20;   // gym base cost x Powerhouse costMult
 const TICK_MS = 10_000;
+// Ticks in a row the balance may rise before the run is called off.
+const MAX_RISING_TICKS = 6;
 
 /** @param {NS} ns */
 export async function main(ns) {
@@ -66,6 +75,24 @@ export async function main(ns) {
       : `debt: could not donate to ${dumpFaction} (donations not unlocked there?) - carrying on with $${ns.format.number(all)} to burn.`);
   }
 
+  // The income no script runs: gang tasks and corporation dividends.
+  let unassigned = 0;
+  try {
+    if (ns.gang.inGang()) {
+      for (const member of ns.gang.getMemberNames()) {
+        if (ns.gang.setMemberTask(member, "Unassigned")) unassigned++;
+      }
+    }
+  } catch { /* no gang API in this run */ }
+  let dividendsOff = false;
+  try {
+    if (ns.corporation.hasCorporation()) {
+      ns.corporation.issueDividends(0);
+      dividendsOff = true;
+    }
+  } catch { /* private corporation (no dividends), or no corporation API */ }
+  ns.tprint(`debt: ${unassigned} gang members unassigned; corporation dividends ${dividendsOff ? "set to 0" : "untouched (none)"}.`);
+
   let started = 0;
   for (let i = 0; i < sleeves; i++) {
     try { if (ns.sleeve.setToGymWorkout(i, gym, stat)) started++; } catch { /* shock, wrong city */ }
@@ -75,17 +102,32 @@ export async function main(ns) {
   ns.tprint(`debt: ${started}/${sleeves} sleeves and ${self ? "you" : "NOT you"} are in the gym. Leave them there.`);
   if (!self && started === 0) return;
 
+  let last = ns.getPlayer().money;
+  let rising = 0;
   while (ns.getPlayer().money > TARGET) {
+    await ns.sleep(TICK_MS);
     const now = ns.getPlayer().money;
     ns.print(`$${ns.format.number(now)} - ~${hours(now)}h to go`);
-    await ns.sleep(TICK_MS);
+    rising = now > last ? rising + 1 : 0;
+    last = now;
+    if (rising >= MAX_RISING_TICKS) {
+      stopAll(ns, sleeves);
+      ns.tprint(`debt: the balance rose for ${rising} checks in a row ($${ns.format.number(now)}) - some income is still on ` +
+        "(a script on another host, stock sales, a gang or corp this could not reach). Stopped; find it and run again.");
+      return;
+    }
   }
   // The game checks achievements every few seconds; give it one look before
   // anything can earn the balance back.
   await ns.sleep(TICK_MS);
+  stopAll(ns, sleeves);
+  ns.tprint("debt: $1b in debt reached - \"Massive debt\" should have popped. Restart the bot: killall; run /early/driver.js");
+}
+
+/** Out of the gym: the player and every sleeve. @param {NS} ns @param {number} sleeves */
+function stopAll(ns, sleeves) {
   try { ns.singularity.stopAction(); } catch { /* nothing to stop */ }
   for (let i = 0; i < sleeves; i++) {
     try { ns.sleeve.setToIdle(i); } catch { /* fine */ }
   }
-  ns.tprint("debt: $1b in debt reached - \"Massive debt\" should have popped. Restart the bot: killall; run /early/driver.js");
 }

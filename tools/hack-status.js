@@ -225,6 +225,18 @@ export async function main(ns) {
       ns.tprint(`  Late-game plan: windows up to ${deepest} deep, ${state.processes ?? 0} of ` +
         `${H.adaptive.maxProcesses} worker processes in flight (hacking.adaptive).`);
     }
+    // Just-in-time hack legs (hacking.justInTime): a skip is harmless, but many
+    // of them mean the hacks are not finding their room in time.
+    const jit = state.jit;
+    if (jit?.enabled) {
+      ns.tprint(`  Just-in-time hacks: ${jit.launched} exec'd, ${jit.skipped} skipped, ${jit.late} late, ${jit.partial} in part.`);
+    }
+    // What one more GB of botnet would earn (the server buyer reads this).
+    const rate = globalThis.gordHackRate;
+    if (rate) {
+      ns.tprint(`  Planned income $${ns.format.number((rate.incomePerMs ?? 0) * 1000)}/s; ` +
+        `one more TB would add $${ns.format.number((rate.perMsPerGB ?? 0) * 1000 * 1024)}/s.`);
+    }
     if (state.stockPush) {
       ns.tprint("  BN8 ranking: the trader's wished servers first ([stock]), then hacking exp ([exp]) - " +
         "the first target's objective is " + `${state.targets?.[0]?.objective ?? "?"}; $/sec below is what the ` +

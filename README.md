@@ -397,7 +397,8 @@ why `lib/` is full of them.
 ## Capabilities
 
 [`lib/capabilities.js`](lib/capabilities.js) centralizes "which gated API is usable
-this run" into one **0GB** check (it reads `ns.getResetInfo()`, which is free).
+this run" into one **1GB** check (it reads `ns.getResetInfo()`, which costs 1GB -
+the daemons already pay it, so it adds nothing there).
 Every Source-File/BitNode-gated API — Singularity, Gang, Corporation, Sleeves,
 Grafting, Bladeburner, Hacknet-Server, Stanek — is available when you're in its
 BitNode *or* hold its Source-File, so this replaces scattered `try/catch` probes
@@ -517,7 +518,7 @@ minutes. `go.enabled: false` hands the board back for manual play.
 ## Sleeves
 
 [`lib/sleeves.js`](lib/sleeves.js) is an off-home helper launched by **every** daemon
-(it's ~72GB of `ns.sleeve.*` at 4GB a method, so it never shares home, and it's
+(it's ~63GB, mostly `ns.sleeve.*` at 4GB a method, so it never shares home, and it's
 launched `optional` outside BN10 so it waits quietly until a host has room). It
 self-exits where sleeves
 are unavailable, so launching it everywhere is inert on nodes that can't use it.
@@ -573,7 +574,7 @@ all it has left), because installing an aug on a sleeve zeroes its exp. **Buying
 where The Covenant sells them, so that shop is its own helper,
 [`lib/sleeve-shop.js`](lib/sleeve-shop.js) (~26GB), launched by the daemon core only
 in `sleeves.shopBitNode`: its four `ns.sleeve.*` shop calls are 4GB each and would
-otherwise be charged to the manager on every node (the manager is ~55GB without
+otherwise be charged to the manager on every node (the manager is ~63GB without
 them). The shop publishes `gordSleeveShop`, which the manager folds into
 `gordSleeveState`, so the SLEEVE tab is unchanged.
 

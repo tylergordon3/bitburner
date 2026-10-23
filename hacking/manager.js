@@ -108,6 +108,11 @@ function weakenAmount(ns) {
   return _weakenAmount;
 }
 
+/** Hack legs are exec'd just in time (hacking.justInTime) - read live, so a config change applies. */
+function jitOn() {
+  return H.justInTime?.enabled === true;
+}
+
 // ── Network snapshot ─────────────────────────────────────────────────────────
 
 /**
@@ -495,6 +500,19 @@ function targetMath(ns, target) {
     hackPct = ns.hackAnalyze(target) * k.hackPct;
     growThreadsFor = (remaining) => Math.ceil(ns.growthAnalyze(target, 1 / Math.max(0.01, remaining)) * k.growThreads);
   }
+  // Just-in-time hacks hold their RAM for only part of the window, and the plans
+  // are billed for that part (batch-logic planBatch's hackHold). Rounded up to a
+  // hundredth, so the slow drift of leg times with hacking level does not
+  // re-plan every tick.
+  let hackHold = 1;
+  if (jitOn()) {
+    const schedule = B.legSchedule({ ...times, spacing: H.batchSpacingMs, margin: H.launchMarginMs });
+    hackHold = Math.ceil(B.jitHackHold({
+      hackTime: times.hackTime, lastLanding: schedule.lastLanding,
+      // From the moment its room is booked (bookDueHacks) to its landing.
+      leadMs: H.justInTime.leadMs + H.justInTime.reserveMs, tickMs: H.batchSpacingMs,
+    }) * 100) / 100;
+  }
   // A batch plan is a pure function of its hack thread count and of inputs that
   // hardly ever move (planCacheFor), while the sizing searches ask for the same
   // few dozen thread counts on every tick - so each is planned once and kept.
@@ -503,7 +521,7 @@ function targetMath(ns, target) {
   // other.)
   const cache = planCacheFor(useFormulas ? target : `${target}@${security}`, [
     hackPct, ns.getServerMaxMoney(target), minSecurity,
-    _growMult, weakenAmount(ns), RAM.hack, RAM.grow, RAM.weaken, _hosts.key,
+    _growMult, weakenAmount(ns), RAM.hack, RAM.grow, RAM.weaken, _hosts.key, hackHold,
   ].join("|"));
   const plans = cache.plans;
   const plan = (hackThreads) => {
@@ -521,6 +539,7 @@ function targetMath(ns, target) {
         growPadding: H.growPadding,
         hosts: _hosts.rooms,
         minSecurity,
+        hackHold,
       });
       plans.set(hackThreads, batch);
     }
@@ -632,7 +651,10 @@ function prepEstimateMs(ns, target, math, capacity) {
  *   per target with batches in flight: how many, and the depth of the window
  *   the latest was launched into
  */
-let _rank = { at: 0, ram: 0, list: /** @type {Ranked[]} */ ([]), pushing: false, deep: false };
+let _rank = {
+  at: 0, ram: 0, list: /** @type {Ranked[]} */ ([]), pushing: false, deep: false,
+  rate: { incomePerMs: 0, perMsPerGB: 0 },
+};
 // A window counts as full, for the switch to the late-game plan, at this share
 // of its depth (a full window is forever one batch short for a tick or two).
 const DEEP_READY_FILL = 0.9;
@@ -749,6 +771,8 @@ function rankTargets(ns, snap, capacity, now, incumbents, flying, wishes = null)
 
   let list;
   let deep = false;
+  // (Not dollars while the trader's wishes are worked: no rate then.)
+  let rate = { incomePerMs: 0, perMsPerGB: 0 };
   if (wishes) {
     list = rankForStocks(ns, capacity, cands, weight, wishes);
   } else {
@@ -768,8 +792,17 @@ function rankTargets(ns, snap, capacity, now, incumbents, flying, wishes = null)
     });
     list = chosen.list;
     deep = chosen.deep;
+    // What one more GB of botnet would earn under the plan in force - what a
+    // server purchase is weighed against (published as globalThis.gordHackRate).
+    rate = B.marginalIncome({
+      totalRam: capacity,
+      curves: chosen.curves ?? curves,
+      maxTargets: chosen.targetCap ?? H.maxTargets,
+      minTargetRam: H.minTargetRam,
+      bonus,
+    });
   }
-  _rank = { at: now, ram: capacity, list, pushing: !!wishes, deep };
+  _rank = { at: now, ram: capacity, list, pushing: !!wishes, deep, rate };
   return list;
 }
 
@@ -972,7 +1005,11 @@ function deepen(list, capacity, cands, bonus, ready) {
     : deep.income > plain.income * (1 + A.minGain);
   // (The default plan too is held to the process budget, should that be set
   // below what six windows of sixty take; untrimmed it is returned as it came.)
-  return { deep: better, list: better ? deep.list : plain.trimmed ? plain.list : list };
+  return {
+    deep: better, list: better ? deep.list : plain.trimmed ? plain.list : list,
+    // What the deep plan was allocated from (rankTargets' gordHackRate).
+    ...(better ? { curves, targetCap } : null),
+  };
 }
 
 // ── Launching ────────────────────────────────────────────────────────────────
@@ -1049,8 +1086,10 @@ function launchPrep(ns, snap, target, state, math, ramCap, now) {
  * @param {NS} ns @param {Snapshot} snap @param {any} plan
  * @param {{hack: number, weaken1: number, grow: number, weaken2: number}} d leg delays
  * @param {number} minSecurity the target's
+ * @param {boolean} [jit] the hack leg is exec'd later, on its own (launchDueHacks):
+ *        place the other three
  */
-function placeBatch(ns, snap, plan, d, minSecurity) {
+function placeBatch(ns, snap, plan, d, minSecurity, jit = false) {
   // The grow should go whole onto one host (batch-logic allocate does that when
   // it can). When no host has the room it gets split, and a split grow lands
   // weaker than planned - so that batch carries extra grow threads, and the
@@ -1076,7 +1115,7 @@ function placeBatch(ns, snap, plan, d, minSecurity) {
   const growLeg = { script: GROW, threads: growThreads, ram: RAM.grow, delay: d.grow };
   const hackLeg = { script: HACK, threads: plan.hackThreads, ram: RAM.hack, delay: d.hack };
   const legs = [
-    ...(plan.split ? [hackLeg, growLeg] : [growLeg, hackLeg]),
+    ...(jit ? [growLeg] : plan.split ? [hackLeg, growLeg] : [growLeg, hackLeg]),
     { script: WEAKEN, threads: plan.weaken1Threads, ram: RAM.weaken, delay: d.weaken1 },
     { script: WEAKEN, threads: weaken2Threads, ram: RAM.weaken, delay: d.weaken2 },
   ];
@@ -1094,13 +1133,16 @@ function placeBatch(ns, snap, plan, d, minSecurity) {
  * @param {{hack: number, weaken1: number, grow: number, weaken2: number}} landAt
  *        when each leg is due to land
  * @param {number} procsLeft worker processes left of hacking.adaptive.maxProcesses
+ * @param {number} [jitHackTime] the target's prepped hack time when the hack leg
+ *        is to be exec'd just in time (hacking.justInTime); 0 = with the batch
  */
-function launchBatch(ns, snap, target, cycle, timing, minSecurity, id, now, math, landAt, procsLeft) {
+function launchBatch(ns, snap, target, cycle, timing, minSecurity, id, now, math, landAt, procsLeft, jitHackTime = 0) {
   // Delays from the CURRENT leg times (lib/batch-logic.js landingDelays), so each
   // leg lands on its slot whatever the target's security is right now.
   const d = timing.delays;
+  const jit = jitHackTime > 0;
 
-  let placed = placeBatch(ns, snap, cycle.plan, d, minSecurity);
+  let placed = placeBatch(ns, snap, cycle.plan, d, minSecurity, jit);
   const least = Math.ceil(cycle.plan.hackThreads * H.fitShrinkFloor);
   if (!placed.alloc.ok && math && least < cycle.plan.hackThreads
     && snap.totalUsable >= cycle.plan.ram * H.fitShrinkFloor) {
@@ -1126,7 +1168,7 @@ function launchBatch(ns, snap, target, cycle, timing, minSecurity, id, now, math
     while (lo < hi) {
       const mid = Math.ceil((lo + hi) / 2);
       const plan = math.plan(mid);
-      const smaller = plan ? placeBatch(ns, snap, plan, d, minSecurity) : null;
+      const smaller = plan ? placeBatch(ns, snap, plan, d, minSecurity, jit) : null;
       if (smaller?.alloc.ok) {
         lo = mid;
         found = smaller;
@@ -1140,7 +1182,7 @@ function launchBatch(ns, snap, target, cycle, timing, minSecurity, id, now, math
   if (!alloc.ok) return null;
   // The process budget is a hard cap: a batch whose legs had to be split into
   // more processes than are left of it waits for a tidier moment.
-  if (alloc.assignments.length > procsLeft) return null;
+  if (alloc.assignments.length + (jit ? 1 : 0) > procsLeft) return null;
   if (!execAll(ns, alloc.assignments, target, `batch-${id}`)) return null;
   applyAllocation(snap, alloc);
 
@@ -1151,14 +1193,20 @@ function launchBatch(ns, snap, target, cycle, timing, minSecurity, id, now, math
     id,
     ram: plan.ram + extraRam,
     // When each leg lands and the RAM it gives back then (heldRam), in landing
-    // order: H, W1, G, W2 - with the padding a split grow was launched with.
+    // order: H, W1, G, W2 - with the padding a split grow was launched with. A
+    // just-in-time hack holds nothing until launchDueHacks execs it (`pending`).
     legs: [
-      { at: landAt.hack, ram: plan.hackThreads * RAM.hack },
+      { at: landAt.hack, ram: plan.hackThreads * RAM.hack, pending: jit },
       { at: landAt.weaken1, ram: plan.weaken1Threads * RAM.weaken },
       { at: landAt.grow, ram: placed.growThreads * RAM.grow },
       { at: landAt.weaken2, ram: placed.weaken2Threads * RAM.weaken },
     ],
-    processes: alloc.assignments.length,
+    // The hack still to be exec'd: from execAt, leadMs before it has to start.
+    jitHack: jit
+      ? { threads: plan.hackThreads, landAt: landAt.hack, preppedTime: jitHackTime, execAt: landAt.hack - jitHackTime - H.justInTime.leadMs }
+      : null,
+    // (One process held for the hack until it is placed.)
+    processes: alloc.assignments.length + (jit ? 1 : 0),
     depth: cycle.depth,
     moneyFraction: plan.hackedFraction,
     securityAdded: plan.securityAdded + extraGrow * H.securityPerGrow,
@@ -1173,8 +1221,72 @@ function launchBatch(ns, snap, target, cycle, timing, minSecurity, id, now, math
  */
 function heldRam(batch, now) {
   let sum = 0;
-  for (const leg of batch.legs) if (leg.at > now) sum += leg.ram;
+  for (const leg of batch.legs) if (leg.at > now && !leg.pending) sum += leg.ram;
   return sum;
+}
+
+/**
+ * Exec the just-in-time hack legs that are due (hacking.justInTime), before any
+ * target launches anything this tick: the planner budgeted each window for its
+ * hacks at this moment, so they get first pick of the free RAM.
+ *
+ * Each lands exactly on its batch's slot (batch-logic jitHackStep: the delay is
+ * worked out from the hack time NOW, which the game locks at exec), waits a tick
+ * while security is raised or the room is not there, and is skipped once it can
+ * no longer make its slot - or when its target has drifted, since a hack is the
+ * one leg that makes a drifting target worse. A skipped hack is harmless: its
+ * grow lands on a full server. Part of a hack, when only part fits at the last
+ * moment, is launched (it steals less; the grow is sized for the whole).
+ * @param {NS} ns @param {ReturnType<typeof newSchedulerState>} s @param {Snapshot} snap @param {number} now
+ */
+function launchDueHacks(ns, s, snap, now) {
+  for (const b of s.inFlight) {
+    const due = b.jitHack;
+    if (!due || now < due.execAt) continue;
+    const leg = b.legs[0];
+    const done = (/** @type {number} */ procs, /** @type {boolean} */ launched) => {
+      b.jitHack = null;
+      leg.pending = false;
+      if (!launched) leg.ram = 0;
+      b.processes += procs - 1;
+      s.processes += procs - 1;
+      s.jit[launched ? "launched" : "skipped"]++;
+    };
+    if (s.draining.has(b.target)) { done(0, false); continue; }
+    const curHackTime = ns.getHackTime(b.target);
+    const base = { now, landAt: due.landAt, curHackTime, preppedHackTime: due.preppedTime, tickMs: H.batchSpacingMs };
+    // (Not called `go`: the RAM analyser matches identifiers by name, and that
+    // one names the IPvGO API.)
+    const verdict = B.jitHackStep(base);
+    if (verdict.action === "wait") continue;
+    if (verdict.action === "skip") { s.jit.late++; done(0, false); continue; }
+    const alloc = B.allocate(snap.workers, [{ script: HACK, threads: due.threads, ram: RAM.hack, delay: verdict.delay }]);
+    if (!alloc.ok && B.jitHackStep({ ...base, noRoom: true }).action === "wait") continue;
+    if (!alloc.assignments.length) { done(0, false); continue; }
+    if (!execAll(ns, alloc.assignments, b.target, `batch-${b.id}`)) { done(0, false); continue; }
+    applyAllocation(snap, alloc);
+    if (!alloc.ok) {
+      s.jit.partial++;
+      leg.ram = alloc.assignments.reduce((sum, a) => sum + a.threads, 0) * RAM.hack;
+    }
+    done(alloc.assignments.length, true);
+  }
+}
+
+/**
+ * Keep the room for the just-in-time hacks due within hacking.justInTime.reserveMs
+ * out of this tick's free RAM, so a batch launched now does not take the space a
+ * hack is about to need (the planner billed the hack from that moment on - see
+ * jitHackHold). Only the snapshot is touched; nothing is exec'd.
+ * @param {ReturnType<typeof newSchedulerState>} s @param {Snapshot} snap @param {number} now
+ */
+function bookDueHacks(s, snap, now) {
+  const horizon = now + (H.justInTime?.reserveMs ?? 0);
+  for (const b of s.inFlight) {
+    const due = b.jitHack;
+    if (!due || due.execAt > horizon || s.draining.has(b.target)) continue;
+    applyAllocation(snap, B.allocate(snap.workers, [{ script: HACK, threads: due.threads, ram: RAM.hack }]));
+  }
 }
 
 /** @param {NS} ns */
@@ -1202,6 +1314,9 @@ export function newSchedulerState() {
     lastMode: "",
     lastLogAt: 0,
     lastIdleWarnAt: -Infinity,   // throttle on the "nothing scored" warning
+    // Just-in-time hack legs (launchDueHacks): exec'd, skipped (no room in time,
+    // or the target drifted), skipped for being late, launched only in part.
+    jit: { launched: 0, skipped: 0, late: 0, partial: 0 },
   };
 }
 
@@ -1215,7 +1330,7 @@ export function resetCaches() {
   _netServers = [];
   _rootAt = 0;
   _copied.clear();
-  _rank = { at: 0, ram: 0, list: [], pushing: false, deep: false };
+  _rank = { at: 0, ram: 0, list: [], pushing: false, deep: false, rate: { incomePerMs: 0, perMsPerGB: 0 } };
   _planCache.clear();
   _growMult = 1;
   _hosts = { rooms: [], key: 0 };
@@ -1325,14 +1440,19 @@ function serviceTarget(ns, s, snap, target, budgetRam, now, prepRam = budgetRam,
     const landAt = { hack: first + L.hack, weaken1: first + L.weaken1, grow: first + L.grow, weaken2: first + L.weaken2 };
     const batch = waitForCalm ? null
       : launchBatch(ns, snap, target, cycle, timing, state.minSecurity, s.batchId, now, rolling ? null : math, landAt,
-        H.adaptive.maxProcesses - s.processes);
+        H.adaptive.maxProcesses - s.processes, jitOn() ? math.times.hackTime : 0);
     if (waitForCalm) {
       mode = "Batching";
     } else if (batch) {
       s.batchId++;
       s.inFlight.push(batch);
       s.processes += batch.processes;
-      s.nextWindowAt.set(target, timing.base + cycle.launchInterval);
+      // With just-in-time hacks a thin window's batches are spread over its
+      // window rather than launched back to back: the peak of hack legs on the
+      // hosts that the plan budgets for (batch-logic hackPeak) assumes they are.
+      // (It earns the same - `depth` batches per window either way.)
+      const spacing = jitOn() ? Math.max(cycle.launchInterval, schedule.lastLanding / cycle.depth) : cycle.launchInterval;
+      s.nextWindowAt.set(target, timing.base + spacing);
       mode = "Batching";
     } else {
       // Free RAM is there in total but not in the right places (or an exec
@@ -1347,6 +1467,26 @@ function serviceTarget(ns, s, snap, target, budgetRam, now, prepRam = budgetRam,
     target, mode, cycle, math, state, open,
     claim: cycle ? cycle.depth * cycle.cost : 0,
     objective: /** @type {string | undefined} */ (undefined),
+  };
+}
+
+/**
+ * Publish what the botnet earns and what one more GB of it would add, for the
+ * daemon's server buyer: globalThis.gordHackRate =
+ *   { perMsPerGB, incomePerMs, capacityGB, updatedAt }
+ * perMsPerGB: $/ms one more GB of botnet RAM would add under the current plan
+ * (batch-logic marginalIncome) - 0 where RAM is not what limits, and while the
+ * ranking is for the stock trader rather than money (BN8). incomePerMs: what
+ * the plan expects to earn ($/ms). Re-planned every targetRescoreMs; stamped
+ * every tick, so a stale stamp means no manager is running.
+ * @param {Snapshot} snap @param {number} now
+ */
+function publishRate(snap, now) {
+  globalThis.gordHackRate = {
+    perMsPerGB: _rank.rate.perMsPerGB,
+    incomePerMs: _rank.rate.incomePerMs,
+    capacityGB: snap.capacity,
+    updatedAt: now,
   };
 }
 
@@ -1379,6 +1519,8 @@ export function step(ns, s, now) {
   // batches in flight; a prep's handful of legs are not batches and not counted.
   s.processes = 0;
   for (const b of s.inFlight) s.processes += b.processes;
+  // The hacks that are due go first: their windows were budgeted for them.
+  launchDueHacks(ns, s, snap, now);
 
   // What the botnet can plan with right now: RAM free this tick plus what our own
   // in-flight batches are holding (they release it as they land). Ranking uses
@@ -1406,6 +1548,8 @@ export function step(ns, s, now) {
   // for good, 4% under what it earned before the thin window followed its
   // budget.
   const exactRam = Math.min(budgetRam, snap.totalUsable + held);
+  // ...and the room the hacks due shortly will need is kept from this tick's launches.
+  bookDueHacks(s, snap, now);
 
   // Targets we are committed to: batches in flight (how many, and how deep the
   // window the latest was launched into), or a prep whose legs are out.
@@ -1445,6 +1589,7 @@ export function step(ns, s, now) {
       moneyPercent: 0, security: 0, minSecurity: 0, prepUntil: 0, targets: [],
       claimedRam: 0, capacityRam: snap.capacity, freeRam: snap.totalUsable, updatedAt: now,
     };
+    publishRate(snap, now);
     return "Idle";
   }
 
@@ -1551,8 +1696,11 @@ export function step(ns, s, now) {
     claimedRam: claimed,
     capacityRam: snap.capacity,
     freeRam: snap.totalUsable,
+    // Just-in-time hack legs so far (hacking.justInTime): exec'd / skipped / late / in part.
+    jit: { enabled: jitOn(), ...s.jit },
     updatedAt: now,
   };
+  publishRate(snap, now);
 
   return mode;
 }

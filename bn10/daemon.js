@@ -55,7 +55,8 @@ import {
 } from "../lib/player-actions.js";
 import { getNextAugTarget, getMoneyHoardGoal } from "../lib/aug-targets.js";
 import { forNode } from "../lib/config.js";
-import { playerMoney, maybeBuyInfra, inGangSafe } from "../lib/daemon-lib.js";
+import { maybeBuyInfra, maybeSetupGang } from "../lib/daemon-lib.js";
+import { playerMoney } from "../lib/ns-utils.js";
 import { runDaemon, decidePrelude, decideAugFlow, pursueNextFaction } from "../lib/daemon-core.js";
 // Megacorp faction grinding (factions.pursueCompanyFactions): only this node
 // imports it, so only this daemon pays for its Singularity calls.
@@ -65,41 +66,8 @@ import { makeCompanyWork } from "../lib/company-work.js";
 const CFG = forNode(10);
 const GANG = CFG.gang;
 const SELF = CFG.paths.daemon;                // this daemon's path (post-reset callback)
-// Criminal factions that can found a gang; whichever we're already in gets used.
-// Cast to any[] so its elements don't trip checkJs against FactionName - see
-// [[bitburner-enum-string-casts]].
-const CRIMINAL_FACTIONS = /** @type {any[]} */ (GANG.criminalFactions);
-
-/**
- * Found a gang the moment we're eligible: karma past the gate AND already a member
- * of a criminal faction (acceptInvites joins those on the normal aug path). We
- * never grind toward it here - crime done for money sinks karma over a long run,
- * and this snaps the gang up when it crosses. Needs no player attention, so it
- * runs from the core's setupGang hook. Returns a status object worth reporting,
- * or null.
- * @param {NS} ns
- */
-function maybeSetupGang(ns) {
-  if (inGangSafe(ns)) return null;
-
-  const player = ns.getPlayer();
-  if ((player.karma ?? 0) > GANG.karma) return null; // not eligible yet
-
-  const joined = player.factions ?? [];
-  const faction = CRIMINAL_FACTIONS.find(f => joined.includes(f));
-  if (!faction) {
-    return { action: "Gang (karma ready)", detail: "Awaiting a criminal faction invite" };
-  }
-
-  try {
-    if (ns.gang.createGang(/** @type {any} */ (faction))) {
-      ns.tprint(`Created gang with ${faction}!`);
-      return { action: "Gang Created", detail: faction };
-    }
-  } catch { /* no SF2 in this run - nothing to found */ }
-
-  return null;
-}
+// The gang: snapped up the moment karma crosses the gate (lib/daemon-lib.js
+// maybeSetupGang) - crime done for money sinks karma over a long run.
 
 /**
  * Always the HALT sentinel (<= 0), which ensureBackdoorHelpers reads as "do everything
@@ -277,7 +245,7 @@ export async function main(ns) {
     cfg: CFG,
     self: SELF,
     plannedNextBN,
-    setupGang: maybeSetupGang,
+    setupGang: ns => maybeSetupGang(ns, GANG),
     decide: decideNextPriority,
     // The BN10 headline act: the sleeve manager is required, not a luxury.
     sleevesOptional: false,

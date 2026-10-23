@@ -9,14 +9,14 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { main as hacknetNodesMain, hacknetNodesWanted, nodeUpgradeGains, newNodeGain, pickNodeBuy } from "../lib/hacknet-nodes.js";
-import { main as econMain } from "../lib/econ.js";
+import { main as econMain, fleetFull, homeUpgradeWanted } from "../lib/econ.js";
 import { BITNODE, CHALLENGE, CONFIG, forNode, forReset } from "../lib/config.js";
 
 const STOP = new Error("stop the fake script");
 const E = CONFIG.econ;
 
 /** A fake `ns` for the two scripts: money, a hacking level, a hacknet shop that records what it sold. */
-function fakeNs({ args = [], money = 1e6, hacking = 1, ticks = 1, levelUpTo = null, rate = 1 } = {}) {
+function fakeNs({ args = [], money = 1e6, hacking = 1, ticks = 1, levelUpTo = null, rate = 1, fleet = { limit: 0, maxRam: 0, servers: {} }, coreCost = 1e9 } = {}) {
   const g = { bought: /** @type {string[]} */ ([]), nodes: 0, calls: /** @type {string[]} */ ([]), money, hacking, printed: /** @type {string[]} */ ([]) };
   const sell = (what, cost) => { g.bought.push(what); g.money -= cost; };
   const hn = {
@@ -48,7 +48,16 @@ function fakeNs({ args = [], money = 1e6, hacking = 1, ticks = 1, levelUpTo = nu
     singularity: {
       getUpgradeHomeRamCost: () => 100_000,
       upgradeHomeRam: () => { g.bought.push("home-ram"); g.money -= 100_000; return true; },
+      getUpgradeHomeCoresCost: () => coreCost,
+      upgradeHomeCores: () => { g.bought.push("home-core"); g.money -= coreCost; return true; },
     },
+    // The purchased-server fleet (lib/econ.js only spends once it is full).
+    cloud: {
+      getServerLimit: () => fleet.limit,
+      getRamLimit: () => fleet.maxRam,
+      getServerNames: () => Object.keys(fleet.servers),
+    },
+    getServerMaxRam: h => fleet.servers[h] ?? 0,
   });
   return { ns, g };
 }
@@ -173,4 +182,40 @@ test("econ.js buys home RAM and nothing else: no hacknet call is left in it to p
   const held = fakeNs({ args: [950_000, 2], money: 1e6 });
   await run(econMain, held.ns);
   assert.deepEqual(held.g.bought, []);
+});
+
+test("econ.js: home RAM and cores only once the server fleet is full - every slot, every server at the cap", async () => {
+  const servers = n => Object.fromEntries(Array.from({ length: n }, (_, i) => [`cloud-${i}`, 1024]));
+  const buys = async fleet => {
+    const { ns, g } = fakeNs({ args: [0, 4], money: 1e7, fleet, coreCost: 2e6 });
+    await run(econMain, ns);
+    return g.bought;
+  };
+  // A slot free, or a server under the cap: the money is the fleet's.
+  assert.deepEqual(await buys({ limit: 25, maxRam: 1024, servers: servers(24) }), []);
+  assert.deepEqual(await buys({ limit: 25, maxRam: 1024, servers: { ...servers(25), "cloud-3": 512 } }), []);
+  // Full: home RAM, then a core.
+  assert.deepEqual(await buys({ limit: 25, maxRam: 1024, servers: servers(25) }), ["home-ram", "home-core"]);
+  // A dedicated host (cloud-gang, sized for its manager) takes a slot but is never "under the cap".
+  globalThis.gordReservedHosts = new Set(["cloud-gang"]);
+  try {
+    assert.deepEqual(await buys({ limit: 25, maxRam: 1024, servers: { ...servers(24), "cloud-gang": 64 } }), ["home-ram", "home-core"]);
+  } finally {
+    delete globalThis.gordReservedHosts;
+  }
+  // No servers for sale in this node (BN9): home is the only RAM - bought as before.
+  assert.deepEqual(await buys({ limit: 0, maxRam: 0, servers: {} }), ["home-ram", "home-core"]);
+});
+
+test("homeUpgradeWanted / fleetFull: the rules on their own", () => {
+  const base = { full: true, cost: 100, money: 1_000, reserve: 0, maxFraction: 0.4 };
+  assert.equal(homeUpgradeWanted(base), true);
+  assert.equal(homeUpgradeWanted({ ...base, full: false }), false);
+  assert.equal(homeUpgradeWanted({ ...base, cost: 500 }), false, "over the cash fraction");
+  assert.equal(homeUpgradeWanted({ ...base, reserve: 950 }), false, "eats the reserve");
+  assert.equal(homeUpgradeWanted({ ...base, cost: Infinity }), false);
+  assert.equal(fleetFull({ limit: 2, maxRam: 8, rams: [8, 8] }, 2), true);
+  assert.equal(fleetFull({ limit: 2, maxRam: 8, rams: [8] }, 1), false);
+  assert.equal(fleetFull({ limit: 2, maxRam: 8, rams: [8, 4] }, 2), false);
+  assert.equal(fleetFull({ limit: 0, maxRam: 0, rams: [] }, 0), true);
 });

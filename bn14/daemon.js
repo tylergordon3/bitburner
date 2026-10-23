@@ -29,7 +29,9 @@
 //
 // Cold boot: early/driver.js launches early/blade-boot.js wherever
 // bladeburner.enabled, as in BN6/BN7. Next BitNode: the shared plan (a daemon
-// arg, else `campaign.order`). Never run live as of writing.
+// arg, else `campaign.order`). First run live as BN14.1 (October 2026): the
+// finish is Operation Daedalus at rank 400k, so the Daedalus faction is never
+// hoarded for here (BITNODE[14].factions.hoardSkip).
 
 // The config is resolved with forReset, not forNode(14): BN14's challenge run
 // (CHALLENGE in lib/config.js - finish the node without a move on the Go board)

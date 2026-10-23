@@ -632,18 +632,41 @@ test("chargeRotation: fragments the big worker has not reached lead the list", (
 
 test("chargeFraction: a fresh gift gets the burst share, a charged one the steady share", () => {
   const cfg = { ramFraction: 0.1, freshFraction: 0.4, freshCharges: 50 };
-  assert.deepEqual(chargeFraction([placed(30, 0, 0), placed(107, 3, 0)], cfg), { fraction: 0.4, fresh: true });
-  assert.deepEqual(chargeFraction([placed(30, 0, 0, 0, 100, 80), placed(10, 3, 0, 0, 100, 60)], cfg), { fraction: 0.1, fresh: false });
+  assert.deepEqual(chargeFraction([placed(30, 0, 0), placed(107, 3, 0)], cfg), { fraction: 0.4, fresh: true, settled: false });
+  assert.deepEqual(chargeFraction([placed(30, 0, 0, 0, 100, 80), placed(10, 3, 0, 0, 100, 60)], cfg), { fraction: 0.1, fresh: false, settled: false });
   // One lagging fragment keeps it fresh; boosters (always 0 charges) do not.
   assert.equal(chargeFraction([placed(30, 0, 0, 0, 100, 80), placed(10, 3, 0, 0, 100, 3)], cfg).fresh, true);
   assert.equal(chargeFraction([placed(30, 0, 0, 0, 100, 80), placed(107, 3, 0)], cfg).fresh, false);
   // Nothing chargeable: no RAM at all.
-  assert.deepEqual(chargeFraction([], cfg), { fraction: 0, fresh: false });
-  assert.deepEqual(chargeFraction([placed(107, 0, 0)], cfg), { fraction: 0, fresh: false });
+  assert.deepEqual(chargeFraction([], cfg), { fraction: 0, fresh: false, settled: false });
+  assert.deepEqual(chargeFraction([placed(107, 0, 0)], cfg), { fraction: 0, fresh: false, settled: false });
   // The burst never LOWERS the share (BN13 runs a high steady share).
   assert.equal(chargeFraction([placed(30, 0, 0)], { ramFraction: 0.6, freshFraction: 0.4, freshCharges: 50 }).fraction, 0.6);
   assert.equal(chargeFraction([placed(30, 0, 0)], { ramFraction: 0.2 }).fraction, 0.2);
   assert.equal(chargeFraction([placed(30, 0, 0)], { ramFraction: 7 }).fraction, 1);
+});
+
+test("chargeFraction: a well-charged gift drops to the settled share - unless the steady share would raise a highest charge", () => {
+  const cfg = { ramFraction: 0.1, freshFraction: 0.4, freshCharges: 50, settledCharges: 300, settledFraction: 0.02, raiseMargin: 0.1 };
+  const charged = [placed(30, 0, 0, 0, 3000, 400), placed(10, 3, 0, 0, 3200, 350), placed(107, 5, 0)];
+  // Every fragment past 300 charges, and the steady share's largest worker (800
+  // threads) is far under the lowest highest charge (3,000): settled.
+  assert.deepEqual(chargeFraction(charged, cfg, () => 800), { fraction: 0.02, fresh: false, settled: true });
+  assert.deepEqual(chargeFraction(charged, cfg), { fraction: 0.02, fresh: false, settled: true });
+  // A grown fleet: the steady share would run a 3,400-thread worker, over 3,000 x 1.1.
+  assert.equal(chargeFraction(charged, cfg, () => 3400).fraction, 0.1);
+  // ...but not one within the margin.
+  assert.equal(chargeFraction(charged, cfg, () => 3250).fraction, 0.02);
+  // One fragment under settledCharges keeps the steady share.
+  assert.equal(chargeFraction([placed(30, 0, 0, 0, 3000, 400), placed(10, 3, 0, 0, 3200, 200)], cfg, () => 800).fraction, 0.1);
+  // The settled share never RAISES the steady one (BN13 runs half the botnet), nor applies when not configured.
+  assert.equal(chargeFraction(charged, { ...cfg, settledFraction: 0.5, ramFraction: 0.5 }).fraction, 0.5);
+  assert.equal(chargeFraction(charged, { ramFraction: 0.1 }).fraction, 0.1);
+  // The fresh burst is untouched.
+  assert.equal(chargeFraction([placed(30, 0, 0, 0, 3000, 10)], cfg, () => 800).fraction, 0.4);
+  // The configured defaults settle; BN13 keeps its half.
+  assert.ok(CONFIG.stanek.settledFraction < CONFIG.stanek.ramFraction && CONFIG.stanek.settledCharges > CONFIG.stanek.freshCharges);
+  assert.equal(chargeFraction(charged, forNode(13).stanek, () => 800).fraction, forNode(13).stanek.ramFraction);
 });
 
 test("planChargeHosts: the budget goes to the largest hosts, whole", () => {
@@ -1123,6 +1146,25 @@ test("manager: a gift emptied behind its back is laid out again; a refused piece
   assert.equal(stubborn.world.clears, 2, "once from empty, once more from the partial layout, then no more");
   assert.equal(globalThis.gordStanekState.layout.failed, 1);
   assert.equal(stubborn.world.fragments.length, plan.placements.length - 1, "what the game took stays on the gift");
+  resetGlobals();
+});
+
+test("manager: in the BN13 challenge run (never accept the gift) it exits before asking, even started by hand", async () => {
+  for (const args of [[], [13]]) {
+    resetGlobals();
+    const game = makeGame({ args });
+    // A challenge run: BN13's CHALLENGE entry asks for no options, and the entry
+    // marker is a Source-File override (lib/config.js isChallengeRun).
+    game.ns.getResetInfo = () => ({
+      currentNode: 13, lastNodeReset: 111, ownedSF: new Map(),
+      bitNodeOptions: { sourceFileOverrides: new Map([[13, 0]]) },
+    });
+    await stanekMain(game.ns); // returns at once
+    assert.equal(game.world.accepted, false, `args ${JSON.stringify(args)}: the gift was accepted`);
+    assert.equal(game.world.clears + game.world.places, 0);
+    assert.equal(Object.values(game.world.hosts).flatMap(h => h.procs).filter(p => p.filename === "hacking/charge.js").length, 0);
+    assert.ok(game.world.prints.some(l => /challenge run/.test(l)), "the exit should say why");
+  }
   resetGlobals();
 });
 

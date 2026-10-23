@@ -29,8 +29,10 @@ import {
   candidatePoints,
   chooseMove,
   pickOpponent,
+  streakFocus,
+  stuckLimitMs,
 } from "../lib/go-logic.js";
-import { CONFIG, forNode } from "../lib/config.js";
+import { CONFIG, forNode, forReset } from "../lib/config.js";
 
 const N = 5;
 const at = (x, y, n = N) => x * n + y;
@@ -452,6 +454,40 @@ test("pickOpponent: weighted round-robin on games played, ties to config order",
   assert.equal(pickOpponent(undefined, {}), null);
 });
 
+test("streakFocus: one opponent until the streak or the achievement, then the rotation", () => {
+  const streak = { enabled: true, opponent: "Illuminati", length: 10, achievement: "IPVGO_WINNING_STREAK" };
+  assert.deepEqual(streakFocus(streak, {}, null), { name: "Illuminati" });
+  assert.deepEqual(streakFocus(streak, { Illuminati: { highestWinStreak: 9, winStreak: 9 } }, []), { name: "Illuminati" });
+  // The game's own record says the streak was reached (the achievement with it).
+  assert.equal(streakFocus(streak, { Illuminati: { highestWinStreak: 10, winStreak: -1 } }, null), null);
+  // The save says it is held.
+  assert.equal(streakFocus(streak, {}, ["CYBERSEC", "IPVGO_WINNING_STREAK"]), null);
+  // Off, or half-configured: the rotation.
+  assert.equal(streakFocus({ ...streak, enabled: false }, {}, null), null);
+  assert.equal(streakFocus(undefined, {}, null), null);
+  assert.equal(streakFocus({ enabled: true }, {}, null), null);
+  assert.deepEqual(streakFocus({ ...streak, boardSize: 9 }, {}, null), { name: "Illuminati", boardSize: 9 });
+});
+
+test("stuckLimitMs: a streak at stake buys the opponent a longer wait", () => {
+  const G = { stuckMs: 60_000, stuckStreakMs: 600_000 };
+  assert.equal(stuckLimitMs(G, {}, "Illuminati"), 60_000);
+  assert.equal(stuckLimitMs(G, { Illuminati: { winStreak: -3 } }, "Illuminati"), 60_000);
+  assert.equal(stuckLimitMs(G, { Illuminati: { winStreak: 4 } }, "Illuminati"), 600_000);
+  assert.equal(stuckLimitMs(G, { Illuminati: { winStreak: 4 } }, null), 60_000);
+  assert.equal(stuckLimitMs({ stuckMs: 60_000 }, { Illuminati: { winStreak: 4 } }, "Illuminati"), 60_000);
+});
+
+test("config: the streak focus is opt-in, on in BN14, and off in BN14's challenge run", () => {
+  assert.equal(CONFIG.go.streak.enabled, false);
+  assert.equal(forNode(14).go.streak.enabled, true);
+  assert.equal(forNode(14).go.streak.opponent, "Illuminati");
+  assert.equal(forNode(14).go.streak.length, 10, "the rest of the section is inherited");
+  assert.ok(forNode(14).go.stuckStreakMs > forNode(14).go.stuckMs);
+  const challenge = forReset({ currentNode: 14, ownedSF: new Map([[1, 3]]), bitNodeOptions: { sourceFileOverrides: new Map([[1, 3]]) } });
+  assert.equal(challenge.go.enabled, false, "lib/go.js exits on this even when started by hand");
+});
+
 test("config: every node has a playable go section; BN6/BN7 lead with Tetrads", () => {
   const FACTIONS = new Set(["Netburners", "Slum Snakes", "The Black Hand", "Tetrads", "Daedalus", "Illuminati"]);
   for (const node of [0, 1, 2, 3, 4, 5, 6, 7, 9, 10]) {
@@ -499,7 +535,13 @@ test("RAM: the pure module is pure - no ns, and none of the calls the shell pays
   }
 });
 
-test("RAM: the shell's paid calls are exactly getBoardState and makeMove (9.6GB with the base)", () => {
+test("the shell resolves its config per RUN (forReset), so a BN14 challenge run stays off the board", () => {
+  const src = stripComments(readFileSync(new URL("../lib/go.js", import.meta.url), "utf8"));
+  assert.ok(/forReset\(ns\.getResetInfo\(\)\)\.go/.test(src));
+  assert.ok(!/\bforNode\(/.test(src), "forNode cannot see how the node was entered");
+});
+
+test("RAM: the shell's paid Go calls are exactly getBoardState and makeMove (10.6GB with the base and getResetInfo)", () => {
   const src = stripComments(readFileSync(new URL("../lib/go.js", import.meta.url), "utf8"));
   const calls = new Set([...src.matchAll(/\bns\.go\.(?:analysis\.)?(\w+)/g)].map(m => m[1]));
   const FREE = ["passTurn", "getCurrentPlayer", "getGameState", "getMoveHistory", "getOpponent", "resetBoardState", "getStats"];

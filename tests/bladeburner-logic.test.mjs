@@ -22,6 +22,13 @@ import {
   nextSleeveRegenState,
   nextSleeveSupportState,
   conservePopulation,
+  chooseSkillForBlackOp,
+  blackOpChanceGain,
+  chooseSurveyCity,
+  nextSurveyState,
+  needInfiltration,
+  SLEEVE_GYM,
+  SLEEVE_FIELD_ANALYSIS,
 } from "../lib/bladeburner-logic.js";
 import { CONFIG } from "../lib/config.js";
 
@@ -358,4 +365,120 @@ test("BN7 config: the same engine with Bladeburner's penalties priced in", async
   assert.equal(forNode(4).bladeburner.enabled, false);
   assert.ok(forNode(7).sleeves.blade.maxContractSleeves <= CONFIG.bladeburner.contracts.length);
   assert.equal(BITNODE[7].name, "Bladeburners 2079");
+});
+
+// ── 2026-10-23 audit: black-op gate, skill choice, city survey, idle sleeves ──
+
+test("REGRESSION: BN14's Tyrell (real 65%, shown 61%) is attempted, not held for hours", () => {
+  const next = { name: "Operation Tyrell", rank: 50_000 };
+  const d = blackOpDecision(next, boState({ rank: 69_964, chanceMin: 0.612, chanceMax: 0.654 }), { minChance: CONFIG.bladeburner.blackOpMinChance });
+  assert.equal(d.go, true);
+  // ...and sleeve support joins it: 0.612 x 9^0.05 = 0.68 clears the bar.
+  assert.equal(nextSleeveSupportState(OFF, sup({ chance: 0.612, sleeves: 8 }), { ...SUP, minChance: CONFIG.bladeburner.blackOpMinChance }).on, true);
+});
+
+test("a black op whose range straddles the bar asks for Field Analysis first", () => {
+  const o = { minChance: 0.6, analysisSpread: 0.03 };
+  const next = { name: "Operation Wallace", rank: 75_000 };
+  const wide = blackOpDecision(next, boState({ rank: 80_000, chanceMin: 0.55, chanceMax: 0.66 }), o);
+  assert.equal(wide.go, false);
+  assert.equal(wide.analyse, true);
+  // Narrow, or the max under the bar too: a plain no.
+  assert.equal(blackOpDecision(next, boState({ rank: 80_000, chanceMin: 0.58, chanceMax: 0.6 }), o).analyse, undefined);
+  assert.equal(blackOpDecision(next, boState({ rank: 80_000, chanceMin: 0.3, chanceMax: 0.5 }), o).analyse, undefined);
+  // Never for the held final op: it would analyse forever.
+  const fin = { name: "Operation Daedalus", rank: 400_000 };
+  assert.equal(blackOpDecision(fin, boState({ rank: 5e5, chanceMin: 0.5, chanceMax: 0.7 }), o).analyse, undefined);
+  assert.equal(blackOpDecision(fin, boState({ rank: 5e5, chanceMin: 0.5, chanceMax: 0.7, finishAllowed: true }), o).analyse, true);
+});
+
+test("chance-bound skill choice: most chance per point for the op at hand", () => {
+  // BN14's levels and BladeburnerSkillCost-2 prices.
+  const skills = [
+    { name: "Blade's Intuition", level: 41, cost: 178 },
+    { name: "Overclock", level: 60, cost: 174 },
+    { name: "Digital Observer", level: 33, cost: 143 },
+    { name: "Short-Circuit", level: 33, cost: 143 },
+    { name: "Reaper", level: 33, cost: 143 },
+    { name: "Evasive System", level: 33, cost: 143 },
+    { name: "Cloak", level: 48, cost: 110 },
+  ];
+  const weights = CONFIG.bladeburner.skills;
+  // Tyrell is a kill op: Short-Circuit, and Overclock (no chance at all) never.
+  assert.equal(chooseSkillForBlackOp(skills, 1000, weights, "Operation Tyrell").name, "Short-Circuit");
+  // A stealth op takes Cloak instead, and Short-Circuit is worth nothing to it.
+  assert.equal(chooseSkillForBlackOp(skills, 1000, weights, "Operation Shoulder of Orion").name, "Cloak");
+  assert.equal(blackOpChanceGain("Short-Circuit", 33, { kill: false, stealth: true }), 0);
+  assert.equal(blackOpChanceGain("Overclock", 60, { kill: true, stealth: false }), 0);
+  // Nothing affordable: null (the upkeep then saves rather than buying Overclock).
+  assert.equal(chooseSkillForBlackOp(skills, 100, weights, "Operation Tyrell"), null);
+});
+
+test("surveys: every calm city, oldest first, the current one first on a tie", () => {
+  const cities = [
+    { city: "Aevum", chaos: 3 }, { city: "New Tokyo", chaos: 15 }, { city: "Chongqing", chaos: 155 },
+  ];
+  const o = { now: 10 * 3_600_000, intervalMs: 8 * 3_600_000, maxChaos: 50 };
+  assert.equal(chooseSurveyCity(cities, {}, "New Tokyo", o), "New Tokyo");
+  assert.equal(chooseSurveyCity(cities, { "New Tokyo": o.now - 1000 }, "New Tokyo", o), "Aevum");
+  // Chaotic cities are never surveyed; recent surveys aren't due; 0 = off.
+  assert.equal(chooseSurveyCity(cities, { "New Tokyo": o.now, Aevum: o.now }, "New Tokyo", o), null);
+  assert.equal(chooseSurveyCity(cities, {}, "New Tokyo", { ...o, intervalMs: 0 }), null);
+});
+
+test("a survey ends once the estimate holds still under analysis, or at its caps", () => {
+  const o = { tolerance: 0.005, stableMs: 90_000, maxAnalysisMs: 1_200_000, maxMs: 3_600_000 };
+  let s = { city: "Aevum", since: 0, pop: 0.87e9, stillSince: 0, analysedMs: 0, at: 0 };
+  // Field Analysis moving it ~5% a step: not done.
+  let step = nextSurveyState(s, { now: 30_000, population: 0.92e9, analysing: true }, o);
+  assert.equal(step.done, false);
+  // Clamped at the real population: still for 90s of analysis -> done.
+  step = nextSurveyState(step.state, { now: 60_000, population: 5.73e9, analysing: true }, o);
+  step = nextSurveyState(step.state, { now: 100_000, population: 5.73e9, analysing: true }, o);
+  assert.equal(step.done, false);
+  step = nextSurveyState(step.state, { now: 160_000, population: 5.73e9, analysing: true }, o);
+  assert.equal(step.done, true);
+  // Still, but nobody analysing (a rest, a black op): proves nothing.
+  s = { ...s, pop: 1e9 };
+  step = nextSurveyState(s, { now: 200_000, population: 1e9, analysing: false }, o);
+  step = nextSurveyState(step.state, { now: 400_000, population: 1e9, analysing: false }, o);
+  assert.equal(step.done, false);
+  // ...until the overall cap.
+  assert.equal(nextSurveyState(step.state, { now: 3_600_000, population: 1e9, analysing: false }, o).done, true);
+});
+
+test("idle sleeves infiltrate only while attempts run short; else the gym, or a survey's Field Analysis", () => {
+  // BN14: Assassination 342 left, sleeves on Bounty Hunter 695 and Tracking 110.
+  const counts = { Assassination: 342, "Bounty Hunter": 695, Tracking: 110, Retirement: 590 };
+  assert.equal(needInfiltration(counts, ["Assassination", "Bounty Hunter", "Tracking"], 100), false);
+  assert.equal(needInfiltration({ ...counts, Tracking: 40 }, ["Assassination", "Tracking"], 100), true);
+  assert.equal(needInfiltration(counts, ["Unknown"], 100), true);       // no reading: the old default
+  assert.equal(needInfiltration(counts, [], 100), false);               // nothing in use: everything checked
+  assert.equal(needInfiltration({}, [], 100), true);
+
+  const sleeves = [sl(0, { Tracking: 0.95 }), sl(1, {})];
+  const jobs = o => planSleeveBladeWork(sleeves, COUNTS, { ...SLEEVE_OPTS, ...o }).map(p => p.action);
+  assert.deepEqual(jobs({ infiltrate: false }), [SLEEVE_TAKE_CONTRACTS, SLEEVE_GYM]);
+  assert.deepEqual(jobs({ infiltrate: true }), [SLEEVE_TAKE_CONTRACTS, SLEEVE_INFILTRATE]);
+  assert.deepEqual(jobs({ infiltrate: false, analysis: true }), [SLEEVE_TAKE_CONTRACTS, SLEEVE_FIELD_ANALYSIS]);
+  // Chaos and stamina still come first.
+  assert.deepEqual(jobs({ infiltrate: false, analysis: true, regen: true }), [SLEEVE_TAKE_CONTRACTS, REGEN_CHAMBER]);
+});
+
+test("the audit's knobs are coherent", () => {
+  const B = CONFIG.bladeburner;
+  const SB = CONFIG.sleeves.blade;
+  assert.ok(B.blackOpMinChance <= 0.6, "a failed black op is cheap; a held one costs hours");
+  assert.ok(SB.levelDownBelow > SB.minContractChance && SB.levelDownBelow < B.raiseChance,
+    "a sleeve's contract must drop a level before the plan drops the sleeve");
+  assert.ok(B.surveyStableMs < B.surveyMaxAnalysisMs && B.surveyMaxAnalysisMs <= B.surveyMaxMs);
+});
+
+test("REGRESSION: the upkeep's module state is reset at the top of main()", async () => {
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(new URL("../lib/blade-upkeep.js", import.meta.url), "utf8");
+  const main = src.slice(src.indexOf("export async function main"), src.indexOf("while (true)"));
+  for (const v of ["skillLog = {}", "skillLogAt = Date.now()", "surveyedAt = {}", "survey = null"]) {
+    assert.ok(main.includes(v), v);
+  }
 });

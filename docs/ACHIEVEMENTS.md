@@ -1,17 +1,25 @@
 # Achievements, exploits and the BitNode order
 
 What is still missing, what each one takes, and what the bot does about it. Written
-2026-10-04 from the save of 2026-10-03 (in BN7 going for 7.2) and the game source at
-v3.0.2 (`src/Achievements/Achievements.ts`, `src/Exploits/*`, `src/BitNode/BitNode.tsx`).
+2026-10-04 from the save of 2026-10-03 (in BN7 going for 7.2), brought up to date
+2026-10-23, against the game source at v3.0.2 (`src/Achievements/Achievements.ts`,
+`src/Exploits/*`, `src/BitNode/BitNode.tsx`).
 
 New to the game? Read [GUIDE.md](GUIDE.md) first.
 
 ## Where things stand
 
-- **59 of 109** achievements held. The 50 missing are all listed below.
-- **1 of 11** exploits (Source-File -1): the dev menu one.
-- Source-Files: 1.3, 2.1, 3.3, 4.3, 5.1, 6.1, 7.1, 9.1, 10.3. Never entered: BN8, 11, 12,
-  13, 14, 15.
+As of the save of 2026-10-23, in **BN14.1** (about 60 hours in):
+
+- **72 of 109** achievements held. The 37 missing are all listed below, and the plan
+  table covers every one of the game's 109 (checked against `AchievementData.json`).
+- **11 of 11** exploits (Source-File -1): all held, and UNACHIEVABLE with them.
+- Source-Files: 1.3, 2.1, 3.3, 4.3, 5.3, 6.1, 7.3, 9.3, 10.3, 13.1. Never finished: BN8,
+  11, 12, 14 (in progress), 15.
+
+Cheapest still open, in this order: **The Void** (`run tools/void.js`, a second),
+**Ten Steps Ahead** (the Go helper's streak focus, on in BN14 - hours), **Massive debt**
+(`tools/debt.js`, 13 idle hours at a node's end).
 
 To see the current list at any time:
 
@@ -20,20 +28,21 @@ To see the current list at any time:
 | HUD, **ACHIEVE** tab | The campaign's next steps and every planned achievement still missing. The daemon reads them out of the save with [`lib/achievements.js`](../lib/achievements.js) (Netscript has no achievement API; `singularity.getSaveData` does have the save). |
 | `node offline/achievements.mjs` | The same list from the newest save file, without the game. |
 
-The 50 fall into six groups. In the order worth doing them:
+The 37 fall into five groups (the exploits are done). In the order worth doing them:
 
 | Group | Count | How they are earned |
 | --- | --- | --- |
-| Exploits | 10 | Ten minutes with [`tools/exploits.js`](../tools/exploits.js). Do these first. |
-| First Source-Files, all at level 3, a fast node | 8 | The campaign (`campaign.order`). |
+| First Source-Files, all at level 3 | 6 | The campaign (`campaign.order`). |
 | Challenges | 12 | Campaign steps of `[n, "challenge"]`. |
 | The money run | 10 | One long run with a mature corporation, held open. |
-| Grinds | 6 | Time. |
-| One-offs | 4 | A trick each. |
+| Grinds | 6 | Time - and for two of them, dark net automation that does not exist yet. |
+| One-offs | 3 | A trick each. |
 
 ---
 
 ## 1. Exploits (Source-File -1)
+
+*All eleven held since 2026-10-18; kept here as the record of how.*
 
 The developers left eleven easter eggs for players who poke at the game itself. Each is a
 level of SF-1 (0.1% on most multipliers per level, so a trophy rather than a strategy) and
@@ -141,10 +150,17 @@ out of.
 so that no node needs a fourth entry: BN13, 14, 8, then 11.3 and 12.3, then BN2, BN6 and
 BN7, whose second/third runs are still owed.
 
-**Then the challenge-only runs** of nodes already at level 3: BN9, BN3, BN10, BN1.
+**Then the challenge-only runs** of nodes already at level 3: BN9, BN3. (BN1 and BN10,
+the two cheap ones, were moved up on 2026-10-23 to sit right after BN12.1, ahead of the
+long Bladeburner challenge runs of BN13 and BN14. BN10 ends by hand, which makes its
+wait the natural place for the 13 hours of `tools/debt.js`.)
 
-**BN15 and BN12-to-50 last.** BN15 cannot be finished by the bot at all yet - see
-"Not automated" below.
+**BN15 and BN12-to-50 last.** The bot has no hacking finish in BN15 (The Red Pill comes
+only from the dark net's labs there). The Bladeburner black ops end it without one -
+`destroyW0r1dD43m0n` accepts them in place of the hacking requirement - and
+`bn15/daemon.js` runs the Bladeburner engine once `BITNODE[15].bladeburner.enabled` is
+on. Slow (rank x0.2, skills x3), but it earns SF15 and the BN15 challenge with no dark
+net code. Until that switch is on, the plan halts in BN15 for the player.
 
 Three things the order cannot do for you:
 
@@ -179,8 +195,8 @@ a Source-File level, which is why each sits before the node's level step.
 | BN9 | `disableHacknetServer` | Plain daemon; no hacknet servers, no hacknet nodes. | The condition is zero hacknet income *and* spending. |
 | BN10 | `disableSleeveExpAndAugmentation` | Nothing: sleeves still work, they just never gain. | Finished by hand. |
 | BN13 | (marker only) | Stanek's Gift is never accepted. | |
-| BN14 | (marker only) | The IPvGO helper is not started. Do not play the board through the API yourself either. | A second run, so SF14.1 does not depend on it. |
-| BN15 | - | Nothing here ever calls `dnet.heartbleed`; any BN15 finish earns it. | |
+| BN14 | (marker only) | The IPvGO helper is not started, and exits if started by hand (it reads the run's config with `forReset`). Do not play the board through the API yourself either: one API move or cheat voids it for the whole node. | A second run, so SF14.1 does not depend on it. |
+| BN15 | - | Nothing here ever calls `dnet.heartbleed`; any BN15 finish earns it, the black-ops one included. | |
 | BN12 | - | `[12, 50]`: fifty runs, each 2% harder than the last. | The last thing on the list. |
 
 *The marker.* BN13 and BN14 have no option to set - their challenge is something the player
@@ -206,7 +222,7 @@ same thing: a corporation left to grow for days.
 | Small town | One division with 3,000 employees (six offices of 500). |
 | Full network | All 20 hacknet servers (SF9). |
 | That's the new limit | One hacknet server fully upgraded: level 300, 8,192GB, 128 cores, cache 15. The last cores cost about $1e30. |
-| It's time to install | 40 augmentations queued at once. |
+| It's time to install | 40 augmentations queued at once. Every NeuroFlux level bought is its own queue entry, so NeuroFlux can fill it. Each queued aug multiplies the next one's price by 1.9 (1.767 with SF11.3) - except Shadows of Anarchy and dark net lab augs, which neither pay nor raise it. |
 | I asked for this | 100 different augmentations installed in one node. |
 | Neuroflux is love... | NeuroFlux Governor level 255 installed. Cost and reputation both grow 14% a level and the level resets every node. |
 | Download more ram | Home RAM at 2^30 GB. The last doubling is about $1e19. |
@@ -225,7 +241,8 @@ entry. BN12 holds the softcap at 0.8 at every level, and BN3's challenge forbids
 - installs wait for 40 queued augmentations and for nothing else;
 - hacknet servers are bought whether or not they pay back (10% of spare cash);
 - the corporation's growth loop is on (it is by default after round 4 anyway);
-- Bladeburner banks 100,000 skill points once its black ops are done.
+- Bladeburner banks 100,000 skill points once its black ops are done - which does
+  nothing in BN1 or BN2, where Bladeburner is off (`bladeburner.enabled`). See Grinds.
 
 The corporation side was rebuilt on 2026-10-04: after round 4 it now runs a growth loop
 (`corp.growth`) with no seat or level ceilings. In a model of the game's formulas it passes
@@ -244,17 +261,18 @@ because it only buys what pays back.
 | --- | --- | --- |
 | Wolf of Wall Street | $1e15 stock profit inside one node. | BN8 is where the trader runs longest and with the whole bankroll; three BN8 runs are on the plan. If none gets there, hold one open. |
 | Smart! | Intelligence 255 (148 today - about 28 times the experience). | Comes with everything else on this page: finishing nodes, grafting, black ops. Not worth a detour. |
-| You should really spend those... | 100,000 Bladeburner skill points unspent. | `bladeburner.skillPointBank: 100_000` in the node's config: once the black ops are done (or Daedalus is ready and held) skill buying stops and rank piles up - about 300,000 more rank. |
-| Ten Steps Ahead | Ten IPvGO wins in a row against Illuminati. | The Go helper plays whichever faction the config weights; point it at Illuminati (`go` section) once its win rate there is high. |
-| Make your Own Network, Into the Depths | Dark net (BN15 / SF15). | Not automated. |
+| You should really spend those... | 100,000 Bladeburner skill points unspent. | Put `bladeburner.skillPointBank: 100_000` in a Bladeburner node's BITNODE entry (BN6 or BN7 - rank x1 / x0.6) and turn **FINISH off**: the bank only holds points once the black ops are done or Operation Daedalus is ready and *held*, and a node whose finish is on ends the moment Daedalus is done. Then about 300,000 more rank. Not set anywhere today (the money run's copy has no Bladeburner to act on). |
+| Ten Steps Ahead | Ten IPvGO wins in a row against Illuminati (no faction needed). | The Go helper's **streak focus** (`go.streak`, on in BN14): every game goes to Illuminati until the streak lands - the achievement list or the game's own highest-streak record says when - then the rotation resumes. Streaks are kept per opponent, so nothing else breaks one but a loss, a board abandoned mid-game, or an aug install. Daedalus plays Illuminati's move 90% of the time and the helper beat it 114-14 in BN14, so expect hours. |
+| Make your Own Network | 50 backdoored dark net servers at once (stasis-linked ones do not count). | Any node: DarkscapeNavigator.exe ($50m on the dark web, $30m at Chongqing's Shadowed Walkway) opens the dark net. Not automated. |
+| Into the Depths | The Sword installed: the sixth dark net lab's prize (seventh in BN15). | The labs need BN15 or SF15, and each lab's prize is chosen by what is *installed* - six lab clears with an install after each, in one node. Not automated. |
 
 ## 6. One-offs
 
 | Achievement | How |
 | --- | --- |
-| Massive debt ($1b in debt) | Classes charge without checking your balance. `run tools/debt.js` (dry run) explains; `--go` puts you and every sleeve in Powerhouse Gym, about 13 hours with eight sleeves and no income. End of a node, FINISH off. |
-| IPvGO anticheat | Get ejected for cheating: a failed cheat, after any earlier cheat attempt in the same game, has a 10% chance. Needs the cheat API (BN14, or SF14.2). |
-| The Void | Secret. Its trigger is not in the achievements file and I did not find it. |
+| Massive debt ($1b in debt) | Classes charge without checking your balance. `run tools/debt.js` (dry run) explains; `--go` unassigns the gang, sets corporation dividends to 0 (income `killall` does not stop), and puts you and every sleeve in Powerhouse Gym - about 13 hours with eight sleeves. It gives up if the balance keeps rising. End of a node, FINISH off - the BN10 challenge's manual finish is the natural slot. |
+| IPvGO anticheat | Get ejected for cheating: a failed cheat, after any earlier cheat attempt in the same game, has a 10% chance. The cheat API needs SF14.2, or BN14 with SF14.1 already held (`checkCheatApiAccess`) - so not in a first BN14 run, and never in the BN14 challenge run (a cheat voids it). The `[14, 3]` run, or any node after it. Not automated. |
+| The Void | `run tools/void.js`. The Void is a location with no city that grants it when its page opens; `singularity.goToLocation("The Void")` opens it from anywhere. By hand: Ishima > "0x6C1" (the glitch), wait about 25 seconds. |
 | UNACHIEVABLE | Edit the save - see the note in section 1. |
 
 ---
@@ -263,11 +281,13 @@ because it only buys what pays back.
 
 Things on this page the code does not do yet, in the order I would build them:
 
-1. **A dark net player** (`ns.dnet`). BN15 cannot be finished without one - The Red Pill is
-   not sold by Daedalus there, it is found in the dark net - and two achievements live there.
-   Until then the plan halts in BN15 for the player.
+1. **A dark net player** (`ns.dnet`): a crawler that runs itself on dark net servers, 24
+   password puzzles, and the labs. Two achievements need it, and it is the fast way through
+   BN15 (The Red Pill is the fourth lab's prize there). Large - 1,500 lines or more. Until
+   then BN15 goes through the black ops (`BITNODE[15].bladeburner.enabled`).
 2. **Stronger investment rounds.** Rounds 3-4 still use fixed targets and fall well short of
    the corporation manual's offer benchmarks in the model; `corp.growth.fromRound: 3` is the
    untested opt-in.
-3. An **Illuminati streak** mode and a deliberate **cheat-until-ejected** tool for the two
-   IPvGO achievements.
+3. A deliberate **cheat-until-ejected** tool for IPvGO anticheat (about 80 lines: a
+   board, then cheats until a failure ejects you), usable once SF14.2 is held. The
+   Illuminati streak mode exists (`go.streak`).

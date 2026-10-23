@@ -8,6 +8,7 @@ import {
   shareBonus, shareThreadsFor, shareTopUp, pruneInFlight,
   efficientThreads, threadLadder, concaveHull, incomeCurve, allocateRam, prepDiscount,
   costAt, stolenAt, preferredWishes, expPerThread, expCurve, capProcesses,
+  hackPeak, jitHackHold, jitHackStep, marginalIncome,
 } from "../lib/batch-logic.js";
 
 // Game constants and a plausible grow model: threads to restore from `remaining`
@@ -31,6 +32,40 @@ test("planBatch sizes the four legs and sums their RAM", () => {
   assert.equal(p.ram,
     50 * RAM.hack + p.growThreads * RAM.grow + (p.weaken1Threads + p.weaken2Threads) * RAM.weaken);
   assert.ok(p.securityAdded > 0);
+});
+
+test("just-in-time hacks: the plan bills the hack at its share of the window, and a window for its peak", () => {
+  const whole = planThreads(50);
+  const jit = planBatch({ hackThreads: 50, hackPct: 0.002, growThreadsFor, ramPerThread: RAM, ...GAME, hackHold: 0.25 });
+  assert.equal(jit.hackRam, 50 * RAM.hack);
+  assert.equal(jit.hackHold, 0.25);
+  assert.ok(Math.abs(whole.ram - jit.ram - 0.75 * 50 * RAM.hack) < 1e-9, "ram bills 1/4 of the hack");
+  assert.equal(jit.growThreads, whole.growThreads, "the legs themselves are unchanged");
+  assert.equal(whole.hackHold, 1);
+  assert.equal(hackPeak(whole, 10), 0, "a plan without just-in-time hacks owes nothing more");
+
+  // A window of one has its hack on the hosts whole; of 40, 40 x 0.25 + 1 = 11 at the peak.
+  assert.ok(Math.abs(jit.ram + hackPeak(jit, 1) - whole.ram) < 1e-9);
+  assert.ok(Math.abs(hackPeak(jit, 40) - jit.hackRam * (11 / 40 - 0.25)) < 1e-9);
+  // ...and largestBatch / planCycle fit the peak: a one-batch budget holds the whole batch.
+  const only = largestBatch({ ramBudget: whole.ram, maxThreads: 500, planFor: t =>
+    planBatch({ hackThreads: t, hackPct: 0.002, growThreadsFor, ramPerThread: RAM, ...GAME, hackHold: 0.25 }) });
+  assert.equal(only.hackThreads, 50);
+
+  // The hold: from the exec (lead + a tick ahead of the start) to the landing.
+  assert.equal(jitHackHold({ hackTime: 10_000, lastLanding: 41_000, leadMs: 3_000, tickMs: 200 }), 13_200 / 41_000);
+  assert.equal(jitHackHold({ hackTime: 10_000, lastLanding: 5_000, leadMs: 0, tickMs: 0 }), 1);
+});
+
+test("jitHackStep: launch on time from the CURRENT hack time, wait out raised security, skip once too late", () => {
+  const p = { now: 1_000, landAt: 12_000, preppedHackTime: 10_000, tickMs: 200 };
+  assert.deepEqual(jitHackStep({ ...p, curHackTime: 10_000 }), { action: "launch", delay: 1_000 });
+  // Security raised this instant: the hack would take 11.5s and land late - a tick later it may not.
+  assert.equal(jitHackStep({ ...p, curHackTime: 11_500 }).action, "wait");
+  // No room yet: wait while a later tick can still make it, else skip.
+  assert.equal(jitHackStep({ ...p, curHackTime: 10_000, noRoom: true }).action, "wait");
+  assert.equal(jitHackStep({ ...p, now: 1_900, curHackTime: 10_000, noRoom: true }).action, "skip");
+  assert.equal(jitHackStep({ ...p, now: 2_500, curHackTime: 10_000 }).action, "skip");
 });
 
 test("planBatch caps the HACK at maxHackFraction, not just the grow estimate", () => {
@@ -380,6 +415,15 @@ const curve = (key, a, s1, b, s2, minRam = 1) => ({
   key, minRam, points: [{ ram: a, income: a * s1 }, { ram: a + b, income: a * s1 + b * s2 }],
 });
 const shares = list => Object.fromEntries(list.map(e => [e.key, e.ram]));
+
+test("marginalIncome: the next gigabytes' $/GB at the current split, 0 once every curve is used up", () => {
+  const curves = [curve("rich", 100, 10, 400, 1), curve("next", 100, 5, 100, 0.5)];
+  // 200GB: rich's and next's first 100GB (1,500). The next 50GB go to rich's tail at 1/GB.
+  assert.deepEqual(marginalIncome({ totalRam: 200, maxTargets: 6, curves, step: 50 }), { incomePerMs: 1500, perMsPerGB: 1 });
+  // Both curves end at 700GB: past it nothing more is earned.
+  assert.equal(marginalIncome({ totalRam: 700, maxTargets: 6, curves }).perMsPerGB, 0);
+  assert.deepEqual(marginalIncome({ totalRam: 0, maxTargets: 6, curves: [] }), { incomePerMs: 0, perMsPerGB: 0 });
+});
 
 test("REGRESSION: allocateRam takes the best gigabytes of each target, not all of the best target", () => {
   // "rich" pays 10/GB on its first 100GB and 1/GB on the next 400; "next" pays

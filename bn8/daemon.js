@@ -71,7 +71,8 @@ import {
 } from "../lib/player-actions.js";
 import { getNextAugTarget, getMoneyHoardGoal, factionRepStillUseful } from "../lib/aug-targets.js";
 import { forNode } from "../lib/config.js";
-import { playerMoney, hackingLevel, installReason, startBestFactionWork } from "../lib/daemon-lib.js";
+import { installReason, startBestFactionWork, worldDaemonLevel } from "../lib/daemon-lib.js";
+import { playerMoney, hackingLevel } from "../lib/ns-utils.js";
 import { managePurchasedServers } from "../lib/pserv.js";
 import { runDaemon, decidePrelude, decideAugFlow, pursueNextFaction } from "../lib/daemon-core.js";
 import { liveTrader, treasuryStep } from "../lib/stocks-logic.js";
@@ -218,14 +219,8 @@ async function buyServers(ns, release) {
 }
 
 // ── The player's slot ────────────────────────────────────────────────────────
-
-let _worldLevel = 0;
-/** The world daemon's hacking requirement (3000 here). @param {NS} ns */
-function worldDaemonLevel(ns) {
-  if (_worldLevel > 0) return _worldLevel;
-  try { _worldLevel = ns.getServerRequiredHackingLevel(FINAL_HOST); } catch { _worldLevel = 0; }
-  return _worldLevel;
-}
+// (The world daemon's hacking requirement - 3000 here - is lib/daemon-lib.js
+// worldDaemonLevel; 0 until the game will say.)
 
 /**
  * Free reputation: work for a joined faction that still has something to sell

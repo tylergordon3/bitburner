@@ -172,6 +172,19 @@ test("the shipped campaign: every step names a real node, every challenge exists
   // From the owner's position today (in BN7 going for 7.2) the plan's next node is BN9.
   const today = at(7, [[1, 3], [2, 1], [3, 3], [4, 3], [5, 1], [6, 1], [7, 1], [9, 1], [10, 3]]);
   assert.deepEqual(campaignStep(today, CONFIG.campaign.order, new Set()), { node: 9, challenge: false, waiting: false });
+  // From the 2026-10-23 save (finishing BN14.1): BN11.1, BN8.1, BN12.1, then the
+  // two cheap challenge runs ahead of the Bladeburner ones.
+  const bn14 = at(14, [[1, 3], [2, 1], [3, 3], [4, 3], [5, 3], [6, 1], [7, 3], [9, 3], [10, 3], [13, 1]]);
+  assert.deepEqual(campaignStep(bn14, CONFIG.campaign.order, new Set()), { node: 11, challenge: false, waiting: false });
+  const bn12 = at(12, [[1, 3], [2, 1], [3, 3], [4, 3], [5, 3], [6, 1], [7, 3], [8, 1], [9, 3], [10, 3], [11, 1], [13, 1], [14, 1]]);
+  assert.deepEqual(campaignStep(bn12, CONFIG.campaign.order, new Set()), { node: 1, challenge: true, waiting: false });
+  assert.deepEqual(campaignStep(bn12, CONFIG.campaign.order, new Set(["CHALLENGE_BN1"])), { node: 10, challenge: true, waiting: false });
+  assert.deepEqual(campaignStep(bn12, CONFIG.campaign.order, new Set(["CHALLENGE_BN1", "CHALLENGE_BN10"])), { node: 13, challenge: true, waiting: false });
+});
+
+test("the plan covers THE_VOID with its tool, and the tool exists", () => {
+  assert.match(ACHIEVEMENT_PLAN.THE_VOID.how, /tools\/void\.js/);
+  assert.ok(existsSync(new URL("../tools/void.js", import.meta.url)));
 });
 
 test("the HUD's open steps: done ones drop out, the one this run earns is marked", async () => {

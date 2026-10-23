@@ -84,6 +84,10 @@ export function makeWorld(opts = {}) {
     exp: 0,
     pushes: /** @type {Record<string, number>} */ ({}),
     execFailures: 0,
+    // Per batch tag: its legs' landing order so far ("HWGW"), and when its last
+    // leg landed (see land).
+    legOrder: /** @type {Map<string, string>} */ (new Map()),
+    lastLegAt: /** @type {Map<string, number>} */ (new Map()),
     // Every process ns.kill() took down, so a scenario can assert that nothing
     // killed the botnet's own legs.
     killed: /** @type {{script: string, host: string, t: number}[]} */ ([]),
@@ -141,6 +145,17 @@ export function makeWorld(opts = {}) {
   const lastHackLeg = new Map();
   function land(job) {
     const s = target(job.target);
+    // The landing ORDER of each batch's legs (consecutive parts of a split leg
+    // count once): H W G W, or W G W for a batch whose just-in-time hack was
+    // skipped. Anything else is an out-of-order batch (outOfOrder()).
+    if (String(job.tag).startsWith("batch-")) {
+      const kind = job.script === "/hacking/hack.js" ? "H" : job.script === "/hacking/grow.js" ? "G" : "W";
+      const seq = world.legOrder.get(job.tag) ?? "";
+      if (seq[seq.length - 1] !== kind || kind === "W" && world.lastLegAt.get(job.tag) !== world.clock) {
+        world.legOrder.set(job.tag, seq + kind);
+      }
+      world.lastLegAt.set(job.tag, world.clock);
+    }
     if (job.script === "/hacking/hack.js") {
       // One record per hack LEG: a leg split across hosts lands as several
       // processes in the same instant, and the later parts seeing the first
@@ -315,6 +330,23 @@ export function usedRam(world) {
     .reduce((sum, [, s]) => sum + s.used, 0);
 }
 
+/**
+ * Batches whose legs landed out of order: every finished batch must read H W G W
+ * (or W G W, its just-in-time hack skipped). Batches still in flight - a
+ * sequence that is a prefix of a good one - don't count.
+ * @returns {{bad: string[], done: number}}
+ */
+export function outOfOrder(world) {
+  const bad = [];
+  let done = 0;
+  for (const [tag, seq] of world.legOrder) {
+    if (seq === "HWGW" || seq === "WGW") { done++; continue; }
+    if ("HWGW".startsWith(seq) || "WGW".startsWith(seq)) continue;
+    bad.push(`${tag}:${seq}`);
+  }
+  return { bad, done };
+}
+
 /** Distinct hosts currently running at least one worker script. */
 export function busyHosts(world) {
   return [...new Set(world.jobs.map(j => j.host))].sort();
@@ -327,6 +359,7 @@ function freshState() {
   delete globalThis.gordReservedRamAt;
   delete globalThis.gordState;
   delete globalThis.gordStockWishes;
+  delete globalThis.gordHackRate;
   return newSchedulerState();
 }
 
@@ -616,7 +649,10 @@ export function defineScenarios(test, assert, base = {}) {
 
     for (let i = 0; i < 600; i++) tick();                       // 2 min: steady batching
     assert.equal(modes.at(-1), "Batching");
-    world.servers.t1.sec += 0.3;
+    // (At least what one open batch adds: just-in-time hacks leave the same RAM
+    // room for a fatter bite, whose own security the check rightly tolerates.)
+    const open = Math.max(...s.inFlight.filter(b => b.target === "t1").map(b => b.securityAdded));
+    world.servers.t1.sec += Math.max(0.3, open);
     for (let i = 0; i < 600; i++) tick();                       // 2 min more
 
     const first = modes.findIndex(m => m.startsWith("Draining"));
@@ -1069,6 +1105,56 @@ export function defineScenarios(test, assert, base = {}) {
     } finally {
       delete globalThis.gordState;
       delete globalThis.gordShareState;
+    }
+  });
+
+  test("gordHackRate: what one more GB would earn - positive while RAM limits, 0 once the windows are full" + label, () => {
+    const rate = opts => {
+      const { world, ns, advance } = makeWorld({ ...base, ...opts });
+      run(world, ns, advance, 3 * 60_000);
+      return { r: globalThis.gordHackRate, world };
+    };
+    const tight = rate({});
+    assert.ok(tight.r.perMsPerGB > 0, `440GB is RAM-bound: ${JSON.stringify(tight.r)}`);
+    assert.ok(tight.r.incomePerMs > 0 && tight.r.capacityGB === 440 && tight.r.updatedAt === tight.world.clock - H.batchSpacingMs);
+    const full = rate({ tinyCount: 5, onlyTiny: true, w1Ram: 32768, w2Ram: 32768 });
+    assert.equal(full.r.perMsPerGB, 0, "64TB on five n00dles: more RAM buys nothing");
+  });
+
+  test("just-in-time hacks: the same fleet earns more, and every batch still lands H W G W on a prepped server" + label, () => {
+    // A hack leg exec'd with its batch holds its RAM for the whole weaken-time
+    // and works for a quarter of it. Exec'd just in time, that RAM carries more
+    // batches. Off vs on, same worlds: a RAM-bound 2TB fleet, the thin 440GB
+    // default, and a 56GB fleet of 24 + 16 + 16 whose window is two batches.
+    const measure = (opts, jit) => {
+      const saved = H.justInTime.enabled;
+      H.justInTime.enabled = jit;
+      try {
+        const { world, ns, advance } = makeWorld({ ...base, ...opts });
+        const sim = run(world, ns, advance, 10 * 60_000);
+        return { world, sim, order: outOfOrder(world) };
+      } finally {
+        H.justInTime.enabled = saved;
+      }
+    };
+    for (const [opts, gain] of [[{ w1Ram: 1024, w2Ram: 1024 }, 1.4], [{}, 1.3], [{ homeRam: 24, w1Ram: 16, w2Ram: 16 }, 1.1]]) {
+      const off = measure(opts, false);
+      const on = measure(opts, true);
+      const name = JSON.stringify(opts);
+      assert.ok(on.world.stolen >= off.world.stolen * gain,
+        `${name}: $${(off.world.stolen / 1e9).toFixed(2)}b -> $${(on.world.stolen / 1e9).toFixed(2)}b, expected x${gain}`);
+      for (const r of [off, on]) {
+        assert.deepEqual(r.order.bad, [], `${name}: batches landed out of order`);
+        assert.ok(r.order.done > 10, `${name}: only ${r.order.done} batches finished`);
+        const bad = r.world.hackLandings.filter(h => h.moneyFrac < 0.995 || h.secOver > 0.01);
+        assert.equal(bad.length, 0, `${name}: ${bad.length} hacks landed unprepped`);
+        assert.equal(r.world.execFailures, 0);
+        assert.equal(r.sim.modes.filter(m => m.startsWith("Draining")).length, 0, `${name}: drift`);
+      }
+      // Every due hack found its room in time, whole.
+      const jit = on.sim.s.jit;
+      assert.ok(jit.launched > 10 && jit.skipped === 0 && jit.late === 0 && jit.partial === 0, `${name}: ${JSON.stringify(jit)}`);
+      assert.equal(off.sim.s.jit.launched, 0, "the old path exec'd a hack late");
     }
   });
 }

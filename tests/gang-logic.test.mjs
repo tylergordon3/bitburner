@@ -6,6 +6,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   equipBudget,
+  gearIncomeBudget,
+  rawStat,
   ascendThreshold,
   chooseAscension,
   nextTerritoryClock,
@@ -227,4 +229,58 @@ test("equipBudget: the tick's share, and no more than the window's share over a 
     spent.push({ at: now + t * 2_000, cost: b });
   }
   assert.ok(1e9 - cash <= 0.2 * 1e9 + 1, `spent ${1e9 - cash} in a minute`);
+});
+
+// ── 2026-10-23 audit: the BN14 gang that never trained ──────────────────────
+
+// gord-0 from the BN14 save: str 167 on 1,770 exp and x3.51 gear, never ascended.
+const BN14_MUGGER = {
+  str: 167, def: 183, dex: 63, agi: 105,
+  str_exp: 1770, def_exp: 1770, dex_exp: 1770, agi_exp: 700,
+  str_asc_mult: 1, def_asc_mult: 1, dex_asc_mult: 1, agi_asc_mult: 1,
+};
+
+test("REGRESSION: rawStat sees through gear - BN14's muggers were untrained", () => {
+  const raw = rawStat(BN14_MUGGER, false);
+  assert.ok(raw < CONFIG.gang.trainMinStat, `raw ${raw.toFixed(1)}`);
+  // The geared average (130) cleared the bar, which is why nobody trained.
+  assert.ok((167 + 183 + 63 + 105) / 4 >= CONFIG.gang.trainMinStat);
+  // Ascensions do count: the same exp at x4 is well past it.
+  const asc = { ...BN14_MUGGER, str_asc_mult: 4, def_asc_mult: 4, dex_asc_mult: 4, agi_asc_mult: 4 };
+  assert.ok(rawStat(asc, false) > CONFIG.gang.trainMinStat);
+  assert.ok(rawStat({ hack_exp: 0, hack_asc_mult: 1 }, true) >= 1);
+});
+
+test("trainWhileRecruiting: the low multipliers train before the roster is full", () => {
+  const roster = [mem("a", 500, 1), mem("b", 500, 1.2), mem("c", 500, 7), mem("d", 500, 8)];
+  assert.equal(chooseTrainers(roster, { ...TR, rosterFull: false }).size, 0);
+  assert.deepEqual([...chooseTrainers(roster, { ...TR, rosterFull: false, trainWhileRecruiting: true })].sort(), ["a", "b"]);
+  assert.equal(CONFIG.gang.trainWhileRecruiting, true);
+});
+
+test("gearIncomeBudget: ordinary gear pays for itself out of the gang's income", () => {
+  const o = { paybackMs: 3_600_000, windowMs: 60_000 };
+  const now = 1_000_000;
+  // BN14: $211 a cycle = ~$1.06/ms -> ~$3.8m of gear a minute, not $7.4b.
+  const perMs = 211.6 / 200;
+  assert.ok(Math.abs(gearIncomeBudget([], now, perMs, o) - perMs * 3_600_000) < 1);
+  assert.equal(gearIncomeBudget([{ at: now - 1_000, cost: 5e6 }], now, perMs, o), 0);
+  assert.ok(gearIncomeBudget([{ at: now - 60_000, cost: 5e6 }], now, perMs, o) > 0, "older than the window");
+  assert.equal(gearIncomeBudget([], now, 0, o), 0, "a gang earning nothing buys no ordinary gear");
+  assert.equal(gearIncomeBudget([], now, 0, { ...o, paybackMs: null }), Infinity);
+});
+
+test("BN14 keeps a full roster on respect; the default nodes earn money", async () => {
+  const { forNode } = await import("../lib/config.js");
+  assert.equal(forNode(14).gang.moneyPhase, false);
+  assert.equal(CONFIG.gang.moneyPhase, true);
+  assert.equal(forNode(14).gang.maxMembers, CONFIG.gang.maxMembers, "deep-merged, not replaced");
+});
+
+test("REGRESSION: lib/gang.js resolves its knobs per node and trains on rawStat", async () => {
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(new URL("../lib/gang.js", import.meta.url), "utf8");
+  assert.match(src, /G = forNode\(ns\.getResetInfo\(\)\.currentNode\)\.gang/);
+  assert.match(src, /stat: rawStat\(m, gang\.isHacking\)/);
+  assert.match(src, /G\.moneyPhase !== false/);
 });

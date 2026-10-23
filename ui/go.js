@@ -55,6 +55,12 @@ function gameCard(ns, C, g) {
       `Move ${g.moves ?? 0}: ${g.status ?? "-"}`),
   ];
 
+  // The streak focus (go.streak): every game to one opponent until its streak.
+  const f = g.focus;
+  if (f) {
+    children.push(statRow(C, "*", `Streak focus: ${f.opponent}`, `${f.winStreak ?? 0} / ${f.length ?? 10} in a row`, C.yellow));
+  }
+
   const r = g.lastResult;
   if (r) {
     children.push(statRow(C, r.won ? "+" : "-",

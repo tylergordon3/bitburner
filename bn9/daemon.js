@@ -46,7 +46,8 @@ import {
 } from "../lib/player-actions.js";
 import { getNextAugTarget, getMoneyHoardGoal } from "../lib/aug-targets.js";
 import { forNode } from "../lib/config.js";
-import { playerMoney, hackingLevel, maybeBuyInfra, inGangSafe } from "../lib/daemon-lib.js";
+import { maybeBuyInfra, maybeSetupGang, worldDaemonLevel } from "../lib/daemon-lib.js";
+import { playerMoney, hackingLevel } from "../lib/ns-utils.js";
 import { runDaemon, decidePrelude, decideAugFlow, pursueNextFaction } from "../lib/daemon-core.js";
 // Megacorp faction grinding (factions.pursueCompanyFactions): the long no-reset
 // endgame makes their augs worth the grind, as in BN10.
@@ -64,67 +65,23 @@ const FINAL_HOST = CFG.backdoor.finalHost;
 // Hacknet servers hang off home and are named by this prefix (the batcher
 // already refuses to TARGET them; reserveHacknetHosts keeps it from HOSTING on them).
 const HACKNET_PREFIX = CFG.hacking.excludeTargetPrefix;
-// Criminal factions that can found a gang; whichever we're already in gets used.
-// Cast to any[] so its elements don't trip checkJs against FactionName - see
-// [[bitburner-enum-string-casts]].
-const CRIMINAL_FACTIONS = /** @type {any[]} */ (GANG.criminalFactions);
 
 // Next BitNode: the shared plan (runDaemon's default - a daemon arg, else
 // `campaign.order` in lib/config.js, which has BN9 on it up to SF9.3: 128GB of
 // home RAM at every node start from 9.2, a built hacknet server from 9.3).
 
-/**
- * Found a gang the moment we're eligible: karma past the gate AND already a
- * member of a criminal faction. Never ground toward here - the sleeves' crime
- * karma (lib/sleeves.js gang-bootstrap mode) counts for the player and gets
- * there on its own. Needs no player attention, so it runs from the core's
- * setupGang hook.
- * @param {NS} ns
- */
-function maybeSetupGang(ns) {
-  if (inGangSafe(ns)) return null;
-
-  const player = ns.getPlayer();
-  if ((player.karma ?? 0) > GANG.karma) return null; // not eligible yet
-
-  const joined = player.factions ?? [];
-  const faction = CRIMINAL_FACTIONS.find(f => joined.includes(f));
-  if (!faction) {
-    return { action: "Gang (karma ready)", detail: "Awaiting a criminal faction invite" };
-  }
-
-  try {
-    if (ns.gang.createGang(/** @type {any} */ (faction))) {
-      ns.tprint(`Created gang with ${faction}!`);
-      return { action: "Gang Created", detail: faction };
-    }
-  } catch { /* no SF2 in this run - nothing to found */ }
-
-  return null;
-}
+// The gang: snapped up the moment karma crosses the gate (lib/daemon-lib.js
+// maybeSetupGang). Never ground toward here - the sleeves' crime karma
+// (lib/sleeves.js gang-bootstrap mode) counts for the player.
 
 // ── Hacknet coordination ─────────────────────────────────────────────────────
 
 // 3000 (bitburner-src Server/data/servers.ts) x BN9's WorldDaemonDifficulty of 2
-// (BitNode.tsx). Only used until the game will answer for itself - see below.
+// (BitNode.tsx): what lib/daemon-lib.js worldDaemonLevel answers until The Red
+// Pill is installed and the game will answer for itself. Reading "no answer" as
+// "no requirement" once switched the endgame study off for most of the node -
+// while the hacking level for the Daedalus invite (2500) was what it waited on.
 const WORLD_LEVEL_BEFORE_RED_PILL = 6000;
-let _worldLevel = 0;
-/**
- * The world daemon's hacking requirement (3000 x WorldDaemonDifficulty).
- *
- * Until The Red Pill is INSTALLED the world daemon has no network connection,
- * and the game treats a server with none as nonexistent: every ns call on it
- * throws "Invalid host" (Netscript/NetscriptHelpers getServer). Reading that as
- * "no requirement" switched the endgame study off for the whole stretch before
- * the Red Pill - which is most of the node, and when the hacking level for the
- * Daedalus invite (2500) is the thing being waited for.
- * @param {NS} ns
- */
-function worldDaemonLevel(ns) {
-  if (_worldLevel > 0) return _worldLevel;
-  try { _worldLevel = ns.getServerRequiredHackingLevel(FINAL_HOST); } catch { _worldLevel = 0; }
-  return _worldLevel > 0 ? _worldLevel : WORLD_LEVEL_BEFORE_RED_PILL;
-}
 
 /**
  * Keep the botnet off the hacknet servers: a script running on one cuts its
@@ -255,7 +212,7 @@ async function decideNextPriority(ns) {
     const held = hoard
       ? `[holding $${ns.format.number(hoard.money)} for ${hoard.faction} invite, $${ns.format.number(hoard.moneyMissing)} to go] `
       : "";
-    const need = worldDaemonLevel(ns);
+    const need = worldDaemonLevel(ns, WORLD_LEVEL_BEFORE_RED_PILL);
     const belowGate = need > 0 && hackingLevel(ns) < need;
 
     const factionPursuit = await pursueNextFaction(ns, opportunities, true);
@@ -339,7 +296,7 @@ export async function main(ns) {
   await runDaemon(ns, {
     cfg: CFG,
     self: SELF,
-    setupGang: maybeSetupGang,
+    setupGang: ns => maybeSetupGang(ns, GANG),
     decide: decideNextPriority,
     // The BN9 headline act - the hacknet manager - is launched by the core itself
     // (required wherever CONFIG.hacknet.enabled, which BITNODE[9] sets). Grafting

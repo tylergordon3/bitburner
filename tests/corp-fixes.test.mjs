@@ -305,7 +305,7 @@ const P = CO.productPricing;
 
 /** One city of one product, simulated cycle by cycle against the game's rule. */
 function market({ mp, potential, limit, production }) {
-  const m = { mp, potential, limit, production, stored: 0, price: NaN, step: undefined, sold: 0, revenue: 0 };
+  const m = { mp, potential, limit, production, stored: 0, price: NaN, step: undefined, seed: 0, sold: 0, revenue: 0 };
   m.cycle = () => {
     // PRODUCTION, then SALE at the price set after the previous cycle.
     m.stored += m.production * 10;
@@ -318,10 +318,11 @@ function market({ mp, potential, limit, production }) {
     // ...then our once-a-cycle re-price, from exactly the fields getProduct has.
     const next = nextProductPrice(
       { price: m.price, marketPrice: m.mp, stored: m.stored, sold: m.sold, produced: m.production },
-      m.step, P,
+      m.step, P, m.seed,
     );
     m.price = next.price === null ? NaN : next.price;
     m.step = next.step;
+    m.seed = next.seed;
   };
   /** The revenue-maximising price for selling `volume`/s: MP + L*sqrt(Potential/volume). */
   m.optimal = volume => m.mp + m.limit * Math.sqrt(m.potential / volume);
@@ -385,12 +386,42 @@ test("a product nobody wants enough is left at MP, never priced below it", () =>
     "no markup survives where the market can't clear the shelf");
 });
 
+test("REGRESSION: a markup limit that is a sliver of MP does not kill every other cycle", () => {
+  // The BN14 corp: MP ~$13k, markup limit ~$7, and demand to spare at MP. The
+  // old controller sold out at MP, re-seeded at 2x MP, sold ~nothing, collapsed
+  // back to MP, sold out... - half its cycles had no sales at all.
+  const m = market({ mp: 13_000, potential: 200, limit: 7, production: 14 });
+  let dead = 0;
+  for (let i = 0; i < 60; i++) {
+    m.cycle();
+    if (i >= 10 && m.sold < m.production * 0.5) dead++;
+  }
+  assert.ok(dead <= 2, `${dead} of 50 cycles sold under half the production`);
+  // ...and the price it lands on never strays from MP by more than the limit can carry.
+  assert.ok(!Number.isFinite(m.price) || m.price - m.mp < m.mp * P.minMarkup, `price ${m.price}`);
+});
+
+test("a collapse carries its measured markup as the next seed, and a sell-out spends it", () => {
+  const mp = 13_000;
+  // Priced at 2x MP, sold 1e-4/s of 28/s wanted: a measurement far under minMarkup.
+  const collapsed = nextProductPrice({ price: 2 * mp, marketPrice: mp, stored: 140, sold: 1e-4, produced: 14 }, undefined, P);
+  assert.equal(collapsed.price, null, "back to MP");
+  assert.ok(collapsed.seed > 0 && collapsed.seed < mp * P.minMarkup, `seed ${collapsed.seed}`);
+  // The sell-out at MP that follows probes from the measurement, not from 2x MP.
+  const probe = nextProductPrice({ price: NaN, marketPrice: mp, stored: 0, sold: 28, produced: 14 }, collapsed.step, P, collapsed.seed);
+  assert.equal(probe.price, mp + collapsed.seed);
+  assert.equal(probe.seed, 0, "spent");
+  // No seed carried: the old bootstrap from a bare MP is unchanged.
+  assert.equal(nextProductPrice({ price: NaN, marketPrice: mp, stored: 0, sold: 28, produced: 14 }, undefined, P).price,
+    mp * (1 + P.seedMarkup));
+});
+
 test("the single steps: seed, escalate, measure, restart", () => {
   const mp = 1000;
   // Never priced (NaN), and it sold out: seed a markup.
   assert.deepEqual(
     nextProductPrice({ price: NaN, marketPrice: mp, stored: 0, sold: 10, produced: 10 }, undefined, P),
-    { price: mp * (1 + P.seedMarkup), step: P.probeStep },
+    { price: mp * (1 + P.seedMarkup), step: P.probeStep, seed: 0 },
   );
   // Sold out again at a markup: step up, and step HARDER next time.
   const up = nextProductPrice({ price: 3000, marketPrice: mp, stored: 0, sold: 10, produced: 10 }, P.probeStep, P);

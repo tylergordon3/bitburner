@@ -20,7 +20,7 @@ import {
 } from "../lib/player-actions.js";
 import { getNextAugTarget } from "../lib/aug-targets.js";
 import { forNode } from "../lib/config.js";
-import { maybeBuyInfra, inGangSafe } from "../lib/daemon-lib.js";
+import { maybeBuyInfra, maybeSetupGang } from "../lib/daemon-lib.js";
 import { runDaemon, decidePrelude, decideNoTarget, decideAugFlow } from "../lib/daemon-core.js";
 
 // Every tunable value comes from lib/config.js, resolved for BitNode 3. BN3 has
@@ -28,36 +28,6 @@ import { runDaemon, decidePrelude, decideNoTarget, decideAugFlow } from "../lib/
 const CFG = forNode(3);
 const GANG = CFG.gang;
 const SELF = CFG.paths.daemon;                // this daemon's path (post-reset callback)
-
-// Criminal factions that can found a gang; whichever we're already in is used.
-// Cast to any[] so its elements don't trip checkJs against FactionName (a plain
-// `string` isn't assignable to the union) - see [[bitburner-enum-string-casts]].
-const CRIMINAL_FACTIONS = /** @type {any[]} */ (GANG.criminalFactions);
-
-/**
- * Found a gang the moment we're eligible: karma past the -54k gate AND already a
- * member of a criminal faction. Needs no player attention, so it runs from the
- * core's setupGang hook (before the managers are placed) rather than inside the
- * decision. Returns a status object while there's something to report.
- * @param {NS} ns
- */
-function maybeSetupGang(ns) {
-  if (inGangSafe(ns)) return null;
-
-  const player = ns.getPlayer();
-  if ((player.karma ?? 0) > GANG.karma) return null; // not eligible yet
-
-  const joined = player.factions ?? [];
-  const faction = CRIMINAL_FACTIONS.find(f => joined.includes(f));
-  if (faction) {
-    if (ns.gang.createGang(/** @type {any} */ (faction))) {
-      ns.tprint(`Created gang with ${faction}!`);
-      return { action: "Gang Created", detail: faction };
-    }
-  }
-
-  return { action: "Gang (karma ready)", detail: "Awaiting a criminal faction invite" };
-}
 
 /** @param {NS} ns */
 async function decideNextPriority(ns) {
@@ -84,7 +54,8 @@ export async function main(ns) {
   await runDaemon(ns, {
     cfg: CFG,
     self: SELF,
-    setupGang: maybeSetupGang,
+    // The gang is snapped up the moment karma crosses the gate (lib/daemon-lib.js).
+    setupGang: ns => maybeSetupGang(ns, GANG),
     decide: decideNextPriority,
     statusLine: ns => ` | Karma: ${(ns.getPlayer().karma ?? 0).toFixed(0)}`,
   });
