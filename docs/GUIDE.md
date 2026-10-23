@@ -388,7 +388,7 @@ buy any augmentation that is ready, and check whether it is time to install.
 
 The HUD's header shows the BitNode, the time since the last install, a clock, and three
 switches described in [section 8](#8-when-something-looks-wrong). If the daemon has not
-reported for a minute it shows `DAEMON DOWN` in red. Below the header are nine tabs:
+reported for a minute it shows `DAEMON DOWN` in red. Below the header are eleven tabs:
 
 | Tab | What it shows | Shows only a one-line placeholder unless |
 | --- | --- | --- |
@@ -401,6 +401,8 @@ reported for a minute it shows `DAEMON DOWN` in red. Below the header are nine t
 | BLADE | Bladeburner rank, the next black op, skills | `lib/bladeburner.js` is running |
 | GO | The IPvGO game in progress and the bonuses earned | `lib/go.js` found a server to run on |
 | STANEK | The Gift's layout and each fragment's charge | `lib/stanek.js` is running |
+| ACHIEVE | The campaign's next steps and every planned achievement still missing | `lib/achievements.js` has read the save |
+| SF | Every Source-File you own and the bonuses each level gives, plus the SF-1 exploit count | Always populated |
 
 If you only watch one thing, watch the JOURNAL tab. It adds a line when the bot's intention
 changes, not on every tick.
@@ -863,7 +865,7 @@ that every hack lands on a prepped server.
 | `ui/dashboard-lib.js` | Shared drawing helpers |
 | `ui/journal.js` | The JOURNAL tab |
 | `ui/bn2.js`, `bn3.js`, `bn5.js`, `bn6.js`, `bn9.js`, `bn10.js` | Cards for the gang, corporation, gang bootstrap, Bladeburner, hacknet and sleeve tabs |
-| `ui/go.js`, `ui/stanek.js`, `ui/achievements.js` | Cards for the GO, STANEK and ACHIEVE tabs |
+| `ui/go.js`, `ui/stanek.js`, `ui/achievements.js`, `ui/sf.js` | Cards for the GO, STANEK, ACHIEVE and SF tabs |
 | **Tools** | |
 | `tools/self-test.js`, `hack-status.js`, `kill-helpers.js`, `corp-status.js` | See [section 3](#the-tools) |
 | `tools/exploits.js`, `tools/debt.js` | Achievement tools; see [ACHIEVEMENTS.md](ACHIEVEMENTS.md) |

@@ -39,9 +39,13 @@ export function extraCards(ns, C) {
   }
   const cards = [card(C, "SOURCE-FILES", header)];
 
+  // The bullet is built from its code point, not typed: the file sync hands the
+  // game UTF-8 as Latin-1, so a literal single angle quote showed up as "a-hat
+  // + ordinal" garbage. Keep code strings in this file ASCII.
+  const bullet = String.fromCharCode(0x203a);
   for (const s of list) {
     cards.push(card(C, `SF${s.sf}.${s.level}  ${s.name}`, s.lines.map(line =>
-      el("div", { style: { fontSize: "12px", color: C.blue, marginBottom: "3px" } }, `› ${line}`))));
+      el("div", { style: { fontSize: "12px", color: C.blue, marginBottom: "3px" } }, `${bullet} ${line}`))));
   }
   return cards;
 }
