@@ -19,6 +19,8 @@
 //             missing (ui/achievements.js), read from the save by lib/achievements.js.
 //   STANEK  - Stanek's Gift: the layout, each fragment's charge, the RAM the
 //             charge workers hold (ui/stanek.js), in BN13 or with SF13.
+//   SF      - every bonus the owned Source-Files give, level by level, plus the
+//             SF-1 exploit count (ui/sf.js, table in lib/sf-bonuses.js).
 //
 // The header also carries the switches (TOGGLES / toggleButton) - the only
 // controls in here that change what the BOT does rather than what the HUD shows:
@@ -48,6 +50,7 @@ import { extraCards as bladeExtraCards } from "./bn6.js";
 import { extraCards as goExtraCards } from "./go.js";
 import { extraCards as stanekExtraCards } from "./stanek.js";
 import { extraCards as achievementCards } from "./achievements.js";
+import { extraCards as sfCards } from "./sf.js";
 import { updateJournal, journalPanel } from "./journal.js";
 
 // Everything below comes from CONFIG.ui / CONFIG.factions - see lib/config.js.
@@ -81,6 +84,7 @@ const TABS = [
   { id: "go",      label: "GO" },
   { id: "stanek",  label: "STANEK" },
   { id: "achieve", label: "ACHIEVE" },
+  { id: "sf",      label: "SF" },
 ];
 
 // Module UI state. The HUD paints via the script loop (clearLog + printRaw); a
@@ -357,7 +361,7 @@ function toggleButton(ns, C, t) {
  * @param {NS} ns
  */
 function tabBar(ns, C) {
-  return el("div", { style: { display: "flex", gap: "4px", marginBottom: "8px" } },
+  return el("div", { style: { display: "flex", flexWrap: "wrap", gap: "4px", marginBottom: "8px" } },
     ...TABS.map(t => {
       const on = activeTab === t.id;
       return el("div", {
@@ -392,6 +396,7 @@ function activePanel(ns, C) {
     if (activeTab === "go")      return wrapCards(goExtraCards(ns, C) ?? [], C, "No IPvGO player running (lib/go.js - needs a host with ~10GB free, and go.enabled).");
     if (activeTab === "stanek")  return wrapCards(stanekExtraCards(ns, C) ?? [], C, "No Stanek's Gift manager running (BN13 / SF13 only - lib/stanek.js).");
     if (activeTab === "achieve") return wrapCards(achievementCards(ns, C) ?? [], C, "Achievements not read yet (lib/achievements.js reads them out of the save - needs Singularity and ~3GB free somewhere).");
+    if (activeTab === "sf")      return wrapCards(sfCards(ns, C) ?? [], C, "No Source-Files yet - destroy a BitNode to earn the first one.");
     if (!statsData) return el("div", { style: { color: C.dim, fontSize: "13px", padding: "8px 2px" } }, "Gathering stats...");
     return el("div", {}, ...statsPanel(ns, C, statsData));
   } catch (e) {

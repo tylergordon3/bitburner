@@ -7,6 +7,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { fresh, COLORS } from "../ui/dashboard-lib.js";
 import { extraCards as goCards, playedBonuses } from "../ui/go.js";
+import { extraCards as sfCards } from "../ui/sf.js";
 import { CONFIG } from "../lib/config.js";
 
 test("fresh: a helper's state counts only while it is recent", () => {
@@ -78,4 +79,37 @@ test("every stale threshold is several of the publisher's own ticks", () => {
   assert.ok(S.helper >= CONFIG.sleeves.tickMs * 4);
   assert.ok(S.helper >= CONFIG.backdoor.tickMs * 4);
   assert.ok(CONFIG.ui.daemonStaleMs >= CONFIG.daemon.tickMs * 3);
+});
+
+// ── SF tab ───────────────────────────────────────────────────────────────────
+
+test("SF tab: one card per owned Source-File, plus the exploits once they are read", () => {
+  const React = globalThis.React;
+  globalThis.React = { createElement: (type, props, ...children) => ({ type, props, children }) };
+  try {
+    delete globalThis.gordAchievements;
+    const ns = reset => ({ ...NS, getResetInfo: () => reset });
+    assert.deepEqual(sfCards(ns({ currentNode: 1, ownedSF: new Map() }), COLORS), []);
+
+    const reset = { currentNode: 11, ownedSF: new Map([[5, 3], [1, 3], [12, 2]]), bitNodeOptions: { sourceFileOverrides: new Map() } };
+    let cards = sfCards(ns(reset), COLORS);
+    assert.equal(cards.length, 4, "summary + three Source-Files");
+    let text = cards.map(textOf).join("\n");
+    assert.match(text, /3, 8 levels/);
+    assert.match(text, /SF1\.3 +Source Genesis[\s\S]*\+28% to every multiplier/);
+    assert.match(text, /SF12\.2[\s\S]*NeuroFlux Governor level 2/);
+    assert.ok(text.indexOf("SF1.3") < text.indexOf("SF5.3"), "lowest Source-File first");
+    assert.match(text, /exploits: not read yet/);
+    assert.doesNotMatch(text, /overrides/);
+
+    globalThis.gordAchievements = { ids: [], exploits: ["N00dles", "Unclickable"] };
+    reset.bitNodeOptions.sourceFileOverrides.set(1, 1);
+    text = sfCards(ns(reset), COLORS).map(textOf).join("\n");
+    assert.match(text, /SF-1 exploits: 2 of 11/);
+    assert.match(text, /\+0\.20% every multiplier/);
+    assert.match(text, /overrides some Source-File levels/);
+  } finally {
+    delete globalThis.gordAchievements;
+    globalThis.React = React;
+  }
 });
