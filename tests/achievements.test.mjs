@@ -10,6 +10,7 @@ import {
   GROUP_ORDER,
   missingByGroup,
   extractArray,
+  extractSourceFiles,
   parseSaveProgress,
   progressScanner,
 } from "../lib/achievements-logic.js";
@@ -26,6 +27,7 @@ import { CONFIG, CHALLENGE, forNode, forReset, isChallengeRun } from "../lib/con
 const player = {
   ctor: "PlayerObject",
   data: {
+    sourceFiles: { ctor: "JSONMap", data: [[1, 3], [12, 7]] },
     achievements: [{ ID: "CYBERSEC", unlockedOn: 1 }, { ID: "CHALLENGE_BN13", unlockedOn: 2 }],
     money: 5,
     exploits: ["YoureNotMeantToAccessThis"],
@@ -37,12 +39,25 @@ test("parseSaveProgress pulls both lists out of a double-encoded save without pa
   assert.deepEqual(parseSaveProgress(saveText), {
     ids: ["CYBERSEC", "CHALLENGE_BN13"],
     exploits: ["YoureNotMeantToAccessThis"],
+    ownedSF: [[1, 3], [12, 7]],
   });
   // An un-nested player record reads the same way.
   assert.deepEqual(parseSaveProgress(JSON.stringify(player.data))?.ids, ["CYBERSEC", "CHALLENGE_BN13"]);
-  // Empty lists are lists, not "missing".
-  assert.deepEqual(parseSaveProgress('{"achievements":[],"exploits":[]}'), { ids: [], exploits: [] });
+  assert.deepEqual(parseSaveProgress(JSON.stringify(player.data))?.ownedSF, [[1, 3], [12, 7]]);
+  // Empty lists are lists, not "missing"; no Source-File list is ownedSF null.
+  assert.deepEqual(parseSaveProgress('{"achievements":[],"exploits":[]}'), { ids: [], exploits: [], ownedSF: null });
   assert.equal(parseSaveProgress("{}"), null);
+});
+
+test("extractSourceFiles reads the OWNED levels, never the run's overrides", () => {
+  // The overrides come first here, and use the same JSONMap shape.
+  const text = JSON.stringify({ bitNodeOptions: { sourceFileOverrides: { ctor: "JSONMap", data: [[12, 0]] } }, sourceFiles: { ctor: "JSONMap", data: [[12, 9], [4, 3]] } });
+  assert.deepEqual(extractSourceFiles(text), [[12, 9], [4, 3]]);
+  assert.deepEqual(extractSourceFiles(JSON.stringify(JSON.stringify({ sourceFiles: { ctor: "JSONMap", data: [] } }))), []);
+  // Cut short: no answer yet, rather than a wrong one.
+  assert.equal(extractSourceFiles('{"sourceFiles":{"ctor":"JSONMap","data":[[1,3],[2'), null);
+  assert.equal(extractSourceFiles('{"sourceFiles":{"ctor":"JSONMap","data":[[1,3]'), null);
+  assert.equal(extractSourceFiles('{"sourceFileOverrides":{"ctor":"JSONMap","data":[[1,3]]}}'), null);
 });
 
 test("extractArray waits for the closing bracket", () => {
@@ -62,7 +77,11 @@ test("progressScanner finds the lists in a stream cut anywhere, however far apar
   const scanner = progressScanner();
   assert.equal(scanner.feed('{\\"achievements\\":[{\\"ID\\":\\"NS2\\"}],'), null);
   for (let i = 0; i < 40; i++) assert.equal(scanner.feed("x".repeat(100_000)), null);
-  assert.deepEqual(scanner.feed('\\"exploits\\":[]'), { ids: ["NS2"], exploits: [] });
+  // Both lists but no Source-Files yet: keep reading; the stream's end settles for the lists.
+  assert.equal(scanner.feed('\\"exploits\\":[]'), null);
+  assert.deepEqual(scanner.partial(), { ids: ["NS2"], exploits: [], ownedSF: null });
+  assert.deepEqual(scanner.feed(',\\"sourceFiles\\":{\\"ctor\\":\\"JSONMap\\",\\"data\\":[[12,3]]}'), { ids: ["NS2"], exploits: [], ownedSF: [[12, 3]] });
+  assert.equal(progressScanner().partial(), null);
 });
 
 test("the plan table is well formed and groups what is missing", () => {
@@ -172,14 +191,40 @@ test("the shipped campaign: every step names a real node, every challenge exists
   // From the owner's position today (in BN7 going for 7.2) the plan's next node is BN9.
   const today = at(7, [[1, 3], [2, 1], [3, 3], [4, 3], [5, 1], [6, 1], [7, 1], [9, 1], [10, 3]]);
   assert.deepEqual(campaignStep(today, CONFIG.campaign.order, new Set()), { node: 9, challenge: false, waiting: false });
-  // From the 2026-10-23 save (finishing BN14.1): BN11.1, BN8.1, BN12.1, then the
-  // two cheap challenge runs ahead of the Bladeburner ones.
+  // From the 2026-10-23 save (finishing BN14.1): BN11.1, then BN8.1.
   const bn14 = at(14, [[1, 3], [2, 1], [3, 3], [4, 3], [5, 3], [6, 1], [7, 3], [9, 3], [10, 3], [13, 1]]);
   assert.deepEqual(campaignStep(bn14, CONFIG.campaign.order, new Set()), { node: 11, challenge: false, waiting: false });
-  const bn12 = at(12, [[1, 3], [2, 1], [3, 3], [4, 3], [5, 3], [6, 1], [7, 3], [8, 1], [9, 3], [10, 3], [11, 1], [13, 1], [14, 1]]);
-  assert.deepEqual(campaignStep(bn12, CONFIG.campaign.order, new Set()), { node: 1, challenge: true, waiting: false });
-  assert.deepEqual(campaignStep(bn12, CONFIG.campaign.order, new Set(["CHALLENGE_BN1"])), { node: 10, challenge: true, waiting: false });
-  assert.deepEqual(campaignStep(bn12, CONFIG.campaign.order, new Set(["CHALLENGE_BN1", "CHALLENGE_BN10"])), { node: 13, challenge: true, waiting: false });
+  // 2026-10-25, finishing BN8.1: its challenge run next, then 11.2 and 11.3.
+  const OWNED = [[1, 3], [2, 1], [3, 3], [4, 3], [5, 3], [6, 1], [7, 3], [9, 3], [10, 3], [11, 1], [13, 1], [14, 1]];
+  const bn8 = at(8, OWNED);
+  assert.deepEqual(campaignStep(bn8, CONFIG.campaign.order, new Set()), { node: 8, challenge: true, waiting: false });
+  const bn8ch = at(8, [...OWNED, [8, 1]], { disable4SData: true, sourceFileOverrides: new Map([[1, 3]]) });
+  assert.deepEqual(campaignStep(bn8ch, CONFIG.campaign.order, new Set()), { node: 11, challenge: false, waiting: false });
+  const bn11 = at(11, [...OWNED.filter(([n]) => n !== 11), [8, 2], [11, 2]]);
+  assert.deepEqual(campaignStep(bn11, CONFIG.campaign.order, new Set(["CHALLENGE_BN8"])), { node: 12, challenge: false, waiting: false });
+  // Then BN12 again and again - each run entered at SF12 level 0, so the owned
+  // level comes from the save - until 50, then the BN13 challenge.
+  // The reset of a BN12 run: getResetInfo() has SF12 at its override (0, so absent).
+  const bn12 = at(12, [...OWNED.filter(([n]) => n !== 11), [8, 2], [11, 3]], { sourceFileOverrides: new Map([[12, 0]]) });
+  const savedAt = level => {
+    const held = /** @type {any} */ (new Set(["CHALLENGE_BN8"]));
+    held.ownedSF = new Map([...OWNED, [8, 2], [11, 3], [12, level]]);
+    return held;
+  };
+  const order = CONFIG.campaign.order;
+  assert.deepEqual(campaignStep(bn12, order, savedAt(0)), { node: 12, challenge: false, waiting: false }, "about to own 1 of 50");
+  assert.deepEqual(campaignStep(bn12, order, savedAt(37)), { node: 12, challenge: false, waiting: false });
+  assert.deepEqual(campaignStep(bn12, order, savedAt(49)), { node: 13, challenge: true, waiting: false });
+  // The save not read in this run: wait, never guess (a guess of 0 loops forever).
+  assert.deepEqual(campaignStep(bn12, order, new Set(["CHALLENGE_BN8"])), { node: 0, challenge: false, waiting: true });
+  // Source-File 12 at 50 already proved by its achievement: on to BN13.
+  assert.deepEqual(campaignStep(bn12, order, new Set(["CHALLENGE_BN8", "CHALLENGE_BN12"])), { node: 13, challenge: true, waiting: false });
+  // The end of the plan: the five challenge-only runs, BN10 last.
+  const late = at(14, [[1, 3], [2, 3], [3, 3], [4, 3], [5, 3], [6, 3], [7, 3], [8, 3], [9, 3], [10, 3], [11, 3], [12, 50], [13, 3], [14, 2], [15, 3]]);
+  const all = new Set(["CHALLENGE_BN2", "CHALLENGE_BN6", "CHALLENGE_BN8", "CHALLENGE_BN13", "CHALLENGE_BN14"]);
+  assert.deepEqual(campaignStep(late, CONFIG.campaign.order, all), { node: 9, challenge: true, waiting: false });
+  all.add("CHALLENGE_BN9"); all.add("CHALLENGE_BN7"); all.add("CHALLENGE_BN3"); all.add("CHALLENGE_BN1");
+  assert.deepEqual(campaignStep(late, CONFIG.campaign.order, all), { node: 10, challenge: true, waiting: false });
 });
 
 test("the plan covers THE_VOID with its tool, and the tool exists", () => {
@@ -198,4 +243,10 @@ test("the HUD's open steps: done ones drop out, the one this run earns is marked
   // In a challenge run, that step is the one in hand.
   const run = at(13, [[1, 3], [13, 1]], { sourceFileOverrides: new Map([[1, 3]]) });
   assert.equal(openSteps(run, new Set()).find(s => s.text === "BN13 challenge")?.inHand, true);
+  // A BN12 run at SF12 level 0: with the save's owned level the step is in hand,
+  // and the owned level - not the override - says what is done.
+  const bn12 = at(12, [[1, 3], [5, 3], [7, 3], [9, 3], [11, 3]], { sourceFileOverrides: new Map([[12, 0]]) });
+  const step12 = openSteps(bn12, new Set(), new Map([[12, 49]])).find(s => s.node === 12);
+  assert.deepEqual(step12, { node: 12, text: "BN12 to 12.50", done: false, inHand: true });
+  assert.ok(!openSteps(bn12, new Set(), new Map([[12, 50]])).some(s => s.node === 12));
 });

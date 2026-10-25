@@ -502,18 +502,28 @@ BitNode comes from the **campaign plan**, `campaign.order` in
 [`lib/config.js`](../lib/config.js), a list of steps. A step is either
 `[BitNode, Source-File level]` or `[BitNode, "challenge"]`. The bot enters the first step
 that will still be unmet after the current run is counted. The list is long (it is the whole
-route to every achievement, explained in [ACHIEVEMENTS.md](ACHIEVEMENTS.md)); it begins:
+route to every achievement, explained in [ACHIEVEMENTS.md](ACHIEVEMENTS.md)). The steps
+already done stay at the top, where they cost nothing; from BitNode 8 on it reads:
 
 ```js
 order: [
-  [7, 2],               // BitNode 7 until Source-File 7 is level 2
-  [9, 3],               // then BitNode 9 until Source-File 9 is level 3
-  [5, 3],               // then BitNode 5 until Source-File 5 is level 3
-  [13, 1],              // then BitNode 13 once
+  // ...           steps already done (7.2, 9.3, 5.3, 7.3, 13.1, 14.1, 11.1)
+  [8, 1],               // BitNode 8 once
+  [8, "challenge"],     // then BitNode 8 again, as its challenge run (Source-File 8.2)
+  [11, 3],              // then BitNode 11 until Source-File 11 is level 3
+  [12, 50],             // then BitNode 12, fifty times
+  [13, "challenge"],    // then BitNode 13 as its challenge run
   // ...
-  [13, "challenge"],    // later: BitNode 13 once more, as its challenge run
 ],
 ```
+
+**BitNode 12 is entered with its own Source-File switched off.** The game builds BitNode
+12's penalties from the Source-File 12 level *in effect* plus one, but finishing it raises
+the level you *own*. So every BitNode 12 run is entered with the option that sets Source-File
+12 to level 0 for that run (`campaign.recursionLevel`): each run is as easy as the first,
+and still counts toward 50. Because the game then reports level 0 for the whole run, the plan
+reads the level you own from the save (the same read as the achievements) and waits if it
+cannot.
 
 A **challenge run** is a run of a BitNode played without that node's own mechanic, for the
 achievement the game gives for it: BitNode 2 without a gang, BitNode 13 without Stanek's
@@ -900,7 +910,7 @@ BitNodes 8 and 11 to 15 have not yet been through a live run.
 | 9 Hacktocracy | Hacknet servers and hashes. No cloud servers at all. Script hacking pays a tenth of a server pool that is itself 1% of normal. Difficulty 2. | `bn9/daemon.js` with `lib/hacknet.js` as a required helper from the first tick |
 | 10 Digital Carbon | Sleeves and grafting. Augmentations cost five times the money. Difficulty 2. | `bn10/daemon.js`: build income, then buy every sleeve and all sleeve memory. **Never finishes on its own** |
 | 11 The Big Crash | Crime pays triple. Hacking level multiplier 0.6. Augmentations cost double. Difficulty 1.5. | `lib/gang-daemon.js`, corporation and hacknet nodes switched off |
-| 12 The Recursion | Every multiplier gets a little worse each time you finish it. Its Source-File has no level cap. | `lib/gang-daemon.js`. How many levels to collect is a campaign entry |
+| 12 The Recursion | Every multiplier gets a little worse each time you finish it - by the Source-File level in effect, which the bot sets to 0 on entry, so every run plays like the first. Its Source-File has no level cap. | `lib/gang-daemon.js`. How many levels to collect is a campaign entry |
 | 13 They're lunatics | Stanek's Gift. Hacking level multiplier 0.25. Difficulty 3. | `lib/blade-daemon.js` plus `lib/stanek.js`, with half the botnet charging the Gift |
 | 14 IPvGO Subnet Takeover | IPvGO bonuses are four times larger. Difficulty 5. | `lib/blade-daemon.js`, with the IPvGO helper promoted to a required one |
 | 15 The Secrets of the Dark Net | The dark net is the node's mechanic. Augmentations cost triple. Difficulty 2. | `lib/gang-daemon.js`. The dark net is **not automated**; the node is played the ordinary way |

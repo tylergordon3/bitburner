@@ -72,6 +72,22 @@ test("ownedSourceFiles reads the Map, sorted, dropping zero levels", () => {
   assert.ok(list.every(s => s.lines.length > 0));
 });
 
+test("sourceFileBonusList: owned levels from the save, the bonuses at the level in effect", () => {
+  // A BN12 run entered at SF12 0: the resetInfo has no SF12 at all.
+  const reset = { ownedSF: new Map([[1, 3], [4, 3]]) };
+  const list = sourceFileBonusList(reset, [[1, 3], [4, 3], [12, 37]]);
+  assert.deepEqual(list.map(s => [s.sf, s.level, s.active]), [[1, 3, 3], [4, 3, 3], [12, 37, 0]]);
+  const sf12 = list[2];
+  assert.equal(sf12.lines.length, 1);
+  assert.match(sf12.lines[0], /level 0 this run .* owned level 37/);
+  // Partly overridden: the active level's bonuses, after the note.
+  const partly = sourceFileBonusList({ ownedSF: new Map([[12, 5]]) }, [[12, 37]]);
+  assert.match(partly[0].lines[0], /level 5 this run/);
+  assert.match(partly[0].lines[1], /NeuroFlux Governor level 5/);
+  // No save list: exactly the active levels, as before.
+  assert.deepEqual(sourceFileBonusList(reset).map(s => [s.sf, s.level, s.active]), [[1, 3, 3], [4, 3, 3]]);
+});
+
 test("exploitBonus compounds 0.1% per exploit", () => {
   assert.equal(exploitBonus(0), 0);
   assert.ok(Math.abs(exploitBonus(1) - 0.1) < 1e-9);

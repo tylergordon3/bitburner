@@ -299,7 +299,7 @@ export function makeWorld(opts = {}) {
       world.jobs.push({ pid: world.pid, script, host, threads, target: tgt, tag, ram, startAt: world.clock, landAt, stock: stockFlag(script, tgt) });
       return world.pid++;
     },
-    getPlayer: () => ({ money: 0, skills: { hacking: 100 }, mults: { hacking_grow: world.growMult } }),
+    getPlayer: () => ({ money: 0, skills: { hacking: 100 }, mults: { hacking_grow: world.growMult }, exp: { hacking: world.exp } }),
     formulas: {
       // Like the game's: every field defaults to empty/false, INCLUDING
       // hasAdminRights - a mock server is not rooted until the caller says so.
@@ -545,12 +545,16 @@ export function defineScenarios(test, assert, base = {}) {
     const worldOpts = { ...base, tinyCount: 5, onlyTiny: true, w1Ram: 8192, w2Ram: 8192 };
     // (The late-game plan is switched off for the single-target run: it exists
     // to open more windows than maxTargets when that pays, which is this very
-    // spill - see the "late game" scenario for it.)
+    // spill - see the "late game" scenario for it. So is the exp leftover, which
+    // would fill the single-target run's idle RAM with exp windows: this is
+    // about the income plan's own spill - see the "leftover" scenario for that.)
     const measure = (maxTargets, adaptive = true) => {
       const saved = H.maxTargets;
       const savedAdaptive = H.adaptive.enabled;
+      const savedLeftover = H.expFarm.leftover.enabled;
       H.maxTargets = maxTargets;
       H.adaptive.enabled = adaptive;
+      H.expFarm.leftover.enabled = false;
       try {
         const { world, ns, advance } = makeWorld(worldOpts);
         const sim = run(world, ns, advance, 4 * 60_000);
@@ -558,6 +562,7 @@ export function defineScenarios(test, assert, base = {}) {
       } finally {
         H.maxTargets = saved;
         H.adaptive.enabled = savedAdaptive;
+        H.expFarm.leftover.enabled = savedLeftover;
       }
     };
 

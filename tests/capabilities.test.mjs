@@ -103,3 +103,51 @@ test("the configured campaign is well formed, and every node on it has a daemon"
   // BN10 may be a step (the bot can enter it), but its own daemon never leaves.
   assert.equal(forNode(10).backdoor.skipFinalHost, true);
 });
+
+// ── Owned vs active Source-File levels (every BN12 run is entered at SF12 0) ──
+
+test("levelMap reads every shape a Source-File list arrives in", async () => {
+  const { levelMap } = await import("../lib/capabilities.js");
+  const want = [[12, 0], [1, 3]];
+  assert.deepEqual([...levelMap(new Map(want))], want);
+  assert.deepEqual([...levelMap(want)], want);
+  assert.deepEqual([...levelMap({ ctor: "JSONMap", data: want })], want);
+  assert.deepEqual([...levelMap({ 1: 3 })], [[1, 3]]);
+  assert.deepEqual([...levelMap(null)], []);
+});
+
+test("ownedLevelOf sees through an override, and answers null rather than guess", async () => {
+  const { ownedLevelOf } = await import("../lib/capabilities.js");
+  const plain = { currentNode: 5, ownedSF: new Map([[12, 9], [4, 3]]), bitNodeOptions: {} };
+  assert.equal(ownedLevelOf(plain, 12), 9, "no override: active IS owned");
+  assert.equal(ownedLevelOf(plain, 2), 0);
+  // A BN12 run at SF12 0: ownedSF has no 12 at all (the game drops zero levels).
+  const bn12 = { currentNode: 12, ownedSF: new Map([[4, 3], [1, 3]]), bitNodeOptions: { sourceFileOverrides: new Map([[12, 0]]) } };
+  assert.equal(ownedLevelOf(bn12, 12), null);
+  assert.equal(ownedLevelOf(bn12, 12, new Map([[12, 23]])), 23);
+  assert.equal(ownedLevelOf(bn12, 12, new Map([[4, 3]])), null, "a save list without SF12 is no answer");
+  assert.equal(ownedLevelOf(bn12, 12, null, new Set(["CHALLENGE_BN12"])), 50);
+  assert.equal(ownedLevelOf(bn12, 4), 3, "files the run does not override");
+  // The challenge marker (a level-3 file set to 3) is known without the save.
+  const marked = { currentNode: 13, ownedSF: new Map([[1, 3]]), bitNodeOptions: { sourceFileOverrides: new Map([[1, 3]]) } };
+  assert.equal(ownedLevelOf(marked, 1), 3);
+});
+
+test("heldAchievements carries the save's owned Source-Files, only when read in this node", async () => {
+  const { heldAchievements } = await import("../lib/capabilities.js");
+  const reset = { lastNodeReset: 1000 };
+  const held = heldAchievements({ ids: ["X"], ownedSF: [[12, 4]], updatedAt: 2000 }, reset);
+  assert.ok(held?.has("X"));
+  assert.deepEqual([...(held?.ownedSF ?? [])], [[12, 4]]);
+  assert.equal(heldAchievements({ ids: ["X"], updatedAt: 2000 }, reset)?.ownedSF, null);
+  assert.equal(heldAchievements({ ids: ["X"], ownedSF: [[12, 4]], updatedAt: 500 }, reset), null, "stale: from the node before");
+});
+
+test("recursionEntryOptions: SF12 overridden once there is an SF12 to override", async () => {
+  const { recursionEntryOptions } = await import("../lib/capabilities.js");
+  assert.deepEqual(recursionEntryOptions({ currentNode: 12, ownedSF: new Map() }), { sourceFileOverrides: [[12, 0]] });
+  assert.deepEqual(recursionEntryOptions({ currentNode: 5, ownedSF: new Map([[12, 3]]) }), { sourceFileOverrides: [[12, 0]] });
+  assert.equal(recursionEntryOptions({ currentNode: 5, ownedSF: new Map() }), null, "BN12.1 is level 1 already");
+  assert.equal(recursionEntryOptions({ currentNode: 12, ownedSF: new Map() }, null), null, "switched off");
+  assert.deepEqual(recursionEntryOptions({ currentNode: 12, ownedSF: new Map() }, 2), { sourceFileOverrides: [[12, 2]] });
+});

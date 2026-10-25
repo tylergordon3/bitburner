@@ -194,7 +194,11 @@ test("every configured skill and action list is well-formed", () => {
   assert.ok(B.minChance < B.raiseChance, "level band must be non-empty or levels oscillate");
   assert.ok(B.restBelow < B.resumeAbove, "rest band must be non-empty");
   for (const [name, w] of Object.entries(B.skills)) assert.ok(w.weight >= 0, name);
-  assert.ok(!B.operations.includes("Raid"), "Raid fails without Synthoid communities");
+  // Raid runs (best rank per difficulty), but only where it can: it spends the
+  // city's population, and gateRaid keeps it out of chaotic cities.
+  assert.ok(B.operations.includes("Raid"));
+  assert.ok(B.populationOps.includes("Raid"));
+  assert.ok(B.raidMaxChaos > 0 && B.raidMaxChaos < B.chaosDiplomacy);
   // Under half of max stamina every action is penalised, so rest must start above it.
   assert.ok(B.restBelow > 0.5);
 });
@@ -211,7 +215,7 @@ test("REGRESSION: the helpers resolve their knobs per node, so BN7's skill weigh
   const { forNode } = await import("../lib/config.js");
   const { readFileSync } = await import("node:fs");
   // BITNODE[7] really does differ from the defaults the helpers used to read...
-  assert.notEqual(forNode(7).bladeburner.skills.Datamancer.weight, CONFIG.bladeburner.skills.Datamancer.weight);
+  assert.notEqual(forNode(7).bladeburner.skills.Tracer.cap, CONFIG.bladeburner.skills.Tracer.cap);
   assert.equal(forNode(7).bladeburner.skills.Datamancer.weight, 0);
   assert.equal(forNode(7).bladeburner.skills.Tracer.cap, 10);
   // ...so both helpers must call forNode() on the node the daemon passes them,

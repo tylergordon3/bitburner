@@ -124,21 +124,35 @@ save, and syncs the list to Steam when Options has Steam achievement sync on.
 ## 2. The BitNode order
 
 `campaign.order` in [`lib/config.js`](../lib/config.js) is the plan every daemon follows
-when it finishes a node. Reviewed 2026-10-04; what changed and why:
+when it finishes a node. Reordered 2026-10-25 for the shortest total time, from BN8.1 on:
 
-**BN7.3 is no longer first.** Its prize is a free Blade's Simulacrum on joining Bladeburner -
-an augmentation the Bladeburners faction sells anyway - and a BN7 run is the longest kind
-there is (the current one is past 112 hours). It moves to the back, where it doubles as the
-BN7 challenge run.
+| # | Steps | Why here |
+| --- | --- | --- |
+| 1 | `[8, "challenge"]` | SF8.2: the trader shorts from then on, in every node. BN8 straight after BN8.1. |
+| 2 | `[11, 3]` | Each queued aug multiplies the next one's price by 1.9 x [1, .96, .94, .93] at SF11 0-3 (`AugmentationHelpers.ts`): 11.3 makes the tenth aug of a batch ~25% cheaper than 11.1 does, in every run after. |
+| 3 | `[12, 50]` | 49 BN12 runs, **each entered at Source-File 12 level 0** (below), so each costs what BN12.1 costs. Every level is a NeuroFlux level at the start of every later node: +1% on nearly every multiplier, x1.63 at 49. |
+| 4 | `[13, "challenge"], [13, 3]`, `[2, ...]`, `[6, ...]` | Second (challenge) and third runs. SF13.2/13.3 grow Stanek's Gift (30 -> 36 -> 42 cells); SF2/SF6 add a few percent. |
+| 5 | `[8, 3]`, `[15, 3]`, `[14, "challenge"], [14, 3]` | Small gains: limit orders (unused), BN15's charisma bonuses; SF14.2/14.3 only unlock IPvGO cheats (unused) and raise the Go favor cap. BN14 runs are ~60h each and buy nothing for later runs. |
+| 6 | `[9, ...], [7, ...], [3, ...], [1, ...], [10, "challenge"]` | Challenge-only runs of nodes already at level 3: they award no Source-File, and the hacking-bound ones gain most from the NeuroFlux levels. BN10 ends by hand - the natural slot for `tools/debt.js`. |
 
-**BN9.3 and BN5.3 come first** because their daemons have run live, they are short, and
-what they give compounds over the ~35 runs still to come: 128GB of home RAM and a built
-hacknet server at the start of every node (SF9.2, 9.3), and +12%/+14% on every hacking
-multiplier (SF5.2, 5.3). BN5 is also the first live run of `lib/gang-daemon.js`, the engine
-BN11, BN12 and BN15 share, in a node that has already been beaten with the code it grew
-out of.
+**Why BN12 is entered at level 0.** BN12's multipliers are built from the Source-File 12
+level *in effect* plus one (`BitNode.tsx` `initBitNodeMultipliers`; BN12 is the only node
+whose multipliers read it), while destroying it raises the level *owned* (`RedPill.tsx`).
+A BitNode option (`sourceFileOverrides`) sets the level in effect for one run, so every BN12
+run is entered with SF12 at `campaign.recursionLevel` (0): x1.02 penalties instead of
+x1.02^level (x2.69 at level 50: server money x0.14, hacking level x0.37, world daemon x2.69).
+It costs the free NeuroFlux levels inside BN12 only. `lib/finish-bn-logic.js` adds the
+option whenever the next node is 12. Such a run is never a challenge run (BN12 has none).
 
-**Then the first run of each new node, biggest permanent gain first:**
+Because `getResetInfo().ownedSF` holds the levels *in effect*, a BN12 run reports SF12 at 0.
+The plan therefore reads the owned levels out of the save (`lib/achievements.js`, the same
+read as the achievements, redone at every node start) and **waits** while it has none for
+this node - it never guesses, since a guess of 0 would loop on BN12 for good. CHALLENGE_BN12
+held also proves level 50. The HUD's SF tab shows owned levels and marks the one in effect.
+
+The steps already done stay at the top of the list (7.2, 9.3, 5.3, 7.3 and the first runs
+of 13, 14, 11 and 8), so an older save still plans right. The first runs went in this order,
+biggest permanent gain first:
 
 | Step | What the Source-File gives | The run |
 | --- | --- | --- |
@@ -146,18 +160,12 @@ out of.
 | BN14.1 | IPvGO bonuses doubled, everywhere | Bladeburner finish (hacking level x0.4, world daemon x5); rank x0.6, skill costs x2 |
 | BN11.1 | Each augmentation bought raises the others' price 4% less (6%, 7% at levels 2, 3); company favor pays salary | Gang daemon; augs x2, server money x0.01, crime money x3 |
 | BN8.1 | WSE and TIX API free from minute one in every node (8.2: shorts; 8.3: limit orders) | Stock trader only: every other income is zero |
-| BN12.1 | Start every node with NeuroFlux Governor at the Source-File's level | Gang daemon; everything 2% worse per level |
+| BN12 | Start every node with NeuroFlux Governor at the Source-File's level | Gang daemon; entered at SF12 0, so x1.02 at every level |
 
-**Then the second run of each as its challenge run** (section 3) and the third run plain,
-so that no node needs a fourth entry: BN13, 14, 8, then 11.3 and 12.3, then BN2, BN6 and
-BN7, whose second/third runs are still owed.
+A challenge run awards a Source-File level like any other, so each node's challenge run is
+its second run and the third is plain: no node needs a fourth entry.
 
-**Then the challenge-only runs** of nodes already at level 3: BN9, BN3. (BN1 and BN10,
-the two cheap ones, were moved up on 2026-10-23 to sit right after BN12.1, ahead of the
-long Bladeburner challenge runs of BN13 and BN14. BN10 ends by hand, which makes its
-wait the natural place for the 13 hours of `tools/debt.js`.)
-
-**BN15 and BN12-to-50 last.** The bot has no hacking finish in BN15 (The Red Pill comes
+**BN15.** The bot has no hacking finish in BN15 (The Red Pill comes
 only from the dark net's labs there). The Bladeburner black ops end it without one -
 `destroyW0r1dD43m0n` accepts them in place of the hacking requirement - and
 `bn15/daemon.js` runs the Bladeburner engine (`BITNODE[15].bladeburner.enabled`, on
@@ -174,8 +182,8 @@ Three things the order cannot do for you:
   game.** The plan enters them anyway; watch the first run of each. An explicit argument
   (`run /bn7/daemon.js 9`) overrides the plan for the rest of a node, and the HUD's FINISH
   switch holds any finish.
-- **Speed demon** (a node inside 48 hours) is not planned for; BN5.2, BN5.3 or BN12.1 with
-  today's Source-Files should do it without help.
+- **Speed demon** (a node inside 48 hours) is not planned for; a BN12 run at SF12 level 0
+  with today's Source-Files should do it without help.
 
 ---
 
@@ -199,7 +207,7 @@ a Source-File level, which is why each sits before the node's level step.
 | BN13 | (marker only) | Stanek's Gift is never accepted. | |
 | BN14 | (marker only) | The IPvGO helper is not started, and exits if started by hand (it reads the run's config with `forReset`). Do not play the board through the API yourself either: one API move or cheat voids it for the whole node. | A second run, so SF14.1 does not depend on it. |
 | BN15 | - | Nothing here ever calls `dnet.heartbleed`; any BN15 finish earns it, the black-ops one included. | |
-| BN12 | - | `[12, 50]`: fifty runs, each 2% harder than the last. | The last thing on the list. |
+| BN12 | SF12 overridden to 0 (every BN12 run) | `[12, 50]`: fifty runs, each at BN12.1's difficulty. | Early in the list: each level helps every later node. |
 
 *The marker.* BN13 and BN14 have no option to set - their challenge is something the player
 must not do - so every challenge entry also carries a Source-File override that overrides

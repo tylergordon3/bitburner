@@ -207,6 +207,27 @@ test("econ.js: home RAM and cores only once the server fleet is full - every slo
   assert.deepEqual(await buys({ limit: 0, maxRam: 0, servers: {} }), ["home-ram", "home-core"]);
 });
 
+test("econ.js in BN8 (homeBeforeFleet): home first, out of the allowance the floor leaves", async () => {
+  // 25 x 256GB against a 1PB cap: never "full" there - and an install deletes it.
+  const fleet = { limit: 25, maxRam: 2 ** 20, servers: Object.fromEntries(Array.from({ length: 25 }, (_, i) => [`cloud-${i}`, 256])) };
+  const buys = async (node, floor) => {
+    const { ns, g } = fakeNs({ args: [0, node], money: 1e7, fleet, coreCost: 2e6 });
+    if (floor != null) globalThis.gordMoneyFloor = floor;
+    try {
+      await run(econMain, ns);
+    } finally {
+      delete globalThis.gordMoneyFloor;
+    }
+    return g.bought;
+  };
+  assert.deepEqual(await buys(4), [], "every other node: the fleet comes first");
+  assert.deepEqual(await buys(8), ["home-ram", "home-core"]);
+  // The treasury's fence: $50k of allowance does not buy a $100k upgrade...
+  assert.deepEqual(await buys(8, 1e7 - 50_000), []);
+  // ...$150k buys the RAM (all of the allowance may go on it: maxFraction 1) but not the $2m core.
+  assert.deepEqual(await buys(8, 1e7 - 150_000), ["home-ram"]);
+});
+
 test("homeUpgradeWanted / fleetFull: the rules on their own", () => {
   const base = { full: true, cost: 100, money: 1_000, reserve: 0, maxFraction: 0.4 };
   assert.equal(homeUpgradeWanted(base), true);

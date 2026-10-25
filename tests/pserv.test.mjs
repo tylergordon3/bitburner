@@ -48,6 +48,18 @@ test("REGRESSION: on BN7's softcap curve the largest affordable tier is the wors
   assert.ok(Math.max(...fleet) <= 256, "no slot ran ahead up the curve");
 });
 
+test("BN8 (softcap 4): a cost-per-GB cap stops the fleet at 1TB a server, where home is the better buy", () => {
+  const cap = 30e6;
+  const upgrade = (from, to) => ({ ram: to, cost: cost(to, 4) - cost(from, 4), gain: to - from });
+  // 256GB -> 512GB is $1.58b: over the old flat $1b ceiling, so never bought.
+  assert.ok(upgrade(256, 512).cost > 1e9);
+  assert.equal(bestRamPerDollar([upgrade(256, 512), upgrade(256, 1024)], cap).ram, 512, "best rate first");
+  assert.equal(bestRamPerDollar([upgrade(512, 1024)], cap).ram, 1024, "512GB -> 1TB is $25m/GB");
+  assert.equal(bestRamPerDollar([upgrade(1024, 2048), upgrade(1024, 4096)], cap), null, "1TB -> 2TB is $98m/GB");
+  // Without a cap the menu is as it was.
+  assert.equal(bestRamPerDollar([upgrade(1024, 2048)]).ram, 2048);
+});
+
 test("nothing affordable, or nothing to gain: no pick", () => {
   assert.equal(bestRamPerDollar([]), null);
   assert.equal(bestRamPerDollar([{ cost: 0, gain: 8 }, { cost: 5, gain: 0 }]), null);

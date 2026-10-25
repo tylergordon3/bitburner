@@ -132,3 +132,22 @@ Proposed by the campaign reviewer (if #1 is adopted; otherwise keep `[12, 50]` l
 - With SF15, the dark-net labyrinth gives The Red Pill in every node but BN8: a labyrinth
   runner would shortcut every hacking finish (large to build).
 - Unused SF bonuses: SF8.3 limit orders, SF14.2 IPvGO cheats (both low value).
+
+## What was implemented (same day)
+
+All of the above except the two unused SF bonuses (limit orders, IPvGO cheats) and a
+dark-net labyrinth runner. 692 tests pass; nothing has run in the game yet.
+
+| Item | Change |
+| --- | --- |
+| 1. BN12 override | Every BN12 run after the first is entered with `sourceFileOverrides {12: 0}` (`campaign.recursionLevel`, `null` = off). The owned level comes from the save read (`gordAchievements.ownedSF`); with no fresh read the campaign waits rather than guess. The SF tab shows owned vs active. |
+| Campaign order | 8.1, [8 ch], 11.3, 12 -> 50, [13 ch], 13.3, [2 ch], 2.3, [6 ch], 6.3, 8.3, 15.3, [14 ch], 14.3, then the challenge-only 9, 7, 3, 1, 10. |
+| 2. After The Red Pill | No install and no aug buying once it is installed, while the world daemon's level is within `augs.install.redPillReachMs` (6h) at the measured exp rate. The Red Pill is bought last in its buy round, never starved. |
+| 3. Exp farming | RAM the money plan leaves (5%+ of the botnet) farms exp on up to 3 targets in every node; the whole botnet farms exp once The Red Pill is installed (`gordHackGoal`, `hacking.expFarm`). Sim: exp x1.8-2.0. |
+| 4. Daedalus | Every core daemon hoards for money-gated invites; a Daedalus lock allows only the red-pill install (or a favor install for Daedalus) and points the Go helper at Daedalus. |
+| 5. Bladeburner | Raid (chaos <= 40); karma ranking without the 50% chance floor; 4 sleeves stay on Bladeburner during the gang bootstrap; black-op bar priced by failure cost vs rank rate (floor 10%); skills by marginal rank rate; no install once rank >= 150k or 3 black ops are rank-unlocked; infiltration capped at 2 sleeves. Sim: BN13 -23 to -26%, BN14 -29 to -32%, BN15 -24 to -54%. |
+| 6. BN8 | No aug buys during a run; at release the trader liquidates and the batch is bought dearest-first (`lib/bn8-logic.js releaseDecision`: book growth under 0.4 augs/h, or 16h); servers up to $30m/GB, home RAM from the allowance (`econ.homeBeforeFleet`); company work for megacorp factions; sleeves off gang karma (`sleeves.gangKarma`). |
+| Run history | `/data/run-history.txt` on home: a JSON line per node start, install and "world daemon ready", last 500 kept - the next audit can measure. |
+
+RAM: the hacking-node daemons gain ~4GB (the invite hoard's requirement check), ~90.75GB;
+BN8's daemon +7GB (company work); helpers unchanged; `tools/exploits.js` still 1.6GB.

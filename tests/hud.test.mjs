@@ -108,6 +108,18 @@ test("SF tab: one card per owned Source-File, plus the exploits once they are re
     assert.match(text, /SF-1 exploits: 2 of 11/);
     assert.match(text, /\+0\.20% every multiplier/);
     assert.match(text, /overrides some Source-File levels/);
+
+    // A BN12 run at SF12 0, with the save read in this node: the owned level shows.
+    const bn12 = { currentNode: 12, lastNodeReset: 100, ownedSF: new Map([[1, 3]]), bitNodeOptions: { sourceFileOverrides: new Map([[12, 0]]) } };
+    globalThis.gordAchievements = { ids: [], exploits: [], ownedSF: [[1, 3], [12, 37]], updatedAt: 200 };
+    text = sfCards(ns(bn12), COLORS).map(textOf).join("\n");
+    assert.match(text, /SF12\.37[\s\S]*level 0 this run/);
+    assert.match(text, /2, 40 levels/);
+    // A reading from the node before is not trusted: the active levels only.
+    globalThis.gordAchievements.updatedAt = 50;
+    text = sfCards(ns(bn12), COLORS).map(textOf).join("\n");
+    assert.doesNotMatch(text, /SF12/);
+    assert.match(text, /not read yet/);
   } finally {
     delete globalThis.gordAchievements;
     globalThis.React = React;

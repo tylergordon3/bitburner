@@ -11,7 +11,7 @@
 import { card, label, statRow, el } from "./dashboard-lib.js";
 import { CONFIG, CHALLENGE, forNode, isChallengeRun } from "../lib/config.js";
 import { ACHIEVEMENT_PLAN, missingByGroup } from "../lib/achievements-logic.js";
-import { sourceFileLevel } from "../lib/capabilities.js";
+import { levelMap, ownedLevelOf, runOverrides, sourceFileLevel } from "../lib/capabilities.js";
 
 // Steps of the plan shown ahead of the current one; the rest is a count.
 const STEPS_SHOWN = 8;
@@ -50,10 +50,12 @@ export function extraCards(ns, C) {
 
 /**
  * The steps of campaign.order that are still open, in order, with the one the
- * daemon will enter next marked.
+ * daemon will enter next marked. Levels are the owned ones where the save has
+ * been read for this node (a BN12 run reports its SF12 override as the level).
  * @param {any} reset @param {Set<string>} held
+ * @param {Map<number, number> | null} [saved] - owned Source-File levels from the save
  */
-export function openSteps(reset, held) {
+export function openSteps(reset, held, saved = null) {
   const current = Number(reset?.currentNode ?? 0);
   return CONFIG.campaign.order.map(([node, target]) => {
     if (target === "challenge") {
@@ -61,7 +63,7 @@ export function openSteps(reset, held) {
       const inHand = node === current && isChallengeRun(reset);
       return { node, text: `BN${node} challenge`, done: !!id && held.has(id), inHand };
     }
-    const level = sourceFileLevel(reset, node);
+    const level = ownedLevelOf(reset, node, saved, held) ?? sourceFileLevel(reset, node);
     return { node, text: `BN${node} to ${node}.${target}`, done: level >= target, inHand: node === current && level + 1 >= target && level < target };
   }).filter(step => !step.done);
 }
@@ -69,10 +71,13 @@ export function openSteps(reset, held) {
 function planCard(C, reset, published) {
   const plan = globalThis.gordCampaign;
   const held = new Set(Array.isArray(published.ids) ? published.ids : []);
-  const steps = openSteps(reset, held);
+  const fresh = published.ownedSF != null && published.updatedAt >= Number(reset?.lastNodeReset ?? 0);
+  const steps = openSteps(reset, held, fresh ? levelMap(published.ownedSF) : null);
   const rows = [];
 
-  const here = `BN${reset.currentNode} ${forNode(reset.currentNode).name ?? ""}${isChallengeRun(reset) ? " - CHALLENGE RUN" : ""}`;
+  const sf12 = runOverrides(reset).get(12);
+  const here = `BN${reset.currentNode} ${forNode(reset.currentNode).name ?? ""}${isChallengeRun(reset) ? " - CHALLENGE RUN" : ""}` +
+    (Number(reset.currentNode) === 12 && sf12 !== undefined ? ` - SF12 at level ${sf12} for the run` : "");
   rows.push(statRow(C, ">", "This run", here, isChallengeRun(reset) ? C.yellow : C.blue));
   if (plan) {
     const next = plan.override != null

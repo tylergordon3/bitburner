@@ -237,6 +237,13 @@ export async function main(ns) {
       ns.tprint(`  Planned income $${ns.format.number((rate.incomePerMs ?? 0) * 1000)}/s; ` +
         `one more TB would add $${ns.format.number((rate.perMsPerGB ?? 0) * 1000 * 1024)}/s.`);
     }
+    // Hacking exp (hacking.expFarm): the goal, the measured gain, and the exp
+    // windows - the whole plan under goal "exp", the income plan's leftover otherwise.
+    const xp = state.exp;
+    if (xp) {
+      ns.tprint(`  Goal: ${state.goal ?? "money"} | hacking exp ${ns.format.number(xp.perSec ?? 0)}/s measured` +
+        (xp.targets ? ` | ${xp.targets} exp window(s) on ${ram(xp.ram ?? 0)}, ~${ns.format.number(xp.plannedPerSec ?? 0)}/s planned (base, before multipliers)` : ""));
+    }
     if (state.stockPush) {
       ns.tprint("  BN8 ranking: the trader's wished servers first ([stock]), then hacking exp ([exp]) - " +
         "the first target's objective is " + `${state.targets?.[0]?.objective ?? "?"}; $/sec below is what the ` +

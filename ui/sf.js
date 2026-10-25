@@ -3,7 +3,9 @@
 // The SF dashboard cards: every bonus the owned Source-Files give, one card per
 // Source-File (number, level, name, then its modifiers and unlocks). The table is
 // lib/sf-bonuses.js; the levels come from ns.getResetInfo().ownedSF, which the
-// dashboard already pays for, so this tab adds no RAM. SF-1 (the exploits) comes
+// dashboard already pays for, so this tab adds no RAM - and, since that map holds
+// the ACTIVE levels, the owned ones from the save where a run overrides some
+// (every BN12 run, SF12 at 0). SF-1 (the exploits) comes
 // from globalThis.gordAchievements, which lib/achievements.js publishes from the
 // save - Netscript has no exploit API.
 //
@@ -19,8 +21,13 @@ import { sourceFileBonusList, exploitBonus, EXPLOIT_COUNT } from "../lib/sf-bonu
  */
 export function extraCards(ns, C) {
   const reset = ns.getResetInfo();
-  const list = sourceFileBonusList(reset);
-  const exploits = globalThis.gordAchievements?.exploits;
+  // The owned levels from the save, when it has been read in this node: the
+  // resetInfo has only the ACTIVE ones (a BN12 run shows SF12 at 0).
+  const published = globalThis.gordAchievements;
+  const saved = Array.isArray(published?.ownedSF) && published.updatedAt >= Number(reset?.lastNodeReset ?? 0)
+    ? published.ownedSF : null;
+  const list = sourceFileBonusList(reset, saved);
+  const exploits = published?.exploits;
   if (list.length === 0 && !Array.isArray(exploits)) return [];
 
   const header = [
@@ -35,7 +42,9 @@ export function extraCards(ns, C) {
     header.push(label(C, "SF-1 exploits: not read yet (lib/achievements.js reads them from the save)."));
   }
   if ((reset.bitNodeOptions?.sourceFileOverrides?.size ?? 0) > 0) {
-    header.push(label(C, "This run overrides some Source-File levels - the levels below are the ones in effect."));
+    header.push(label(C, saved
+      ? "This run overrides some Source-File levels - each card says the level in effect where it differs from the one owned."
+      : "This run overrides some Source-File levels - the levels below are the ones in effect (the owned ones come from the save, not read yet)."));
   }
   const cards = [card(C, "SOURCE-FILES", header)];
 

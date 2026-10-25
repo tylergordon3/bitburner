@@ -653,8 +653,22 @@ function prepEstimateMs(ns, target, math, capacity) {
  */
 let _rank = {
   at: 0, ram: 0, list: /** @type {Ranked[]} */ ([]), pushing: false, deep: false,
-  rate: { incomePerMs: 0, perMsPerGB: 0 },
+  rate: { incomePerMs: 0, perMsPerGB: 0 }, goal: "money",
 };
+
+/**
+ * What the botnet works for this tick: "exp" or "money". The config's
+ * hacking.expFarm.goal wins when set; otherwise the daemon's
+ * globalThis.gordHackGoal ("exp" once the hacking level is the only gate left -
+ * the world daemon after The Red Pill), a bare string or { goal }.
+ */
+function hackGoal() {
+  const forced = H.expFarm?.goal;
+  if (forced === "exp" || forced === "money") return forced;
+  const g = globalThis.gordHackGoal;
+  const goal = typeof g === "string" ? g : g?.goal;
+  return goal === "exp" ? "exp" : "money";
+}
 // A window counts as full, for the switch to the late-game plan, at this share
 // of its depth (a full window is forever one batch short for a tick or two).
 const DEEP_READY_FILL = 0.9;
@@ -731,9 +745,11 @@ function cycleFor(math, ramBudget, thinRam = ramBudget, maxDepth = H.maxDepth) {
  *        (batch-logic preferredWishes); null everywhere but BitNode 8
  */
 function rankTargets(ns, snap, capacity, now, incumbents, flying, wishes = null) {
+  const goal = hackGoal();
   const stale = now - _rank.at >= H.targetRescoreMs
     || Math.abs(capacity - _rank.ram) > _rank.ram * 0.5
-    || !!wishes !== _rank.pushing;
+    || !!wishes !== _rank.pushing
+    || goal !== _rank.goal;
   if (_rank.list.length && !stale) return _rank.list;
 
   _planCache.clear();
@@ -773,7 +789,11 @@ function rankTargets(ns, snap, capacity, now, incumbents, flying, wishes = null)
   let deep = false;
   // (Not dollars while the trader's wishes are worked: no rate then.)
   let rate = { incomePerMs: 0, perMsPerGB: 0 };
-  if (wishes) {
+  if (goal === "exp") {
+    // The hacking level is the last gate: the whole botnet trains it (the
+    // trader's wishes too give way - see hackGoal).
+    list = rankForExp(capacity, expCurvesFor(ns, cands), weight, H.expFarm.expTargets);
+  } else if (wishes) {
     list = rankForStocks(ns, capacity, cands, weight, wishes);
   } else {
     list = B.allocateRam({
@@ -801,8 +821,10 @@ function rankTargets(ns, snap, capacity, now, incumbents, flying, wishes = null)
       minTargetRam: H.minTargetRam,
       bonus,
     });
+    // What the income plan cannot use goes to hacking exp rather than idling.
+    if (!deep) list = list.concat(leftoverForExp(ns, capacity, cands, weight, list));
   }
-  _rank = { at: now, ram: capacity, list, pushing: !!wishes, deep, rate };
+  _rank = { at: now, ram: capacity, list, pushing: !!wishes, deep, rate, goal };
   return list;
 }
 
@@ -839,25 +861,12 @@ function rankTargets(ns, snap, capacity, now, incumbents, flying, wishes = null)
  */
 function rankForStocks(ns, capacity, cands, weight, wishes) {
   const pushCurves = [];
-  const expCurves = new Map();
   for (const [server, c] of cands) {
-    // (Not called `window`: the game bills that identifier 25GB.)
-    const shape = {
-      hackChance: c.m.hackChance,
-      lastLanding: c.schedule.lastLanding,
-      launchInterval: c.schedule.launchInterval,
-      maxDepth: H.maxDepth,
-      maxThreads: c.m.maxThreads,
-      planFor: c.m.plan,
-    };
-    const minRam = c.m.plan(1)?.nominalRam ?? Infinity;
-    if (wishes.has(server)) {
-      const points = B.incomeCurve({ ...shape, maxMoney: 1 });
-      if (points.length) pushCurves.push({ key: server, points, minRam });
-    }
-    const points = B.expCurve({ ...shape, minSecurity: ns.getServerMinSecurityLevel(server) });
-    if (points.length) expCurves.set(server, { key: server, points, minRam });
+    if (!wishes.has(server)) continue;
+    const points = B.incomeCurve({ ...shapeOf(c), maxMoney: 1 });
+    if (points.length) pushCurves.push({ key: server, points, minRam: c.m.plan(1)?.nominalRam ?? Infinity });
   }
+  const expCurves = expCurvesFor(ns, cands);
 
   const pushSlots = Math.max(1, H.maxTargets - H.stockPush.expSlots);
   const pushed = B.allocateRam({
@@ -869,18 +878,95 @@ function rankForStocks(ns, capacity, cands, weight, wishes) {
   }).sort((a, b) => (wishes.get(b.key) ?? 0) - (wishes.get(a.key) ?? 0));
   for (const a of pushed) expCurves.delete(a.key);
 
-  const trained = B.allocateRam({
-    totalRam: capacity - pushed.reduce((sum, a) => sum + a.ram, 0),
-    curves: [...expCurves.values()],
-    maxTargets: H.maxTargets - pushed.length,
-    minTargetRam: H.minTargetRam,
-    bonus: key => weight.get(key) ?? 1,
-  });
+  const trained = rankForExp(capacity - pushed.reduce((sum, a) => sum + a.ram, 0), expCurves, weight,
+    H.maxTargets - pushed.length);
   // score: forecast cycled / exp landed per ms, NOT dollars - `objective` says which.
   return [
     ...pushed.map(a => ({ target: a.key, score: a.income, ram: a.ram, objective: "stock" })),
-    ...trained.map(a => ({ target: a.key, score: a.income, ram: a.ram, objective: "exp" })),
+    ...trained,
   ];
+}
+
+// ── Hacking exp, in every node ───────────────────────────────────────────────
+//
+// The exp objective above is not BN8's alone. Two more uses, everywhere:
+//   - LEFTOVER: the income plan stops where its targets' windows are full and
+//     its slots taken; on a fleet bigger than that (a late run, a node with
+//     little money in reach) the rest of the RAM sat idle. It now goes to the
+//     best exp per GB on servers the plan left out, in up to
+//     hacking.expFarm.leftover.extraTargets more windows - serviced after every
+//     money target, out of what they leave, so income is untouched. Not while
+//     the late-game deep plan is in force: there the process budget, not RAM,
+//     is what runs out, and exp windows would spend it.
+//   - GOAL "exp": when the hacking level is the only gate left (the world
+//     daemon after The Red Pill - the daemon publishes globalThis.gordHackGoal,
+//     or hacking.expFarm.goal forces it), every target is ranked by exp per ms.
+
+/** (Not called `window`: the game bills that identifier 25GB.) */
+function shapeOf(c) {
+  return {
+    hackChance: c.m.hackChance,
+    lastLanding: c.schedule.lastLanding,
+    launchInterval: c.schedule.launchInterval,
+    maxDepth: H.maxDepth,
+    maxThreads: c.m.maxThreads,
+    planFor: c.m.plan,
+  };
+}
+
+/**
+ * Every candidate's exp curve (batch-logic expCurve), by server.
+ * @param {NS} ns @param {Map<string, {maxMoney: number, m: TargetMath, schedule: any}>} cands
+ */
+function expCurvesFor(ns, cands) {
+  const curves = new Map();
+  for (const [server, c] of cands) {
+    const points = B.expCurve({ ...shapeOf(c), minSecurity: ns.getServerMinSecurityLevel(server) });
+    if (points.length) curves.set(server, { key: server, points, minRam: c.m.plan(1)?.nominalRam ?? Infinity });
+  }
+  return curves;
+}
+
+/**
+ * `ram` split over exp curves (allocateRam), as ranked entries with the "exp"
+ * objective; score is exp landed per ms.
+ * @param {number} ram @param {Map<string, any>} curves @param {Map<string, number>} weight
+ * @param {number} maxTargets
+ * @returns {Ranked[]}
+ */
+function rankForExp(ram, curves, weight, maxTargets) {
+  if (!(ram > 0) || !(maxTargets > 0) || !curves.size) return [];
+  return B.allocateRam({
+    totalRam: ram,
+    curves: [...curves.values()],
+    maxTargets,
+    minTargetRam: H.minTargetRam,
+    bonus: key => weight.get(key) ?? 1,
+  }).map(a => ({ target: a.key, score: a.income, ram: a.ram, objective: "exp" }));
+}
+
+/**
+ * The income plan's unclaimed RAM, to exp (batch-logic expLeftover decides how
+ * much and how many). Empty when the plan uses (nearly) all of it.
+ * @param {NS} ns @param {number} capacity
+ * @param {Map<string, {maxMoney: number, m: TargetMath, schedule: any}>} cands
+ * @param {Map<string, number>} weight @param {Ranked[]} list the income plan
+ * @returns {Ranked[]}
+ */
+function leftoverForExp(ns, capacity, cands, weight, list) {
+  const L = H.expFarm?.leftover;
+  const spare = B.expLeftover({
+    capacity,
+    claimed: list.reduce((sum, e) => sum + e.ram, 0),
+    enabled: L?.enabled === true,
+    minFraction: L?.minFraction ?? 1,
+    minTargetRam: H.minTargetRam,
+  });
+  if (!(spare > 0)) return [];
+  const used = new Set(list.map(e => e.target));
+  const free = new Map();
+  for (const [server, c] of cands) if (!used.has(server)) free.set(server, c);
+  return rankForExp(spare, expCurvesFor(ns, free), weight, L.extraTargets);
 }
 
 // ── Late game: deeper windows, within a budget of processes ──────────────────
@@ -1317,7 +1403,26 @@ export function newSchedulerState() {
     // Just-in-time hack legs (launchDueHacks): exec'd, skipped (no room in time,
     // or the target drifted), skipped for being late, launched only in part.
     jit: { launched: 0, skipped: 0, late: 0, partial: 0 },
+    // Hacking exp actually gained (the player's, all sources): the last reading
+    // and the rate over the last expRateWindowMs, for gordHackState.
+    exp: { at: 0, value: -1, perSec: 0 },
   };
+}
+
+// Hacking exp is read off the player at most this often for the measured rate.
+const EXP_RATE_WINDOW_MS = 60_000;
+
+/**
+ * Advance the measured hacking-exp rate. A drop (an aug install) restarts it.
+ * @param {{at: number, value: number, perSec: number}} e @param {number} exp @param {number} now
+ */
+function trackExp(e, exp, now) {
+  if (!(exp >= 0)) return;
+  if (e.value < 0 || exp < e.value) { e.at = now; e.value = exp; e.perSec = 0; return; }
+  if (now - e.at < EXP_RATE_WINDOW_MS) return;
+  e.perSec = (exp - e.value) / ((now - e.at) / 1000);
+  e.at = now;
+  e.value = exp;
 }
 
 /**
@@ -1330,7 +1435,7 @@ export function resetCaches() {
   _netServers = [];
   _rootAt = 0;
   _copied.clear();
-  _rank = { at: 0, ram: 0, list: [], pushing: false, deep: false, rate: { incomePerMs: 0, perMsPerGB: 0 } };
+  _rank = { at: 0, ram: 0, list: [], pushing: false, deep: false, rate: { incomePerMs: 0, perMsPerGB: 0 }, goal: "money" };
   _planCache.clear();
   _growMult = 1;
   _hosts = { rooms: [], key: 0 };
@@ -1499,7 +1604,9 @@ function publishRate(snap, now) {
  */
 export function step(ns, s, now) {
   const snap = buildSnapshot(ns, now);
-  _growMult = ns.getPlayer().mults?.hacking_grow ?? 1;
+  const player = ns.getPlayer();
+  _growMult = player.mults?.hacking_grow ?? 1;
+  trackExp(s.exp, player.exp?.hacking ?? -1, now);
 
   // Share is an optional side mode and must NEVER be able to stop the core
   // hacking loop (e.g. a stale config on a runner). On error, log and keep going.
@@ -1691,7 +1798,18 @@ export function step(ns, s, now) {
     })),
     // True while the ranking is for the trader's stocks and hacking exp rather
     // than income: `score` is then not dollars (see rankForStocks).
-    stockPush: _rank.pushing,
+    stockPush: _rank.pushing && _rank.goal !== "exp",
+    // What the botnet works for ("money" / "exp" - hackGoal), and hacking exp:
+    // measured (the player's gain, every source) and planned (the exp-objective
+    // windows this ranking set up, at full depth; expPerThread's base, before
+    // the player's multipliers).
+    goal: _rank.goal,
+    exp: {
+      perSec: s.exp.perSec,
+      plannedPerSec: ranked.reduce((sum, e) => sum + (e.objective === "exp" ? e.score * 1000 : 0), 0),
+      targets: ranked.filter(e => e.objective === "exp").length,
+      ram: serviced.reduce((sum, r) => sum + (r.objective === "exp" ? r.claim : 0), 0),
+    },
     processes: s.processes,
     claimedRam: claimed,
     capacityRam: snap.capacity,
