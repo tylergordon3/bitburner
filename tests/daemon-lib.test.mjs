@@ -161,6 +161,20 @@ test("rehostable: no install that leaves the node's engine with nowhere to run",
   assert.equal(rehostable({ ...bn13, hostCost: Infinity, incomePerMs: 1e9 }, hour), false);
 });
 
+test("rehostable: BN8's $250m after every install rebuys the trader's host, whatever the income says", () => {
+  const hour = 3_600_000;
+  // BN8, 2026-10-25: 38GB trader, a home kept to the daemon's size, and income
+  // reported as 0 once an install is due - every install was held, 25 queued.
+  const bn8 = { helperRam: 38.3, homeFree: 128 - 89.65 - 8, hostCost: 3.5e6, incomePerMs: 0 };
+  assert.equal(rehostable(bn8, hour), false, "the deadlock, without the node's starting money");
+  const startMoney = forNode(8).augs.install.moneyAfterInstall;
+  assert.equal(startMoney, 250e6);
+  assert.equal(rehostable({ ...bn8, startMoney }, hour), true);
+  // Not enough to cover it at cloudHost.spendFraction: still held.
+  assert.equal(rehostable({ ...bn8, startMoney: 3.5e6 }, hour), false);
+  assert.equal(CONFIG.augs.install.moneyAfterInstall, 0, "other nodes start an install with nothing");
+});
+
 test("infraReserve: the configured reserve, or 30 minutes of income when that is less, never under the floor", () => {
   const I = CONFIG.infra;
   assert.equal(infraReserve(100e6, 1e9), 100e6, "rich: the configured reserve");

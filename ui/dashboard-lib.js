@@ -26,23 +26,45 @@ export function card(C, title, children) {
     style: {
       border: `1px solid ${C.border}`,
       borderRadius: "6px",
-      padding: "7px 10px",
-      marginBottom: "5px",
+      padding: "5px 9px",
+      marginBottom: "4px",
       background: C.cardBg,
     },
   },
     el("div", {
       style: {
         fontWeight: "bold",
-        fontSize: "13px",
+        fontSize: "12px",
         letterSpacing: "1px",
         color: C.dim,
-        marginBottom: "7px",
+        marginBottom: "4px",
         textTransform: "uppercase",
       },
     }, title),
     ...children,
   );
+}
+
+/**
+ * How far to shrink the HUD so all of it fits on screen. Pure.
+ *
+ * The HUD is scaled as a picture (a CSS transform) and the window's width and
+ * height with it, so its layout - and therefore its natural height - doesn't
+ * change with the scale; that keeps the next measurement from fighting this
+ * one. Shrinking always follows the content at once (it must fit); growing
+ * back waits until it is worth more than `scaleStep`, so the window doesn't
+ * twitch by a pixel every repaint. Never below `minScale`: past that the text
+ * is too small to read, and the window scrolls instead.
+ * @param {number} natural - the HUD's height at scale 1 (px)
+ * @param {number} room - the screen height it may use (px; <= 0 / NaN = unknown)
+ * @param {number} prev - the scale in use now
+ * @param {{fitScreen?: boolean, minScale: number, scaleStep: number}} o - CONFIG.ui.tail
+ */
+export function fitScale(natural, room, prev, o) {
+  if (!o.fitScreen || !(natural > 0) || !(room > 0)) return 1;
+  const want = Math.round(Math.max(o.minScale, Math.min(1, room / natural)) * 100) / 100;
+  if (want < prev) return want;
+  return want - prev >= o.scaleStep ? want : prev;
 }
 
 /**

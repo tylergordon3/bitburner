@@ -5,7 +5,7 @@
 // Run: npm test  (needs Node >=20).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { fresh, COLORS } from "../ui/dashboard-lib.js";
+import { fresh, COLORS, fitScale } from "../ui/dashboard-lib.js";
 import { extraCards as goCards, playedBonuses } from "../ui/go.js";
 import { extraCards as sfCards } from "../ui/sf.js";
 import { CONFIG } from "../lib/config.js";
@@ -112,4 +112,19 @@ test("SF tab: one card per owned Source-File, plus the exploits once they are re
     delete globalThis.gordAchievements;
     globalThis.React = React;
   }
+});
+
+test("fitScale: shrinks to the screen at once, grows back only by a real step", () => {
+  const o = { fitScreen: true, minScale: 0.6, scaleStep: 0.03 };
+  assert.equal(fitScale(800, 1000, 1, o), 1);            // fits: full size
+  assert.equal(fitScale(1250, 1000, 1, o), 0.8);         // too tall: shrink to fit
+  assert.equal(fitScale(3000, 1000, 1, o), 0.6);         // never below minScale (it scrolls)
+  assert.equal(fitScale(1240, 1000, 0.8, o), 0.8);       // +0.01 of room: no twitch
+  assert.equal(fitScale(1000, 1000, 0.8, o), 1);         // a real gain: grow back
+  assert.equal(fitScale(1260, 1000, 0.8, o), 0.79);      // any shrink applies
+  // Off, unmeasured, or no screen size: plain scale 1.
+  assert.equal(fitScale(1250, 1000, 0.8, { ...o, fitScreen: false }), 1);
+  assert.equal(fitScale(0, 1000, 0.8, o), 1);
+  assert.equal(fitScale(1250, 0, 0.8, o), 1);
+  assert.equal(CONFIG.ui.tail.fitScreen, true);
 });

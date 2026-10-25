@@ -37,7 +37,7 @@
 // one tail replaces the old separate dashboard + journal windows.
 
 import { CONFIG, forNode } from "../lib/config.js";
-import { COLORS, el, card, label, progressBar, stat, statRow, formatDuration, shortenAugNames, fresh } from "./dashboard-lib.js";
+import { COLORS, el, card, label, progressBar, stat, statRow, formatDuration, shortenAugNames, fresh, fitScale } from "./dashboard-lib.js";
 // Gang + corp panels reuse the existing per-node card modules. bn5's extraCards
 // already composes the running-gang card (via bn2.js) with the BN5 karma
 // bootstrap card and returns [] elsewhere, so it doubles as a universal gang
@@ -210,23 +210,32 @@ function renderHud(ns) {
   ns.clearLog();
   try {
     const C = COLORS;
-    ns.printRaw(
-      el("div", {
-        id: DASH_ID,
-        style: {
-          fontFamily: "'Courier New', monospace",
-          fontSize: "14px",
-          padding: "2px 10px 6px",
-          boxSizing: "border-box",
-          width: "100%",
-          color: "#e2e8f0",
-        },
+    const s = hudScale;
+    const hud = el("div", {
+      id: DASH_ID,
+      style: {
+        fontFamily: "'Courier New', monospace",
+        fontSize: "13px",
+        padding: "2px 8px 4px",
+        boxSizing: "border-box",
+        color: "#e2e8f0",
+        // Scaled as a picture (see fitScale): laid out at the full width, then
+        // shrunk from the top-left corner.
+        ...(s < 1
+          ? { width: `${100 / s}%`, transform: `scale(${s})`, transformOrigin: "top left" }
+          : { width: "100%" }),
       },
-        headerBar(ns, C),
-        tabBar(ns, C),
-        activePanel(ns, C),
-      )
+    },
+      headerBar(ns, C),
+      tabBar(ns, C),
+      activePanel(ns, C),
     );
+    // A transform doesn't shrink the box the page lays out, so a scaled HUD sits
+    // in a clip of its scaled height - else the window would scroll over the
+    // empty space the full-size box still claims below it.
+    ns.printRaw(s < 1 && naturalHeight > 0
+      ? el("div", { style: { height: `${Math.ceil(naturalHeight * s)}px`, overflow: "hidden" } }, hud)
+      : hud);
   } catch (e) {
     ns.print("HUD error: " + String(e));
     ns.print(e?.stack ?? "");
@@ -243,25 +252,31 @@ function daemonSilentMs() {
 function headerBar(ns, C) {
   const node = ns.getResetInfo().currentNode;
   const name = forNode(node).name ?? "";
+  // One line where it fits: the node and run time on the left, the switches and
+  // clock on the right. Every item is nowrap, so when space runs out a whole
+  // group drops to a second line instead of a word breaking mid-item. (The
+  // window's own title bar already says GORDNET, so no banner here.)
+  const item = (color, text, extra = {}) =>
+    el("span", { style: { fontSize: "13px", color, whiteSpace: "nowrap", ...extra } }, text);
   return el("div", {
     style: {
-      display: "flex", justifyContent: "space-between", alignItems: "baseline",
-      marginBottom: "6px", borderBottom: `1px solid ${C.border}`, paddingBottom: "4px",
+      display: "flex", flexWrap: "wrap", justifyContent: "space-between", alignItems: "center",
+      gap: "4px 12px", marginBottom: "6px", borderBottom: `1px solid ${C.border}`, paddingBottom: "4px",
     },
   },
-    el("span", { style: { fontSize: "17px", fontWeight: "bold", letterSpacing: "2px", color: C.green } }, "[ GORDNET ]"),
-    el("div", { style: { display: "flex", gap: "14px", alignItems: "baseline" } },
+    el("div", { style: { display: "flex", gap: "12px", alignItems: "baseline", minWidth: 0 } },
+      item(C.blue, `BN${node}${name ? " " + name : ""}`, { fontWeight: "bold", overflow: "hidden", textOverflow: "ellipsis" }),
+      item(C.yellow, `run ${getRunDuration(ns)}`),
       // The daemon stamps gordState every tick. Without this, a daemon that died
       // left its last GOAL and PIPELINE on screen under a clock that kept ticking,
       // and nothing said the bot had stopped.
       ...(daemonSilentMs() > UI.daemonStaleMs
-        ? [el("span", { style: { fontSize: "13px", fontWeight: "bold", color: C.red } },
-            `DAEMON DOWN ${Math.round(daemonSilentMs() / 1000)}s`)]
+        ? [item(C.red, `DAEMON DOWN ${Math.round(daemonSilentMs() / 1000)}s`, { fontWeight: "bold" })]
         : []),
-      el("span", { style: { fontSize: "13px", color: C.blue } }, `BN${node}${name ? " " + name : ""}`),
-      el("span", { style: { fontSize: "13px", color: C.yellow } }, `run ${getRunDuration(ns)}`),
+    ),
+    el("div", { style: { display: "flex", gap: "6px", alignItems: "center", marginLeft: "auto" } },
       ...TOGGLES.map(t => toggleButton(ns, C, t)),
-      el("span", { style: { fontSize: "13px", color: C.dim } }, new Date().toLocaleTimeString()),
+      item(C.dim, new Date().toLocaleTimeString(), { marginLeft: "6px" }),
     ),
   );
 }
@@ -341,11 +356,12 @@ function toggleButton(ns, C, t) {
     style: {
       cursor: "pointer",
       userSelect: "none",
-      fontSize: "12px",
+      fontSize: "11px",
       fontWeight: "bold",
       letterSpacing: "1px",
-      padding: "1px 8px",
+      padding: "1px 6px",
       borderRadius: "4px",
+      whiteSpace: "nowrap",
       color,
       background: color + "18",
       border: `1px solid ${color}55`,
@@ -361,7 +377,7 @@ function toggleButton(ns, C, t) {
  * @param {NS} ns
  */
 function tabBar(ns, C) {
-  return el("div", { style: { display: "flex", flexWrap: "wrap", gap: "4px", marginBottom: "8px" } },
+  return el("div", { style: { display: "flex", flexWrap: "wrap", gap: "4px", marginBottom: "5px" } },
     ...TABS.map(t => {
       const on = activeTab === t.id;
       return el("div", {
@@ -373,7 +389,7 @@ function tabBar(ns, C) {
           fontSize: "12px",
           fontWeight: "bold",
           letterSpacing: "1px",
-          padding: "3px 12px",
+          padding: "2px 10px",
           borderRadius: "4px 4px 0 0",
           color: on ? C.green : C.dim,
           background: on ? C.green + "18" : "transparent",
@@ -462,7 +478,7 @@ function statsPanel(ns, C, d) {
  */
 function progressionCard(ns, C, d) {
   const fmt = (v) => (v == null ? "-" : ns.format.number(v));
-  const rowStyle = { display: "flex", justifyContent: "space-between", marginTop: "6px" };
+  const rowStyle = { display: "flex", justifyContent: "space-between", marginTop: "4px" };
   const firstRow = { ...rowStyle, marginTop: 0 };
   const badge = (color) => ({
     fontSize: "11px", padding: "1px 6px", borderRadius: "3px",
@@ -499,7 +515,7 @@ function progressionCard(ns, C, d) {
     ),
   ]);
 
-  return el("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px" } },
+  return el("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px" } },
     currentCard,
     overallCard,
   );
@@ -534,7 +550,7 @@ function buildOperationalCards(ns, C, data) {
 
   return [
     // ── Row 1: Player + Goal side-by-side ───────────────────────────────────
-    el("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px", marginBottom: "8px" } },
+    el("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px", marginBottom: "4px" } },
 
       // Player card
       card(C, "PLAYER", [
@@ -649,7 +665,7 @@ function buildOperationalCards(ns, C, data) {
     // ── Network + Contracts, side by side ───────────────────────────────────
     // NETWORK (programs over backdoors, split by a rule, no labels) on the left,
     // CONTRACTS on the right.
-    el("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px" } },
+    el("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px" } },
       card(C, "NETWORK", [
         // Port-opener programs on top, faction backdoors below, split by a thin rule
         // (no sub-labels, tight spacing). Colour carries status: programs green when
@@ -941,28 +957,44 @@ const DASH_WIDTH = UI.tail.width;
 const DASH_MIN_H = UI.tail.minHeight;
 const DASH_MAX_H = UI.tail.maxHeight;
 
+// +58 covers the tail title bar and the log container's own padding.
+const TAIL_CHROME_H = 58;
+/** The HUD's scale (fitScale) and its height at scale 1, as last measured. */
+let hudScale = 1;
+let naturalHeight = 0;
+
 /**
- * Size the tail window to fit the rendered HUD. Measures the actual DOM height
- * of our root element (id=DASH_ID) and resizes to match, so nothing gets clipped
- * and there's no empty space. Falls back to a sane default before the first
- * frame exists or if the DOM isn't reachable.
+ * Size the tail window to fit the rendered HUD, and - with ui.tail.fitScreen -
+ * pick the scale that keeps all of it on screen. Measures our root element
+ * (id=DASH_ID) from the previous frame: its offsetHeight is the layout height,
+ * which a transform leaves alone, so it is the height at scale 1 whatever scale
+ * is showing. Falls back to a sane default before the first frame exists or if
+ * the DOM isn't reachable.
  * @param {NS} ns
  */
 function fitTail(ns) {
-  let height = 820;
+  let natural = 0;
+  let screenH = 0;
   try {
     // Access document via a string key: referencing the `document` identifier
     // directly costs 25GB of script RAM in Bitburner; `globalThis["document"]`
-    // isn't flagged by the static RAM analyzer.
+    // isn't flagged by the static RAM analyzer. Same for the window's height.
     const doc = globalThis["document"];
-    const node = doc?.getElementById(DASH_ID);
-    if (node) {
-      // +58 covers the tail title bar and the log container's own padding.
-      height = Math.ceil(node.getBoundingClientRect().height) + 58;
-    }
+    natural = doc?.getElementById(DASH_ID)?.offsetHeight ?? 0;
+    screenH = Number(globalThis["innerHeight"]) || 0;
   } catch {}
+  if (!(natural > 0)) {
+    ns.ui.resizeTail(DASH_WIDTH, 820);
+    return;
+  }
+  const room = screenH > 0 ? screenH - UI.tail.y - TAIL_CHROME_H - UI.tail.screenMargin : 0;
+  hudScale = fitScale(natural, room, hudScale, UI.tail);
+  naturalHeight = natural;
+  let height = Math.ceil(natural * hudScale) + TAIL_CHROME_H;
+  // At minScale and still too tall: the window stops at the screen and scrolls.
+  if (room > 0) height = Math.min(height, room + TAIL_CHROME_H);
   height = Math.max(DASH_MIN_H, Math.min(DASH_MAX_H, height));
-  ns.ui.resizeTail(DASH_WIDTH, height);
+  ns.ui.resizeTail(Math.round(DASH_WIDTH * hudScale), height);
 }
 
 // ── Data helpers ─────────────────────────────────────────────────────────────
