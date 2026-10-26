@@ -87,6 +87,7 @@ import {
   maybeAutoTravelForReadyFaction,
   clearFactionWork,
   studyHacking,
+  createMissingProgram,
 } from "../lib/player-actions.js";
 import { getNextAugTarget, getMoneyHoardGoal, factionRepStillUseful } from "../lib/aug-targets.js";
 import { forNode } from "../lib/config.js";
@@ -339,13 +340,22 @@ function bankReputation(ns) {
   return null;
 }
 
-/** Study: hacking exp towards the world daemon's gate. @param {NS} ns */
+/**
+ * Study: hacking exp towards the world daemon's gate - after any port opener
+ * the treasury hasn't bought is written by hand (createMissingProgram): the
+ * daemon needs all five ports, and 8.1 studied at hacking 17,000 for a gate
+ * of 3,000 without SQLInject.exe.
+ * @param {NS} ns
+ */
 function study(ns) {
+  const program = createMissingProgram(ns);
+  if (program) return program;
   const need = worldDaemonLevel(ns);
+  const hacking = hackingLevel(ns);
   const note = studyHacking(ns);
   return {
     action: "Studying (idle)",
-    detail: `Hacking ${hackingLevel(ns)}${need ? `/${need} for ${FINAL_HOST}` : ""}${note}`,
+    detail: `Hacking ${hacking}${need && hacking < need ? `/${need} for ${FINAL_HOST}` : ""}${note}`,
   };
 }
 
