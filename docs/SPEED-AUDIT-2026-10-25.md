@@ -151,3 +151,25 @@ dark-net labyrinth runner. 692 tests pass; nothing has run in the game yet.
 
 RAM: the hacking-node daemons gain ~4GB (the invite hoard's requirement check), ~90.75GB;
 BN8's daemon +7GB (company work); helpers unchanged; `tools/exploits.js` still 1.6GB.
+
+## Follow-up, 2026-10-31: the first BN12 run
+
+Measured from the run history and the live autosave. BN12.1 took 15.4h; the override
+works (BN12.2 runs with SF12 active at 0, owned at 1).
+
+| Hour | What happened |
+| --- | --- |
+| 0-7.5 | Normal play until the corp's growth loop takes off: $8e13 at 4.5h, $1.6e63 at 7.5h |
+| 7.5-9.1 | Four more installs of 3-5 augs, with money no longer a limit |
+| 9.1-15.4 | No install: Daedalus's reputation ground to 2.5m for The Red Pill, with $1e100 in the corp |
+
+`corporation.bribe` was never used. It costs $1e9 a reputation point and needs a $100t
+valuation, not 150 favor, so The Red Pill's reputation is $2.5e15. Now `lib/corp-bribe.js`
+buys what `buyAugs` is short of (1% of funds a pass, public corps only), and
+`batchInstallHold` holds installs once money is solved, so everything goes in as one batch.
+Estimate, not yet measured: ~8h a run instead of 15.4h. Run history gains a `money-solved`
+event, so the next read can check it.
+
+The order changed too: `[12, 10]` where `[12, 50]` was, and `[12, 50]` just before BN10. A
+level costs a run (~8h) and saves roughly 5h over the ~1,000h left (an estimate: about 0.5%
+a level), so levels past the first few are for the achievement, not for speed.

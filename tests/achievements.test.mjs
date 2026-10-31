@@ -203,7 +203,7 @@ test("the shipped campaign: every step names a real node, every challenge exists
   const bn11 = at(11, [...OWNED.filter(([n]) => n !== 11), [8, 2], [11, 2]]);
   assert.deepEqual(campaignStep(bn11, CONFIG.campaign.order, new Set(["CHALLENGE_BN8"])), { node: 12, challenge: false, waiting: false });
   // Then BN12 again and again - each run entered at SF12 level 0, so the owned
-  // level comes from the save - until 50, then the BN13 challenge.
+  // level comes from the save - until 10, then the BN13 challenge.
   // The reset of a BN12 run: getResetInfo() has SF12 at its override (0, so absent).
   const bn12 = at(12, [...OWNED.filter(([n]) => n !== 11), [8, 2], [11, 3]], { sourceFileOverrides: new Map([[12, 0]]) });
   const savedAt = level => {
@@ -212,9 +212,9 @@ test("the shipped campaign: every step names a real node, every challenge exists
     return held;
   };
   const order = CONFIG.campaign.order;
-  assert.deepEqual(campaignStep(bn12, order, savedAt(0)), { node: 12, challenge: false, waiting: false }, "about to own 1 of 50");
-  assert.deepEqual(campaignStep(bn12, order, savedAt(37)), { node: 12, challenge: false, waiting: false });
-  assert.deepEqual(campaignStep(bn12, order, savedAt(49)), { node: 13, challenge: true, waiting: false });
+  assert.deepEqual(campaignStep(bn12, order, savedAt(0)), { node: 12, challenge: false, waiting: false }, "about to own 1 of 10");
+  assert.deepEqual(campaignStep(bn12, order, savedAt(8)), { node: 12, challenge: false, waiting: false });
+  assert.deepEqual(campaignStep(bn12, order, savedAt(9)), { node: 13, challenge: true, waiting: false });
   // The save not read in this run: wait, never guess (a guess of 0 loops forever).
   assert.deepEqual(campaignStep(bn12, order, new Set(["CHALLENGE_BN8"])), { node: 0, challenge: false, waiting: true });
   // Source-File 12 at 50 already proved by its achievement: on to BN13.
@@ -225,6 +225,9 @@ test("the shipped campaign: every step names a real node, every challenge exists
   assert.deepEqual(campaignStep(late, CONFIG.campaign.order, all), { node: 9, challenge: true, waiting: false });
   all.add("CHALLENGE_BN9"); all.add("CHALLENGE_BN7"); all.add("CHALLENGE_BN3"); all.add("CHALLENGE_BN1");
   assert.deepEqual(campaignStep(late, CONFIG.campaign.order, all), { node: 10, challenge: true, waiting: false });
+  // ...and the forty BN12 levels left over come back before BN10, not after it.
+  const lateAt10 = at(1, [[1, 3], [2, 3], [3, 3], [4, 3], [5, 3], [6, 3], [7, 3], [8, 3], [9, 3], [10, 3], [11, 3], [12, 10], [13, 3], [14, 3], [15, 3]]);
+  assert.deepEqual(campaignStep(lateAt10, CONFIG.campaign.order, all), { node: 12, challenge: false, waiting: false });
 });
 
 test("the plan covers THE_VOID with its tool, and the tool exists", () => {

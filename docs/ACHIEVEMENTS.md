@@ -130,10 +130,10 @@ when it finishes a node. Reordered 2026-10-25 for the shortest total time, from 
 | --- | --- | --- |
 | 1 | `[8, "challenge"]` | SF8.2: the trader shorts from then on, in every node. BN8 straight after BN8.1. |
 | 2 | `[11, 3]` | Each queued aug multiplies the next one's price by 1.9 x [1, .96, .94, .93] at SF11 0-3 (`AugmentationHelpers.ts`): 11.3 makes the tenth aug of a batch ~25% cheaper than 11.1 does, in every run after. |
-| 3 | `[12, 50]` | 49 BN12 runs, **each entered at Source-File 12 level 0** (below), so each costs what BN12.1 costs. Every level is a NeuroFlux level at the start of every later node: +1% on nearly every multiplier, x1.63 at 49. |
+| 3 | `[12, 10]` | Nine BN12 runs (reviewed 2026-10-31: a level costs a run and saves about 5h, so it never pays for itself; ten is a first helping, the other forty come back in step 6). Runs are **each entered at Source-File 12 level 0** (below), so each costs what BN12.1 costs. Every level is a NeuroFlux level at the start of every later node: +1% on nearly every multiplier, x1.63 at 49. |
 | 4 | `[13, "challenge"], [13, 3]`, `[2, ...]`, `[6, ...]` | Second (challenge) and third runs. SF13.2/13.3 grow Stanek's Gift (30 -> 36 -> 42 cells); SF2/SF6 add a few percent. |
 | 5 | `[8, 3]`, `[15, 3]`, `[14, "challenge"], [14, 3]` | Small gains: limit orders (unused), BN15's charisma bonuses; SF14.2/14.3 only unlock IPvGO cheats (unused) and raise the Go favor cap. BN14 runs are ~60h each and buy nothing for later runs. |
-| 6 | `[9, ...], [7, ...], [3, ...], [1, ...], [10, "challenge"]` | Challenge-only runs of nodes already at level 3: they award no Source-File, and the hacking-bound ones gain most from the NeuroFlux levels. BN10 ends by hand - the natural slot for `tools/debt.js`. |
+| 6 | `[9, ...], [7, ...], [3, ...], [1, ...], [12, 50], [10, "challenge"]` | Challenge-only runs of nodes already at level 3: they award no Source-File, and the hacking-bound ones gain most from the NeuroFlux levels. BN10 ends by hand - the natural slot for `tools/debt.js`. |
 
 **Why BN12 is entered at level 0.** BN12's multipliers are built from the Source-File 12
 level *in effect* plus one (`BitNode.tsx` `initBitNodeMultipliers`; BN12 is the only node
@@ -207,7 +207,7 @@ a Source-File level, which is why each sits before the node's level step.
 | BN13 | (marker only) | Stanek's Gift is never accepted. | |
 | BN14 | (marker only) | The IPvGO helper is not started, and exits if started by hand (it reads the run's config with `forReset`). Do not play the board through the API yourself either: one API move or cheat voids it for the whole node. | A second run, so SF14.1 does not depend on it. |
 | BN15 | - | Nothing here ever calls `dnet.heartbleed`; any BN15 finish earns it, the black-ops one included. | |
-| BN12 | SF12 overridden to 0 (every BN12 run) | `[12, 50]`: fifty runs, each at BN12.1's difficulty. | Early in the list: each level helps every later node. |
+| BN12 | SF12 overridden to 0 (every BN12 run) | `[12, 10]` early, `[12, 50]` near the end: fifty runs, each at BN12.1's difficulty. | The first ten help every later node; the rest are for the achievement. |
 
 *The marker.* BN13 and BN14 have no option to set - their challenge is something the player
 must not do - so every challenge entry also carries a Source-File override that overrides

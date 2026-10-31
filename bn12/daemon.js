@@ -27,7 +27,7 @@
 // How many levels to collect is the campaign's call ([12, n] in
 // `campaign.order`, lib/config.js): BN12 is the one step whose target is not
 // capped at 3. Without it on the campaign this node finishes once and moves on.
-// Never run live as of writing.
+// First run live 2026-10-30: 15.4h, the corporation's growth loop doing the work.
 
 import { forNode } from "../lib/config.js";
 import { runGangDaemon } from "../lib/gang-daemon.js";

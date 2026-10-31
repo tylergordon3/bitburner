@@ -89,7 +89,7 @@ test("REGRESSION: `kill-helpers all` covers every helper the daemon can place", 
   const P = CONFIG.paths;
   for (const key of ["dashboard", "stocks", "contracts", "econ", "hacknet", "manager", "sleeves", "sleeveShop",
     "gang", "grafting", "backdoor", "finishBn", "bladeburner", "bladeUpkeep",
-    "corpCreate", "corpExpand", "corpOffice", "corpMarket", "corpInvest", "corpSteady", "corpUpkeep"]) {
+    "corpCreate", "corpExpand", "corpOffice", "corpMarket", "corpInvest", "corpSteady", "corpUpkeep", "corpBribe"]) {
     assert.ok(scripts.includes(P[key]), `${key} (${P[key]}) missing`);
   }
   // ...and never the daemons, the driver, or the batcher's own worker legs.
