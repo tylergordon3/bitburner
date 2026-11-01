@@ -5,7 +5,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { bribePlan } from "../lib/corp-lib.js";
-import { batchInstallHold, installReason, moneySolved } from "../lib/daemon-lib.js";
+import { batchInstallHold, installReason, moneySolved, serverSpendCeiling } from "../lib/daemon-lib.js";
 import { CONFIG, forNode } from "../lib/config.js";
 
 const POLICY = CONFIG.corp.bribe;
@@ -70,6 +70,26 @@ test("batch hold: holds while buying, releases the batch once the factions are s
 test("batch hold: past Daedalus's aug gate, nothing resets the hacking level it needs", () => {
   assert.equal(batchInstallHold(hold({ installed: BATCH.enoughInstalled }), BATCH), true);
   assert.equal(batchInstallHold(hold({ daedalusJoined: true }), BATCH), true);
+});
+
+test("batch hold: past the aug gate it waits only for a hacking level within reach", () => {
+  const past = { installed: BATCH.enoughInstalled };
+  assert.equal(batchInstallHold(hold({ ...past, inviteEtaMs: BATCH.reachMs }), BATCH), true, "close enough");
+  assert.equal(batchInstallHold(hold({ ...past, inviteEtaMs: 0 }), BATCH), true, "there: the invite is coming");
+  assert.equal(batchInstallHold(hold({ ...past, inviteEtaMs: null }), BATCH), true, "not measured yet");
+  // Hours off (BN12: 3h at hacking 2336): the factions sold out, so install the lot...
+  assert.equal(batchInstallHold(hold({ ...past, inviteEtaMs: BATCH.reachMs + 1 }), BATCH), false);
+  // ...but not while buying is still going on, and Daedalus joined still holds.
+  assert.equal(batchInstallHold(hold({ ...past, inviteEtaMs: 3_600_000, sinceLastBuyMs: 1000 }), BATCH), true);
+  assert.equal(batchInstallHold(hold({ ...past, inviteEtaMs: 3_600_000, daedalusJoined: true }), BATCH), true);
+});
+
+test("server spending: the flat ceiling until cash outgrows it, so the fleet can reach the RAM cap", () => {
+  assert.equal(serverSpendCeiling(0), CONFIG.pserv.hardSpendCap);
+  assert.equal(serverSpendCeiling(1e11), CONFIG.pserv.hardSpendCap);
+  assert.equal(serverSpendCeiling(1e15), 1e15 * CONFIG.pserv.hardSpendCashFraction);
+  // BN12 level 1's 16TB -> 32TB upgrade ($1.12b), the step that froze the fleet.
+  assert.ok(serverSpendCeiling(1e79) > 1.12e9);
 });
 
 test("batch hold: off where it should be, and it cannot stall a node for ever", () => {

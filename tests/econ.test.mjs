@@ -51,7 +51,7 @@ function fakeNs({ args = [], money = 1e6, hacking = 1, ticks = 1, levelUpTo = nu
       getUpgradeHomeCoresCost: () => coreCost,
       upgradeHomeCores: () => { g.bought.push("home-core"); g.money -= coreCost; return true; },
     },
-    // The purchased-server fleet (lib/econ.js only spends once it is full).
+    // The purchased-server fleet (lib/econ.js spends once it is full, or on pocket change).
     cloud: {
       getServerLimit: () => fleet.limit,
       getRamLimit: () => fleet.maxRam,
@@ -207,6 +207,14 @@ test("econ.js: home RAM and cores only once the server fleet is full - every slo
   assert.deepEqual(await buys({ limit: 0, maxRam: 0, servers: {} }), ["home-ram", "home-core"]);
 });
 
+test("econ.js: with cash to burn home does not wait for the fleet", async () => {
+  // BN12's state: 16TB on every server, a 512TB cap, $1e79.
+  const fleet = { limit: 25, maxRam: 2 ** 19, servers: Object.fromEntries(Array.from({ length: 25 }, (_, i) => [`cloud-${i}`, 2 ** 14])) };
+  const { ns, g } = fakeNs({ args: [0, 12], money: 1e79, fleet, coreCost: 2e6 });
+  await run(econMain, ns);
+  assert.deepEqual(g.bought, ["home-ram", "home-core"]);
+});
+
 test("econ.js in BN8 (homeBeforeFleet): home first, out of the allowance the floor leaves", async () => {
   // 25 x 256GB against a 1PB cap: never "full" there - and an install deletes it.
   const fleet = { limit: 25, maxRam: 2 ** 20, servers: Object.fromEntries(Array.from({ length: 25 }, (_, i) => [`cloud-${i}`, 256])) };
@@ -235,6 +243,12 @@ test("homeUpgradeWanted / fleetFull: the rules on their own", () => {
   assert.equal(homeUpgradeWanted({ ...base, cost: 500 }), false, "over the cash fraction");
   assert.equal(homeUpgradeWanted({ ...base, reserve: 950 }), false, "eats the reserve");
   assert.equal(homeUpgradeWanted({ ...base, cost: Infinity }), false);
+  // Pocket change skips the fleet gate - but never the reserve, and the fraction is a bound.
+  const cheap = { ...base, full: false, cost: 5, cheapFraction: 0.01 };
+  assert.equal(homeUpgradeWanted(cheap), true);
+  assert.equal(homeUpgradeWanted({ ...cheap, cost: 10 }), false, "not under 1% of cash");
+  assert.equal(homeUpgradeWanted({ ...cheap, reserve: 999 }), false, "eats the reserve");
+  assert.equal(homeUpgradeWanted({ ...cheap, cost: Infinity, money: Infinity }), false);
   assert.equal(fleetFull({ limit: 2, maxRam: 8, rams: [8, 8] }, 2), true);
   assert.equal(fleetFull({ limit: 2, maxRam: 8, rams: [8] }, 1), false);
   assert.equal(fleetFull({ limit: 2, maxRam: 8, rams: [8, 4] }, 2), false);
