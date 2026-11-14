@@ -514,7 +514,9 @@ order: [
   [12, 10],             // then BitNode 12 until Source-File 12 is level 10
   [13, "challenge"],    // then BitNode 13 as its challenge run
   // ...
-  [12, 50],             // near the end, BitNode 12 again up to level 50
+  [8, 3],
+  [12, 50],             // after 8.3, BitNode 12 again up to level 50
+  [15, 3],
   // ...
 ],
 ```

@@ -225,7 +225,15 @@ test("the shipped campaign: every step names a real node, every challenge exists
   assert.deepEqual(campaignStep(late, CONFIG.campaign.order, all), { node: 9, challenge: true, waiting: false });
   all.add("CHALLENGE_BN9"); all.add("CHALLENGE_BN7"); all.add("CHALLENGE_BN3"); all.add("CHALLENGE_BN1");
   assert.deepEqual(campaignStep(late, CONFIG.campaign.order, all), { node: 10, challenge: true, waiting: false });
-  // ...and the forty BN12 levels left over come back before BN10, not after it.
+  // The forty BN12 levels left over come straight after 8.3 - before BN15 and
+  // BN14, which their multipliers then shorten.
+  // (The position of 2026-11-14: in BN8 going for 8.3, Source-File 12 at 10.)
+  const sfThen = /** @type {[number, number][]} */ ([[1, 3], [2, 3], [3, 3], [4, 3], [5, 3], [6, 3], [7, 3], [8, 2], [9, 3], [10, 3], [11, 3], [12, 10], [13, 3], [14, 1]]);
+  const after83 = at(8, sfThen);
+  const heldThen = /** @type {any} */ (new Set(["CHALLENGE_BN2", "CHALLENGE_BN6", "CHALLENGE_BN8", "CHALLENGE_BN13"]));
+  heldThen.ownedSF = new Map(sfThen);
+  assert.deepEqual(campaignStep(after83, CONFIG.campaign.order, heldThen), { node: 12, challenge: false, waiting: false });
+  // ...and are still picked up at the very end if somehow skipped.
   const lateAt10 = at(1, [[1, 3], [2, 3], [3, 3], [4, 3], [5, 3], [6, 3], [7, 3], [8, 3], [9, 3], [10, 3], [11, 3], [12, 10], [13, 3], [14, 3], [15, 3]]);
   assert.deepEqual(campaignStep(lateAt10, CONFIG.campaign.order, all), { node: 12, challenge: false, waiting: false });
 });
