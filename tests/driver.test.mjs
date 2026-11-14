@@ -137,6 +137,32 @@ test("the driver buys home RAM as far as money goes - except where the node says
   assert.ok(bn8.g.procs.some(p => p.script === "bn8/daemon.js"), "handed off to the daemon");
 });
 
+test("a daemon that fits on home only without the driver beside it is started by handoff.js, not retried forever", async () => {
+  // BN8 after the daemon grew: 117 + 8 headroom fits the 128GB tier, so the
+  // driver stops buying RAM there - but 117 + the driver's own 13 does not.
+  const ram = { ...RAM, "bn8/daemon.js": 117, [bare(P.handoff)]: 2.6 };
+  const tight = fakeGame({ node: 8, ram, upgrades: 5, ticks: 3 });
+  await runDriver(tight.ns);
+  assert.equal(tight.g.max.home, 128, "no extra tier bought with the trader's capital");
+  assert.deepEqual(tight.g.started.filter(s => s === bare(P.handoff)), [bare(P.handoff)], "handed to handoff.js once, then exited");
+  assert.ok(!tight.g.prints.some(p => p.includes("ERROR")), tight.g.prints.join("\n"));
+
+  // handoff.js itself: starts the daemon once the driver's RAM is back.
+  const { main: handoff } = await import("../early/handoff.js");
+  tight.g.procs = tight.g.procs.filter(p => p.script !== bare(P.driver));
+  let sleeps = 0;
+  await handoff({ ...tight.ns, args: ["/bn8/daemon.js", P.driver], sleep: async () => { sleeps++; } });
+  assert.ok(tight.g.procs.some(p => p.script === "bn8/daemon.js"), "daemon running");
+  assert.equal(sleeps, 1);
+
+  // A daemon the game cannot size (syntax error / missing import) is reported
+  // as that, and nothing is launched.
+  const broken = fakeGame({ node: 8, ram: { ...RAM, "bn8/daemon.js": 0 }, upgrades: 5, ticks: 2 });
+  await runDriver(broken.ns);
+  assert.equal(broken.g.prints.filter(p => p.includes("cannot size")).length, 1);
+  assert.ok(!broken.g.started.includes("bn8/daemon.js"));
+});
+
 test("a boot script with nowhere to go gets RAM held for it off-home, not only on a home that cannot fit it", async () => {
   // A fresh Bladeburner node: 32GB home (driver + manager leave ~7GB), the
   // rooted 16GB hosts already full of the botnet's legs.

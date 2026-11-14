@@ -66,6 +66,7 @@ function homeFreeRam(ns) {
  * @param {NS} ns
  */
 let _managerWarnedAt = 0;
+let _unsizedWarnedAt = 0;
 
 function ensureMoneyEngine(ns) {
   if (ns.fileExists(P.manager, HOME)) {
@@ -306,6 +307,7 @@ export async function main(ns) {
   // config there forfeits the challenge in the first second (accepting Stanek's
   // Gift in BN13, buying hacknet servers in BN9).
   CFG = forReset(reset);
+  _unsizedWarnedAt = 0;   // module scope outlives the process; a restart warns afresh
   // Registered nodes get their daemon path from config; anything else still
   // resolves by convention so a new bnX/ folder works without a config edit.
   let daemon = CFG.paths.daemon ?? `/bn${node}/daemon.js`;
@@ -361,7 +363,18 @@ export async function main(ns) {
     const needed = requiredHomeRam(ns, daemon);
     const haveDaemon = ns.fileExists(daemon, HOME);
 
-    if (haveDaemon && ns.getServerMaxRam(HOME) >= needed) {
+    const daemonRam = scriptRamSafe(ns, daemon);
+
+    if (haveDaemon && daemonRam <= 0) {
+      // A script the game cannot size is one it cannot compile (a syntax error,
+      // or an import that is not on home - a half-finished sync). `needed` is
+      // then just the headroom, and this used to report "failed to launch
+      // despite sufficient RAM" every tick for what is not a RAM problem.
+      if (Date.now() - _unsizedWarnedAt > 60_000) {
+        _unsizedWarnedAt = Date.now();
+        ns.tprint(`ERROR: the game cannot size ${daemon} - a syntax error or a missing import (is the sync complete?). 'mem ${daemon}' names it. Earning until it is fixed.`);
+      }
+    } else if (haveDaemon && ns.getServerMaxRam(HOME) >= needed) {
       stopMoneyEngine(ns);
       // The boot holds end with the boot: whatever the daemon's helpers need
       // kept free, the daemon asks for itself at the end of each of its ticks
@@ -374,7 +387,21 @@ export async function main(ns) {
         ns.tprint(`Home RAM ${ns.format.ram(ns.getServerMaxRam(HOME))} >= ${ns.format.ram(needed)} needed. Started ${daemon} (pid ${pid}).`);
         return;
       }
-      ns.tprint(`ERROR: failed to launch ${daemon} despite sufficient RAM - retrying.`);
+      // Home is big enough for the daemon and its headroom, but not for the
+      // daemon NEXT TO THIS SCRIPT (~13GB against 8GB of headroom) - the usual
+      // case on a home grown only until the daemon fits. Exit and let the
+      // 2.6GB early/handoff.js start it in the room this script leaves.
+      const free = homeFreeRam(ns);
+      const own = scriptRamSafe(ns, P.driver);
+      if (
+        free + own >= daemonRam + scriptRamSafe(ns, P.handoff) &&
+        ns.fileExists(P.handoff, HOME) &&
+        ns.run(P.handoff, 1, daemon, P.driver) !== 0
+      ) {
+        ns.tprint(`${daemon} (${ns.format.ram(daemonRam)}) does not fit beside this script (${ns.format.ram(free)} free) - exiting so ${P.handoff} can start it.`);
+        return;
+      }
+      ns.tprint(`ERROR: failed to launch ${daemon}: needs ${ns.format.ram(daemonRam)}, home has ${ns.format.ram(free)} free of ${ns.format.ram(ns.getServerMaxRam(HOME))} - retrying.`);
     }
 
     ns.print(
