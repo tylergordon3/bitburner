@@ -25,8 +25,11 @@ export async function main(ns) {
   const $ = n => `$${ns.format.number(n)}`;
 
   if (!c.hasCorporation()) {
+    // Per node (nodeCorp): BN12 founds at the bare cost and holds cash for it.
+    const seed = nodeCorp();
     ns.tprint("No corporation. Self-funding needs " +
-      `${$(CO.selfFundCost * CO.selfFundBuffer)} of personal money (${$(CO.selfFundCost)} cost x ${CO.selfFundBuffer} buffer).`);
+      `${$(seed.selfFundCost * seed.selfFundBuffer)} of personal money (${$(seed.selfFundCost)} cost x ${seed.selfFundBuffer} buffer)` +
+      `${seed.seedHoard?.enabled ? " - this node holds cash for it once income can fill it" : ""}.`);
     return;
   }
 
