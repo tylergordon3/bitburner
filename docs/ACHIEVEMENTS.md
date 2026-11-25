@@ -9,6 +9,14 @@ New to the game? Read [GUIDE.md](GUIDE.md) first.
 
 ## Where things stand
 
+> **2026-11-25: the goal is now the 98 Steam achievements, not all 108 in the game.** The
+> game marks ten achievements `NotInSteam` (`src/Achievements/Achievements.ts`, v3.0.1):
+> SF13.1, SF14.1, SF15.1, "More BitNodes, please!", the BN14 and BN15 challenges, both
+> IPvGO ones and both dark net ones. On the live save of that day 87 of the 98 were held.
+> The eleven left: the challenges of BN1, 3, 7, 9, 10 and 12, NeuroFlux 255, Hacking
+> 100,000, Intelligence 255, 100,000 unspent Bladeburner skill points and Massive debt.
+> `campaign.order` follows that goal; the rest of this page still describes all of them.
+
 As of the save of 2026-10-23, in **BN14.1** (about 60 hours in):
 
 - **72 of 109** achievements held. The 37 missing are all listed below, and the plan
@@ -130,10 +138,10 @@ when it finishes a node. Reordered 2026-10-25 for the shortest total time, from 
 | --- | --- | --- |
 | 1 | `[8, "challenge"]` | SF8.2: the trader shorts from then on, in every node. BN8 straight after BN8.1. |
 | 2 | `[11, 3]` | Each queued aug multiplies the next one's price by 1.9 x [1, .96, .94, .93] at SF11 0-3 (`AugmentationHelpers.ts`): 11.3 makes the tenth aug of a batch ~25% cheaper than 11.1 does, in every run after. |
-| 3 | `[12, 10]` | Nine BN12 runs (reviewed 2026-10-31: a level costs a run and saves about 5h, so it never pays for itself; ten is a first helping, the other forty come back in step 5). Runs are **each entered at Source-File 12 level 0** (below), so each costs what BN12.1 costs. Every level is a NeuroFlux level at the start of every later node: +1% on nearly every multiplier, x1.63 at 49. |
+| 3 | `[12, 10]` | Nine BN12 runs (reviewed 2026-10-31: a level costs a run and saves about 5h, so it never pays for itself; ten is a first helping, the rest come back in step 6). Runs are **each entered at Source-File 12 level 0** (below), so each costs what BN12.1 costs. Every level is a NeuroFlux level at the start of every later node: +1% on nearly every multiplier, x1.63 at 49. |
 | 4 | `[13, "challenge"], [13, 3]`, `[2, ...]`, `[6, ...]` | Second (challenge) and third runs. SF13.2/13.3 grow Stanek's Gift (30 -> 36 -> 42 cells); SF2/SF6 add a few percent. |
-| 5 | `[8, 3]`, `[12, 50]`, `[15, 3]`, `[14, "challenge"], [14, 3]` | Small gains: limit orders (unused), BN15's charisma bonuses; SF14.2/14.3 only unlock IPvGO cheats (unused) and raise the Go favor cap. BN14 runs are ~60h each and buy nothing for later runs. **`[12, 50]` moved here 2026-11-14** (it was just before BN10): the forty runs (~7.7h each, measured) are owed for the BN12 challenge whatever the order, so their cost is fixed, and here their x1.49 helps BN15 x3, BN14 x2 and the four challenge runs instead of BN10 alone. It also leaves ~300h to build a dark net player before BN15. |
-| 6 | `[9, ...], [7, ...], [3, ...], [1, ...], [10, "challenge"]` | Challenge-only runs of nodes already at level 3: they award no Source-File, and the hacking-bound ones gain most from the NeuroFlux levels. BN10 ends by hand - the natural slot for `tools/debt.js`. |
+| 5 | `[8, 3]` | Done 2026-11-16. **From 2026-11-25 the goal is the 98 Steam achievements** (see the top of this page), so `[15, 3]`, `[14, "challenge"]` and `[14, 3]` are out of the order: none of what they earn is on Steam. Put them back after step 6 for the in-game set. |
+| 6 | `[1, "challenge"], [3, ...], [9, ...], [7, ...]`, then `[12, 50]`, then `[10, "challenge"]` | Challenge-only runs of nodes already at level 3, easiest first: they award no Source-File. Then BN12 the rest of the way to 50 (27 on 2026-11-25; it ran straight after 8.3 from 11-14 to 11-25). The owner chose challenges before BN12 on 2026-11-25; BN12 first was estimated 25-50h quicker overall, because BN9 and BN7 need hacking 6000 at x0.5 and x0.35 and each BN12 level is +1% on the multipliers that get there. BN10 ends by hand - the natural slot for `tools/debt.js`. |
 
 **Why BN12 is entered at level 0.** BN12's multipliers are built from the Source-File 12
 level *in effect* plus one (`BitNode.tsx` `initBitNodeMultipliers`; BN12 is the only node
@@ -207,7 +215,7 @@ a Source-File level, which is why each sits before the node's level step.
 | BN13 | (marker only) | Stanek's Gift is never accepted. | |
 | BN14 | (marker only) | The IPvGO helper is not started, and exits if started by hand (it reads the run's config with `forReset`). Do not play the board through the API yourself either: one API move or cheat voids it for the whole node. | A second run, so SF14.1 does not depend on it. |
 | BN15 | - | Nothing here ever calls `dnet.heartbleed`; any BN15 finish earns it, the black-ops one included. | |
-| BN12 | SF12 overridden to 0 (every BN12 run) | `[12, 10]` early, `[12, 50]` after 8.3: fifty runs, each at BN12.1's difficulty. | The first ten help every later node; the other forty are owed for the achievement and help BN15, BN14 and the challenge runs. |
+| BN12 | SF12 overridden to 0 (every BN12 run) | `[12, 10]` early, `[12, 50]` after the challenge runs of 1, 3, 9 and 7: fifty runs, each at BN12.1's difficulty. | The first ten help every later node; the rest are owed for the achievement (27 done by 2026-11-25). |
 
 *The marker.* BN13 and BN14 have no option to set - their challenge is something the player
 must not do - so every challenge entry also carries a Source-File override that overrides

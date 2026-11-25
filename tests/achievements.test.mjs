@@ -219,21 +219,23 @@ test("the shipped campaign: every step names a real node, every challenge exists
   assert.deepEqual(campaignStep(bn12, order, new Set(["CHALLENGE_BN8"])), { node: 0, challenge: false, waiting: true });
   // Source-File 12 at 50 already proved by its achievement: on to BN13.
   assert.deepEqual(campaignStep(bn12, order, new Set(["CHALLENGE_BN8", "CHALLENGE_BN12"])), { node: 13, challenge: true, waiting: false });
-  // The end of the plan: the five challenge-only runs, BN10 last.
+  // The end of the plan: the five challenge-only runs, easiest first, BN10 last.
   const late = at(14, [[1, 3], [2, 3], [3, 3], [4, 3], [5, 3], [6, 3], [7, 3], [8, 3], [9, 3], [10, 3], [11, 3], [12, 50], [13, 3], [14, 2], [15, 3]]);
   const all = new Set(["CHALLENGE_BN2", "CHALLENGE_BN6", "CHALLENGE_BN8", "CHALLENGE_BN13", "CHALLENGE_BN14"]);
-  assert.deepEqual(campaignStep(late, CONFIG.campaign.order, all), { node: 9, challenge: true, waiting: false });
+  assert.deepEqual(campaignStep(late, CONFIG.campaign.order, all), { node: 1, challenge: true, waiting: false });
   all.add("CHALLENGE_BN9"); all.add("CHALLENGE_BN7"); all.add("CHALLENGE_BN3"); all.add("CHALLENGE_BN1");
   assert.deepEqual(campaignStep(late, CONFIG.campaign.order, all), { node: 10, challenge: true, waiting: false });
-  // The forty BN12 levels left over come straight after 8.3 - before BN15 and
-  // BN14, which their multipliers then shorten.
-  // (The position of 2026-11-14: in BN8 going for 8.3, Source-File 12 at 10.)
-  const sfThen = /** @type {[number, number][]} */ ([[1, 3], [2, 3], [3, 3], [4, 3], [5, 3], [6, 3], [7, 3], [8, 2], [9, 3], [10, 3], [11, 3], [12, 10], [13, 3], [14, 1]]);
-  const after83 = at(8, sfThen);
-  const heldThen = /** @type {any} */ (new Set(["CHALLENGE_BN2", "CHALLENGE_BN6", "CHALLENGE_BN8", "CHALLENGE_BN13"]));
-  heldThen.ownedSF = new Map(sfThen);
-  assert.deepEqual(campaignStep(after83, CONFIG.campaign.order, heldThen), { node: 12, challenge: false, waiting: false });
-  // ...and are still picked up at the very end if somehow skipped.
+  // The position of 2026-11-25: in a BN12 run (Source-File 12 overridden to 0)
+  // with 27 owned. The rest of the fifty wait behind the challenge runs, so the
+  // run in hand is the last BN12 for now and the BN1 challenge is next - not
+  // BN15 or BN14, which earn nothing on Steam and are out of the order.
+  const sfNow = /** @type {[number, number][]} */ ([[1, 3], [2, 3], [3, 3], [4, 3], [5, 3], [6, 3], [7, 3], [8, 3], [9, 3], [10, 3], [11, 3], [12, 27], [13, 3], [14, 1]]);
+  const inBn12 = at(12, sfNow.filter(([n]) => n !== 12), { sourceFileOverrides: new Map([[12, 0]]) });
+  const heldNow = /** @type {any} */ (new Set(["CHALLENGE_BN2", "CHALLENGE_BN6", "CHALLENGE_BN8", "CHALLENGE_BN13"]));
+  heldNow.ownedSF = new Map(sfNow);
+  assert.deepEqual(campaignStep(inBn12, CONFIG.campaign.order, heldNow), { node: 1, challenge: true, waiting: false });
+  assert.ok(!CONFIG.campaign.order.some(([n, t]) => n === 15 || (n === 14 && t !== 1)), "no BN15, no second BN14");
+  // ...and they come back before BN10, not after it.
   const lateAt10 = at(1, [[1, 3], [2, 3], [3, 3], [4, 3], [5, 3], [6, 3], [7, 3], [8, 3], [9, 3], [10, 3], [11, 3], [12, 10], [13, 3], [14, 3], [15, 3]]);
   assert.deepEqual(campaignStep(lateAt10, CONFIG.campaign.order, all), { node: 12, challenge: false, waiting: false });
 });
